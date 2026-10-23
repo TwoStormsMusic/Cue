@@ -35,11 +35,21 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     rig.clapPlugins.clear();
 
     struct PendingState {
-        ClapProcessor* plugin;
+        Processor* plugin;
         std::vector<uint8_t> data;
         std::string file;
+        bool vst3;
     };
     std::vector<PendingState> states;
+    auto readState = [&](const PluginSpec& ps, Processor* p, bool vst3) {
+        std::ifstream f(ps.stateFile, std::ios::binary);
+        if (!f) {
+            *error = "cannot read state file " + ps.stateFile;
+            return false;
+        }
+        states.push_back({p, std::vector<uint8_t>(std::istreambuf_iterator<char>(f), {}), ps.stateFile, vst3});
+        return true;
+    };
 
     for (const SceneSpec& ss : config.scenes) {
         std::vector<std::unique_ptr<Processor>> chain;
@@ -50,19 +60,23 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             std::string err;
             if (ps.kind == "builtin") {
                 p = makeBuiltin(ps, &err);
+            } else if (ps.kind == "vst3") {
+                auto vst = Vst3Processor::load(ps.path, ps.id, &err);
+                if (vst) {
+                    for (auto [id, value] : ps.params)
+                        vst->setParam(id, value);
+                    if (!ps.stateFile.empty() && !readState(ps, vst.get(), true))
+                        return false;
+                    rig.vst3Plugins.push_back(vst.get());
+                    p = std::move(vst);
+                }
             } else {
                 auto clap = ClapProcessor::load(ps.path, ps.id, &err);
                 if (clap) {
                     for (auto [id, value] : ps.params)
                         clap->setParam(id, value);
-                    if (!ps.stateFile.empty()) {
-                        std::ifstream f(ps.stateFile, std::ios::binary);
-                        if (!f) {
-                            *error = "cannot read state file " + ps.stateFile;
-                            return false;
-                        }
-                        states.push_back({clap.get(), std::vector<uint8_t>(std::istreambuf_iterator<char>(f), {}), ps.stateFile});
-                    }
+                    if (!ps.stateFile.empty() && !readState(ps, clap.get(), false))
+                        return false;
                     rig.clapPlugins.push_back(clap.get());
                     p = std::move(clap);
                 }
@@ -89,9 +103,12 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 
     // State loads after activation; CLAP allows it on the main thread.
-    for (auto& s : states)
-        if (!s.plugin->loadState(s.data))
+    for (auto& s : states) {
+        const bool ok = s.vst3 ? static_cast<Vst3Processor*>(s.plugin)->loadState(s.data, {})
+                               : static_cast<ClapProcessor*>(s.plugin)->loadState(s.data);
+        if (!ok)
             std::fprintf(stderr, "warning: %s did not accept state from %s\n", s.plugin->name().c_str(), s.file.c_str());
+    }
     return true;
 }
 

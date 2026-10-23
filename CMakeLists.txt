@@ -9,10 +9,39 @@ endif()
 
 option(STAGEHOST_BUILD_TESTS "Build the offline tests" ON)
 
+find_package(Threads REQUIRED)
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 
 add_library(clap_headers INTERFACE)
 target_include_directories(clap_headers INTERFACE third_party/clap/include)
+
+# VST3 interfaces and the SDK's hosting helpers (MIT).
+set(VST3_DIR third_party/vst3sdk)
+add_library(vst3_hosting STATIC
+  ${VST3_DIR}/pluginterfaces/base/coreiids.cpp
+  ${VST3_DIR}/pluginterfaces/base/funknown.cpp
+  ${VST3_DIR}/pluginterfaces/base/ustring.cpp
+  ${VST3_DIR}/public.sdk/source/common/commonstringconvert.cpp
+  ${VST3_DIR}/public.sdk/source/common/memorystream.cpp
+  ${VST3_DIR}/public.sdk/source/common/threadchecker_linux.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/connectionproxy.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/eventlist.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/hostclasses.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/module.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/module_linux.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/parameterchanges.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/plugprovider.cpp
+  ${VST3_DIR}/public.sdk/source/vst/hosting/processdata.cpp
+  ${VST3_DIR}/public.sdk/source/vst/utility/stringconvert.cpp
+  ${VST3_DIR}/public.sdk/source/vst/vstinitiids.cpp
+)
+target_include_directories(vst3_hosting PUBLIC ${VST3_DIR})
+target_compile_definitions(vst3_hosting PUBLIC RELEASE=1)
+target_compile_options(vst3_hosting PRIVATE -w)
+set_target_properties(vst3_hosting PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(vst3_hosting PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 
 add_library(stagehost_core STATIC
   src/core/engine.cpp
@@ -22,12 +51,12 @@ target_include_directories(stagehost_core PUBLIC src)
 
 add_library(stagehost_host STATIC
   src/host/clap_processor.cpp
+  src/host/vst3_processor.cpp
 )
-target_link_libraries(stagehost_host PUBLIC stagehost_core clap_headers ${CMAKE_DL_LIBS})
+target_link_libraries(stagehost_host PUBLIC stagehost_core clap_headers vst3_hosting ${CMAKE_DL_LIBS})
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
-find_package(Threads REQUIRED)
 
 add_executable(stagehost
   src/app/main.cpp
@@ -39,6 +68,8 @@ add_executable(stagehost
   src/midi/alsa_midi.cpp
 )
 target_link_libraries(stagehost PRIVATE stagehost_host PkgConfig::ALSA Threads::Threads)
+# Self-contained C++ runtime, so the binary runs on any distribution with glibc 2.38 or newer.
+target_link_options(stagehost PRIVATE -static-libstdc++ -static-libgcc)
 
 # Test plug-ins: one .clap file with gain, delay, burn and crash plug-ins.
 add_library(stagehost_test_plugins MODULE plugins/test/test_plugins.cpp)
@@ -46,12 +77,29 @@ target_link_libraries(stagehost_test_plugins PRIVATE clap_headers)
 set_target_properties(stagehost_test_plugins PROPERTIES PREFIX "" SUFFIX ".clap"
   OUTPUT_NAME "Stagehost Test Plugins" CXX_VISIBILITY_PRESET hidden)
 
+# Test VST3: a bundle with the shared object at Contents/x86_64-linux.
+set(TEST_VST3_BUNDLE "${CMAKE_BINARY_DIR}/Stagehost Test.vst3")
+add_library(stagehost_test_vst3 MODULE plugins/test/test_vst3.cpp)
+target_include_directories(stagehost_test_vst3 PRIVATE ${VST3_DIR})
+target_compile_definitions(stagehost_test_vst3 PRIVATE RELEASE=1)
+target_compile_options(stagehost_test_vst3 PRIVATE -Wno-unused-function)
+set_target_properties(stagehost_test_vst3 PROPERTIES PREFIX "" SUFFIX ".so" OUTPUT_NAME "Stagehost Test"
+  LIBRARY_OUTPUT_DIRECTORY "${TEST_VST3_BUNDLE}/Contents/x86_64-linux" CXX_VISIBILITY_PRESET hidden)
+# The interfaces' IIDs are defined in funknown/coreiids sources the plug-in needs too.
+target_sources(stagehost_test_vst3 PRIVATE
+  ${VST3_DIR}/pluginterfaces/base/coreiids.cpp
+  ${VST3_DIR}/pluginterfaces/base/funknown.cpp
+  ${VST3_DIR}/public.sdk/source/vst/vstinitiids.cpp)
+
 if(STAGEHOST_BUILD_TESTS)
   enable_testing()
-  add_executable(stagehost_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp)
-  target_link_libraries(stagehost_tests PRIVATE stagehost_host)
+  add_executable(stagehost_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp src/app/config.cpp)
+  target_link_libraries(stagehost_tests PRIVATE stagehost_host PkgConfig::ALSA)
   target_compile_definitions(stagehost_tests PRIVATE
-    STAGEHOST_TEST_CLAP="$<TARGET_FILE:stagehost_test_plugins>")
-  add_dependencies(stagehost_tests stagehost_test_plugins)
+    STAGEHOST_TEST_CLAP="$<TARGET_FILE:stagehost_test_plugins>"
+    STAGEHOST_TEST_VST3="${TEST_VST3_BUNDLE}"
+    STAGEHOST_TEST_VST3_SO="$<TARGET_FILE:stagehost_test_vst3>")
+  add_dependencies(stagehost_tests stagehost_test_plugins stagehost_test_vst3)
+  target_link_options(stagehost_tests PRIVATE -static-libstdc++ -static-libgcc)
   add_test(NAME stagehost_tests COMMAND stagehost_tests)
 endif()

@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -16,7 +17,8 @@ using namespace sh;
 
 namespace {
 
-const char* kTestClap = STAGEHOST_TEST_CLAP;
+// The packaged test run points these at the bundled plug-ins.
+const char* kTestClap = std::getenv("STAGEHOST_TEST_CLAP") ? std::getenv("STAGEHOST_TEST_CLAP") : STAGEHOST_TEST_CLAP;
 constexpr uint32_t kBlock = 64;
 
 long stat(const char* name) {

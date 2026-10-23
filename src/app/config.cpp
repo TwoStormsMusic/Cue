@@ -51,7 +51,7 @@ bool parsePlugin(const std::string& value, PluginSpec& spec, std::string* error)
     }
     spec.kind = lower(trim(value.substr(0, colon)));
     const std::string rest = trim(value.substr(colon + 1));
-    if (spec.kind == "clap") {
+    if (spec.kind == "clap" || spec.kind == "vst3") {
         const auto hash = rest.rfind('#');
         spec.path = expandPath(trim(hash == std::string::npos ? rest : rest.substr(0, hash)));
         if (hash != std::string::npos)
@@ -68,10 +68,6 @@ bool parsePlugin(const std::string& value, PluginSpec& spec, std::string* error)
             return false;
         }
         return true;
-    }
-    if (spec.kind == "vst3") {
-        *error = "VST3 hosting is the next step and not in this build yet";
-        return false;
     }
     *error = "unknown plug-in kind '" + spec.kind + "'";
     return false;
@@ -211,6 +207,16 @@ bool loadConfig(const std::string& path, Config& config, std::string* error) {
     }
     if (config.midi.out.empty() && config.midi.in != "any")
         config.midi.out = config.midi.in;
+    // Relative plug-in and state paths are relative to the config file.
+    const auto slash = path.rfind('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    for (auto& s : config.scenes)
+        for (auto& p : s.chain) {
+            if (!p.path.empty() && p.path[0] != '/')
+                p.path = dir + "/" + p.path;
+            if (!p.stateFile.empty() && p.stateFile[0] != '/')
+                p.stateFile = dir + "/" + p.stateFile;
+        }
     return true;
 }
 

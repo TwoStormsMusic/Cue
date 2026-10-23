@@ -3,6 +3,7 @@
 #include "config.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
+#include "host/vst3_processor.h"
 
 #include <memory>
 #include <string>
@@ -15,6 +16,15 @@ namespace sh {
 struct Rig {
     std::unique_ptr<Engine> engine;
     std::vector<ClapProcessor*> clapPlugins; // owned by the engine's scenes
+    std::vector<Vst3Processor*> vst3Plugins;
+
+    // Main thread, every few milliseconds: plug-in callbacks and controller updates.
+    void pumpMainThread() {
+        for (auto* p : clapPlugins)
+            p->pumpMainThread();
+        for (auto* p : vst3Plugins)
+            p->pumpMainThread();
+    }
 };
 
 std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* error);

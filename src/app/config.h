@@ -11,9 +11,9 @@
 namespace sh {
 
 struct PluginSpec {
-    std::string kind;              // "clap" or "builtin"
-    std::string path;              // clap: the .clap file
-    std::string id;                // clap: plug-in id inside the file, empty = first
+    std::string kind;              // "clap", "vst3" or "builtin"
+    std::string path;              // the .clap file or .vst3 bundle
+    std::string id;                // CLAP id, or VST3 effect name, inside it; empty = first
     std::vector<std::string> args; // builtin: name then numbers
     std::vector<std::pair<uint32_t, double>> params;
     std::string stateFile;         // raw plug-in state to load after activation

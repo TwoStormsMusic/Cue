@@ -4,7 +4,7 @@
 //   stagehost bench <config> [opts]    offline: measure CPU per scene and render a WAV
 //   stagehost doctor [--device M2]     check real-time settings
 //   stagehost devices                  list sound cards and MIDI ports
-//   stagehost scan <file.clap>         list the plug-ins in a CLAP file
+//   stagehost scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
 //   stagehost midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   stagehost fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
@@ -15,6 +15,7 @@
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
+#include "host/vst3_processor.h"
 #include "midi/alsa_midi.h"
 #include "midi/eurekaprom.h"
 
@@ -263,8 +264,7 @@ int cmdRun(const std::string& path) {
 
     while (!g_quit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        for (ClapProcessor* p : rig.clapPlugins)
-            p->pumpMainThread();
+        rig.pumpMainThread();
         EngineEvent ev;
         while (engine.nextEvent(ev))
             controller.onEvent(ev);
@@ -350,7 +350,7 @@ void writeWav(const std::string& path, const std::vector<float>& a, const std::v
     }
 }
 
-int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath) {
+int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm) {
     Config config;
     if (!load(path, config))
         return 2;
@@ -363,11 +363,14 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     Engine& engine = *rig.engine;
     const uint32_t frames = config.audio.period;
     const double periodUs = 1e6 * frames / config.audio.rate;
+    if (!warm.empty())
+        config.warm = warm;
 
     // Measure under the same conditions as live: real-time priority on the
     // audio CPU, if allowed.
     double worstUs = 0;
-    std::vector<double> blockUs;
+    std::vector<double> aloneUs, blockUs;
+    uint64_t othersProcessed = 0;
     std::vector<float> wav1, wav2;
     bool realtime = false, pinned = false;
     std::thread worker([&] {
@@ -385,26 +388,58 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
         BassInput input{static_cast<double>(config.audio.rate)};
         std::vector<float> in(frames), o1(frames), o2(frames);
         float* outs[2] = {o1.data(), o2.data()};
-        const size_t blocksPerSwitch = static_cast<size_t>(switchSeconds * config.audio.rate / frames);
+        const size_t blocksPerSwitch = std::max<size_t>(1, static_cast<size_t>(switchSeconds * config.audio.rate / frames));
         const size_t total = static_cast<size_t>(totalSeconds * config.audio.rate / frames);
-        engine.switchTo(0);
-        int next = 1;
-        for (size_t b = 0; b < total && !g_quit; ++b) {
-            if (b > 0 && b % blocksPerSwitch == 0 && engine.numScenes() > 1) {
-                engine.switchTo(next);
-                next = (next + 1) % static_cast<int>(engine.numScenes());
+        // Phase 1: scene 1 alone, nothing warm, to show what one scene costs
+        // with every other scene loaded but idle.
+        const size_t aloneBlocks = std::min(total, static_cast<size_t>(3.0 * config.audio.rate / frames));
+        // Paced like live audio: one block per period. Unpaced, a real-time
+        // thread that never sleeps is throttled by the kernel (sched_rt_runtime_us),
+        // which shows up as false 50 ms stalls.
+        timespec deadline{};
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        const long periodNs = static_cast<long>(1e9 * frames / config.audio.rate);
+        auto runBlock = [&](std::vector<double>& times) {
+            if (paced) {
+                deadline.tv_nsec += periodNs;
+                while (deadline.tv_nsec >= 1000000000L) {
+                    deadline.tv_nsec -= 1000000000L;
+                    deadline.tv_sec++;
+                }
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
             }
             for (auto& v : in)
                 v = input();
             const auto t0 = Clock::now();
             engine.process(in.data(), outs, frames);
             const double us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
-            blockUs.push_back(us);
+            times.push_back(us);
             worstUs = std::max(worstUs, us);
             if (!wavPath.empty()) {
                 wav1.insert(wav1.end(), o1.begin(), o1.end());
                 wav2.insert(wav2.end(), o2.begin(), o2.end());
             }
+        };
+        engine.switchTo(0);
+        for (size_t b = 0; b < aloneBlocks && !g_quit; ++b) {
+            runBlock(aloneUs);
+            EngineEvent ev;
+            while (engine.nextEvent(ev)) {
+            }
+        }
+        for (size_t i = 0; i < engine.numScenes(); ++i)
+            othersProcessed += i == 0 ? 0 : engine.stats(i).processBlocks.load();
+
+        // Phase 2: switch through every scene, with the warm setting from the config.
+        if (config.warm == "next" && engine.numScenes() > 1)
+            engine.setWarm(1);
+        int next = 1;
+        for (size_t b = 0; b + aloneBlocks < total && !g_quit; ++b) {
+            if (b % blocksPerSwitch == 0 && engine.numScenes() > 1) {
+                engine.switchTo(next);
+                next = (next + 1) % static_cast<int>(engine.numScenes());
+            }
+            runBlock(blockUs);
             // Events are drained on this thread here; live, the main thread does it.
             EngineEvent ev;
             while (engine.nextEvent(ev))
@@ -414,16 +449,24 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     });
     worker.join();
 
-    std::vector<double> sorted = blockUs;
-    std::sort(sorted.begin(), sorted.end());
-    auto pct = [&](double p) { return sorted.empty() ? 0.0 : sorted[std::min(sorted.size() - 1, static_cast<size_t>(p * sorted.size()))]; };
-    std::printf("\nbench: %zu blocks of %u frames (budget %.0f us), switching every %.1f s, %s, %s\n", blockUs.size(), frames, periodUs,
-                switchSeconds, realtime ? "real-time" : "not real-time", pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
-    std::printf("block time: median %.0f us (%.0f%%), 99%% %.0f us (%.0f%%), 99.9%% %.0f us (%.0f%%), worst %.0f us (%.0f%%)\n", pct(0.5),
-                100 * pct(0.5) / periodUs, pct(0.99), 100 * pct(0.99) / periodUs, pct(0.999), 100 * pct(0.999) / periodUs, worstUs,
-                100 * worstUs / periodUs);
+    auto stats = [&](std::vector<double> v, const char* what) {
+        if (v.empty())
+            return;
+        std::sort(v.begin(), v.end());
+        auto pct = [&](double p) { return v[std::min(v.size() - 1, static_cast<size_t>(p * v.size()))]; };
+        std::printf("%-34s median %5.0f us (%3.0f%%)  99%% %5.0f us (%3.0f%%)  99.9%% %5.0f us (%3.0f%%)  worst %5.0f us (%3.0f%%)\n", what,
+                    pct(0.5), 100 * pct(0.5) / periodUs, pct(0.99), 100 * pct(0.99) / periodUs, pct(0.999), 100 * pct(0.999) / periodUs,
+                    v.back(), 100 * v.back() / periodUs);
+    };
+    std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s\n", frames, periodUs, realtime ? "real-time" : "not real-time",
+                pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
+    stats(aloneUs, ("scene 1 alone, " + std::to_string(engine.numScenes() - 1) + " others idle:").c_str());
+    std::printf("%-34s %llu blocks processed by the idle scenes (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
+    char what[96];
+    std::snprintf(what, sizeof what, "switching every %.1f s, warm %s:", switchSeconds, config.warm.c_str());
+    stats(blockUs, what);
+    const uint64_t totalBlocks = aloneUs.size() + blockUs.size();
     std::printf("\n%-24s %10s %12s %12s %10s\n", "scene", "blocks", "avg us/blk", "worst us", "share");
-    uint64_t totalBlocks = blockUs.size();
     for (size_t i = 0; i < engine.numScenes(); ++i) {
         SceneStats& st = engine.stats(i);
         const uint64_t blocks = st.processBlocks.load();
@@ -467,6 +510,16 @@ int cmdDevices() {
 
 int cmdScan(const std::string& path) {
     std::string err;
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0) {
+        auto list = scanVst3(path, &err);
+        if (list.empty()) {
+            std::fprintf(stderr, "%s: %s\n", path.c_str(), err.empty() ? "no audio effects" : err.c_str());
+            return 1;
+        }
+        for (const auto& p : list)
+            std::printf("%s#%s\n    by %s, version %s, %s\n", p.path.c_str(), p.name.c_str(), p.vendor.c_str(), p.version.c_str(), p.category.c_str());
+        return 0;
+    }
     auto list = scanClapFile(path, &err);
     if (list.empty()) {
         std::fprintf(stderr, "%s: %s\n", path.c_str(), err.empty() ? "no plug-ins" : err.c_str());
@@ -532,10 +585,10 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  stagehost run <config.ini>\n"
-                 "  stagehost bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav]\n"
+                 "  stagehost bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
                  "  stagehost doctor [--device NAME] [--priority N]\n"
                  "  stagehost devices\n"
-                 "  stagehost scan <file.clap>\n"
+                 "  stagehost scan <file.clap|bundle.vst3>\n"
                  "  stagehost midi-monitor [port-match]\n"
                  "  stagehost fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -556,7 +609,8 @@ int main(int argc, char** argv) {
     if (cmd == "run" && argc >= 3)
         return cmdRun(argv[2]);
     if (cmd == "bench" && argc >= 3)
-        return cmdBench(argv[2], std::stod(opt("--switch-every", "2")), std::stod(opt("--seconds", "30")), opt("--wav", ""));
+        return cmdBench(argv[2], std::stod(opt("--switch-every", "2")), std::stod(opt("--seconds", "30")), opt("--wav", ""),
+                        opt("--fast", "no") == "no", opt("--warm", ""));
     if (cmd == "doctor") {
         DoctorOptions o;
         o.deviceMatch = opt("--device", "M2");
