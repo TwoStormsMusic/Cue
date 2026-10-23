@@ -85,6 +85,11 @@ void Scene::resetTails(uint32_t minTail, uint32_t fadeFrames) {
     }
 }
 
+void Scene::flushIdle() {
+    for (auto& p : chain_)
+        p->flushIdle();
+}
+
 void Scene::writeTap(size_t tap, const float* const* chain, float* out, uint32_t frames) const {
     switch (taps_[tap].mix) {
     case OutputMix::Left:

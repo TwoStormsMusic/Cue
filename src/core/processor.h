@@ -36,6 +36,11 @@ public:
     // in and out each hold kChainChannels channel pointers. They never alias.
     virtual void process(const float* const* in, float* const* out, uint32_t frames) = 0;
 
+    // Called on the audio thread, between processing, for processors in idle
+    // scenes, so queued parameter changes still reach a plug-in that is not
+    // being processed. Must be cheap when there is nothing to do.
+    virtual void flushIdle() {}
+
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.
     virtual uint32_t tailSamples() const { return 0; }

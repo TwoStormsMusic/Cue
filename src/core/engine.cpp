@@ -249,10 +249,18 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         std::memset(outs[o], 0, frames * sizeof(float));
 
+    // Idle scenes still receive parameter changes, every 5 ms.
+    const bool flushIdle = (idleFlushCounter_ += frames) >= ms(5.0f);
+    if (flushIdle)
+        idleFlushCounter_ = 0;
+
     for (size_t i = 0; i < scenes_.size(); ++i) {
         Slot& s = scenes_[i];
-        if (s.state == SceneState::Idle)
+        if (s.state == SceneState::Idle) {
+            if (flushIdle)
+                s.scene->flushIdle();
             continue;
+        }
         const auto t0 = std::chrono::steady_clock::now();
 
         // Input, with the scene's input gain.

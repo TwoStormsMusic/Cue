@@ -49,6 +49,8 @@ public:
     // faded in over fadeFrames: a delay line that starts on an abrupt note
     // repeats that abrupt start as a click one delay time later.
     void resetTails(uint32_t minTail, uint32_t fadeFrames);
+    // For idle scenes: delivers queued parameter changes without processing.
+    void flushIdle();
     // in: frames mono samples. outs: numOutputs() buffers, each overwritten.
     void process(const float* in, float* const* outs, uint32_t frames);
 

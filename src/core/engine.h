@@ -129,6 +129,7 @@ private:
     std::vector<float> gainScratch_;
     std::vector<float> sceneOutStorage_;
     std::vector<float*> sceneOuts_;
+    uint32_t idleFlushCounter_ = 0;
 };
 
 } // namespace sh
