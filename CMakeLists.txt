@@ -25,6 +25,21 @@ add_library(stagehost_host STATIC
 )
 target_link_libraries(stagehost_host PUBLIC stagehost_core clap_headers ${CMAKE_DL_LIBS})
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
+find_package(Threads REQUIRED)
+
+add_executable(stagehost
+  src/app/main.cpp
+  src/app/build.cpp
+  src/app/config.cpp
+  src/app/cpu.cpp
+  src/app/doctor.cpp
+  src/audio/alsa_backend.cpp
+  src/midi/alsa_midi.cpp
+)
+target_link_libraries(stagehost PRIVATE stagehost_host PkgConfig::ALSA Threads::Threads)
+
 # Test plug-ins: one .clap file with gain, delay, burn and crash plug-ins.
 add_library(stagehost_test_plugins MODULE plugins/test/test_plugins.cpp)
 target_link_libraries(stagehost_test_plugins PRIVATE clap_headers)
