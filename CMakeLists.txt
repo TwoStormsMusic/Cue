@@ -45,7 +45,7 @@ target_link_libraries(vst3_hosting PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 
 add_library(cue_core STATIC
   src/core/engine.cpp
-  src/core/scene.cpp
+  src/core/chain.cpp
 )
 target_include_directories(cue_core PUBLIC src)
 

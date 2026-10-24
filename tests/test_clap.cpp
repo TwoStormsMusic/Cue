@@ -37,9 +37,9 @@ std::unique_ptr<ClapProcessor> load(const char* id) {
     return p;
 }
 
-std::unique_ptr<Scene> sceneOf(std::vector<std::unique_ptr<Processor>> chain) {
+std::unique_ptr<Chain> chainOf(std::vector<std::unique_ptr<Processor>> chain) {
     const size_t n = chain.size();
-    return std::make_unique<Scene>("clap", std::move(chain), std::vector<OutputTap>{{n, OutputMix::Sum}, {n, OutputMix::Sum}});
+    return std::make_unique<Chain>("clap", std::move(chain), std::vector<OutputTap>{{0, n, OutputMix::Sum}, {0, n, OutputMix::Sum}});
 }
 
 EngineSettings settings() {
@@ -77,7 +77,7 @@ TEST(clap_gain_runs_in_a_scene) {
     std::vector<std::unique_ptr<Processor>> chain;
     chain.push_back(load("cue.test.gain"));
     CHECK(chain.back() != nullptr);
-    e.addScene(sceneOf(std::move(chain)));
+    e.addChain(chainOf(std::move(chain)));
     CHECK(e.activate());
     e.switchTo(0);
     CHECK(std::fabs(runConstant(e, 0.5f, 200) - 0.5f) < 1e-6f);
@@ -89,7 +89,7 @@ TEST(clap_param_change_reaches_the_plugin) {
     ClapProcessor* g = gain.get();
     std::vector<std::unique_ptr<Processor>> chain;
     chain.push_back(std::move(gain));
-    e.addScene(sceneOf(std::move(chain)));
+    e.addChain(chainOf(std::move(chain)));
     CHECK(e.activate());
     e.switchTo(0);
     runConstant(e, 0.5f, 100);
@@ -105,8 +105,8 @@ TEST(clap_idle_plugin_gets_params_without_processing) {
     std::vector<std::unique_ptr<Processor>> ca, cb;
     ca.push_back(std::move(gainA));
     cb.push_back(std::move(gainB));
-    e.addScene(sceneOf(std::move(ca)));
-    e.addScene(sceneOf(std::move(cb)));
+    e.addChain(chainOf(std::move(ca)));
+    e.addChain(chainOf(std::move(cb)));
     CHECK(e.activate());
     e.switchTo(0);
     runConstant(e, 0.5f, 100);
@@ -124,10 +124,10 @@ TEST(clap_delay_reports_tail_and_rings_out) {
     ca.push_back(load("cue.test.delay"));
     cb.push_back(load("cue.test.gain"));
     const uint32_t tail = ca.back()->tailSamples();
-    e.addScene(sceneOf(std::move(ca)));
-    e.addScene(sceneOf(std::move(cb)));
+    e.addChain(chainOf(std::move(ca)));
+    e.addChain(chainOf(std::move(cb)));
     CHECK(e.activate());
-    CHECK_MSG(e.scene(0).slot(0).tailSamples() > 48000, "tail %u", e.scene(0).slot(0).tailSamples());
+    CHECK_MSG(e.chain(0).slot(0).tailSamples() > 48000, "tail %u", e.chain(0).slot(0).tailSamples());
     (void)tail;
     e.switchTo(0);
     runConstant(e, 0.3f, 400);

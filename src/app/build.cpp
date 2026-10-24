@@ -90,8 +90,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             chain.push_back(std::move(p));
         }
         const size_t n = chain.size();
-        std::vector<OutputTap> taps{{std::min(ss.out1After, n), config.mix}, {std::min(ss.out2After, n), config.mix}};
-        rig.engine->addScene(std::make_unique<Scene>(ss.name, std::move(chain), std::move(taps)));
+        std::vector<OutputTap> taps{{0, std::min(ss.out1After, n), config.mix}, {0, std::min(ss.out2After, n), config.mix}};
+        rig.engine->addChain(std::make_unique<Chain>(ss.name, std::move(chain), std::move(taps)));
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -99,7 +99,7 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
         *error = "a plug-in failed to activate";
         return false;
     }
-    std::printf("activated %zu scenes in %.1f ms\n", rig.engine->numScenes(),
+    std::printf("activated %zu scenes in %.1f ms\n", rig.engine->numChains(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 
     // State loads after activation; CLAP allows it on the main thread.

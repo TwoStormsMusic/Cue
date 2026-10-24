@@ -80,25 +80,25 @@ public:
     }
 
     void step(int delta) {
-        const int n = static_cast<int>(engine_.numScenes());
+        const int n = static_cast<int>(engine_.numChains());
         const int cur = active_.load();
         engine_.switchTo(((cur < 0 ? 0 : cur) + delta + n) % n);
     }
 
     void onEvent(const EngineEvent& ev) {
-        if (ev.type != EngineEvent::Type::SceneActive)
+        if (ev.type != EngineEvent::Type::ChainActive)
             return;
-        const int previous = active_.exchange(ev.scene);
-        if (config_.warm == "next" && engine_.numScenes() > 1)
-            engine_.setWarm((ev.scene + 1) % static_cast<int>(engine_.numScenes()));
+        const int previous = active_.exchange(ev.chain);
+        if (config_.warm == "next" && engine_.numChains() > 1)
+            engine_.setWarm((ev.chain + 1) % static_cast<int>(engine_.numChains()));
         if (config_.midi.profile == "eurekaprom") {
             const uint8_t ch = config_.midi.channel;
             if (previous >= 0 && config_.scenes[previous].pedal >= 1 && config_.scenes[previous].pedal <= 10)
                 queue(eurekaprom::led(ch, config_.scenes[previous].pedal, false));
-            const int pedal = config_.scenes[ev.scene].pedal;
+            const int pedal = config_.scenes[ev.chain].pedal;
             if (pedal >= 1 && pedal <= 10)
                 queue(eurekaprom::led(ch, pedal, true));
-            queue(eurekaprom::displayNumber(ch, ev.scene + 1));
+            queue(eurekaprom::displayNumber(ch, ev.chain + 1));
         }
     }
 
@@ -139,14 +139,14 @@ struct SceneSample {
 std::string sceneStatus(Engine& engine, std::vector<SceneSample>& last, double periodUs) {
     std::string s;
     char buf[160];
-    for (size_t i = 0; i < engine.numScenes(); ++i) {
-        SceneStats& st = engine.stats(i);
+    for (size_t i = 0; i < engine.numChains(); ++i) {
+        ChainStats& st = engine.stats(i);
         const uint64_t ns = st.processNs.load(), blocks = st.processBlocks.load();
         const uint64_t dNs = ns - last[i].ns, dBlocks = blocks - last[i].blocks;
         last[i] = {ns, blocks};
         const double avgUs = dBlocks ? dNs / 1000.0 / dBlocks : 0.0;
         const double maxUs = st.maxBlockNs.exchange(0) / 1000.0;
-        const auto state = static_cast<SceneState>(st.state.load());
+        const auto state = static_cast<ChainState>(st.state.load());
         std::snprintf(buf, sizeof buf, "%s%zu:%s %.0f/%.0fus", s.empty() ? "" : "  ", i + 1, toString(state), avgUs, maxUs);
         s += buf;
     }
@@ -256,7 +256,7 @@ int cmdRun(const std::string& path) {
     std::printf("keys: 1-9 select scene, n/p next/previous, q quit\n");
 
     RawTerminal term;
-    std::vector<SceneSample> last(engine.numScenes());
+    std::vector<SceneSample> last(engine.numChains());
     uint64_t lastCycles = 0, lastNs = 0;
     auto nextStatus = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
@@ -427,24 +427,24 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             while (engine.nextEvent(ev)) {
             }
         }
-        for (size_t i = 0; i < engine.numScenes(); ++i)
+        for (size_t i = 0; i < engine.numChains(); ++i)
             othersProcessed += i == 0 ? 0 : engine.stats(i).processBlocks.load();
 
         // Phase 2: switch through every scene, with the warm setting from the config.
-        if (config.warm == "next" && engine.numScenes() > 1)
+        if (config.warm == "next" && engine.numChains() > 1)
             engine.setWarm(1);
         int next = 1;
         for (size_t b = 0; b + aloneBlocks < total && !g_quit; ++b) {
-            if (b % blocksPerSwitch == 0 && engine.numScenes() > 1) {
+            if (b % blocksPerSwitch == 0 && engine.numChains() > 1) {
                 engine.switchTo(next);
-                next = (next + 1) % static_cast<int>(engine.numScenes());
+                next = (next + 1) % static_cast<int>(engine.numChains());
             }
             runBlock(blockUs);
             // Events are drained on this thread here; live, the main thread does it.
             EngineEvent ev;
             while (engine.nextEvent(ev))
-                if (ev.type == EngineEvent::Type::SceneActive && config.warm == "next" && engine.numScenes() > 1)
-                    engine.setWarm((ev.scene + 1) % static_cast<int>(engine.numScenes()));
+                if (ev.type == EngineEvent::Type::ChainActive && config.warm == "next" && engine.numChains() > 1)
+                    engine.setWarm((ev.chain + 1) % static_cast<int>(engine.numChains()));
         }
     });
     worker.join();
@@ -460,15 +460,15 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     };
     std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s\n", frames, periodUs, realtime ? "real-time" : "not real-time",
                 pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
-    stats(aloneUs, ("scene 1 alone, " + std::to_string(engine.numScenes() - 1) + " others idle:").c_str());
+    stats(aloneUs, ("scene 1 alone, " + std::to_string(engine.numChains() - 1) + " others idle:").c_str());
     std::printf("%-34s %llu blocks processed by the idle scenes (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
     char what[96];
     std::snprintf(what, sizeof what, "switching every %.1f s, warm %s:", switchSeconds, config.warm.c_str());
     stats(blockUs, what);
     const uint64_t totalBlocks = aloneUs.size() + blockUs.size();
     std::printf("\n%-24s %10s %12s %12s %10s\n", "scene", "blocks", "avg us/blk", "worst us", "share");
-    for (size_t i = 0; i < engine.numScenes(); ++i) {
-        SceneStats& st = engine.stats(i);
+    for (size_t i = 0; i < engine.numChains(); ++i) {
+        ChainStats& st = engine.stats(i);
         const uint64_t blocks = st.processBlocks.load();
         std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%\n", config.scenes[i].name.c_str(), static_cast<unsigned long long>(blocks),
                     blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks);
