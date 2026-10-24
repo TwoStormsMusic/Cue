@@ -340,8 +340,11 @@ std::vector<ParamInfo> ClapProcessor::params() const {
         return out;
     for (uint32_t i = 0, n = paramsExt_->count(plugin_); i < n; ++i) {
         clap_param_info_t info{};
-        if (paramsExt_->get_info(plugin_, i, &info))
-            out.push_back({info.id, info.name, info.module, info.min_value, info.max_value, info.default_value});
+        if (!paramsExt_->get_info(plugin_, i, &info))
+            continue;
+        const bool stepped = info.flags & CLAP_PARAM_IS_STEPPED;
+        out.push_back({info.id, info.name, info.module, info.min_value, info.max_value, info.default_value,
+                       stepped ? static_cast<int>(info.max_value - info.min_value) : 0});
     }
     return out;
 }

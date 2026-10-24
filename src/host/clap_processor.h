@@ -20,12 +20,6 @@ struct ClapPluginInfo {
 // Lists the plug-ins inside one .clap file.
 std::vector<ClapPluginInfo> scanClapFile(const std::string& path, std::string* error = nullptr);
 
-struct ParamInfo {
-    uint32_t id;
-    std::string name, module;
-    double min, max, def;
-};
-
 // Marks the calling thread as the audio thread for CLAP's thread-check
 // extension. The thread that first loads a plug-in is the main thread.
 void markClapAudioThread();
@@ -45,7 +39,7 @@ public:
     // Main thread.
     bool activate(double sampleRate, uint32_t maxFrames) override;
     void deactivate() override;
-    std::vector<ParamInfo> params() const;
+    std::vector<ParamInfo> params() const override;
     bool saveState(std::vector<uint8_t>& out) const;
     bool loadState(const std::vector<uint8_t>& data);
     // Handles callbacks the plug-in asked for (request_callback, rescans).
@@ -53,7 +47,7 @@ public:
 
     // Any non-real-time thread: queued, delivered on the audio thread by the
     // next process() call, or by flushIdle() if the scene is idle.
-    bool setParam(uint32_t id, double value);
+    bool setParam(uint32_t id, double value) override;
 
     // Audio thread.
     void startProcessing() override;

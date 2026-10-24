@@ -26,8 +26,10 @@ std::vector<Vst3PluginInfo> scanVst3(const std::string& path, std::string* error
 // plug-in does. The prototype measures this per plug-in.
 class Vst3Processor : public Processor {
 public:
-    // name empty = the first audio effect in the module.
-    static std::unique_ptr<Vst3Processor> load(const std::string& path, const std::string& name, std::string* error);
+    // which: the effect's name or class ID (32 hex digits, braces allowed);
+    // empty = the first audio effect in the module. If nothing matches and
+    // the module holds a single effect, that one is loaded.
+    static std::unique_ptr<Vst3Processor> load(const std::string& path, const std::string& which, std::string* error);
     ~Vst3Processor() override;
 
     const std::string& name() const override { return name_; }
@@ -41,7 +43,8 @@ public:
     void pumpMainThread();
 
     // Any non-real-time thread. value is normalised 0..1, as VST3 parameters are.
-    bool setParam(uint32_t id, double normalized);
+    bool setParam(uint32_t id, double normalized) override;
+    std::vector<ParamInfo> params() const override;
 
     // Audio thread.
     void startProcessing() override;

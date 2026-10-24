@@ -1,10 +1,12 @@
 // cue: the live plug-in host prototype.
 //
 //   cue run <config>             play live: ALSA audio, FCB1010 switching
-//   cue bench <config> [opts]    offline: measure CPU per scene and render a WAV
+//   cue bench <config> [opts]    offline: measure CPU per chain and render a WAV
 //   cue doctor [--device M2]     check real-time settings
 //   cue devices                  list sound cards and MIDI ports
+//   cue check <config>           load everything, check the mappings, print the performance
 //   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
+//   cue params <file>[#id]       list a plug-in's parameters and their ids
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
@@ -12,6 +14,7 @@
 #include "app/config.h"
 #include "app/cpu.h"
 #include "app/doctor.h"
+#include "control/show.h"
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
@@ -46,88 +49,29 @@ namespace {
 std::atomic<bool> g_quit{false};
 void onSignal(int) { g_quit = true; }
 
-// ------------------------------------------------------------ controller
+// ------------------------------------------------------------ MIDI out
 
-// Turns MIDI into scene switches and engine events into LEDs. MIDI is read
-// and written on one thread; other threads queue outgoing messages.
-class Controller {
+// Messages for the controller (LEDs, display), queued by any thread and
+// sent by the MIDI thread.
+class MidiOutQueue {
 public:
-    Controller(Engine& engine, const Config& config) : engine_(engine), config_(config) {}
-
-    void attach(AlsaMidi* midi) { midi_ = midi; }
-
-    void onMidi(const MidiMessage& m) {
-        if (config_.midi.profile == "eurekaprom") {
-            const auto in = eurekaprom::decode(m);
-            if (in.kind == eurekaprom::Input::Kind::Press) {
-                if (in.pedal == eurekaprom::kUp)
-                    step(+1);
-                else if (in.pedal == eurekaprom::kDown)
-                    step(-1);
-                else
-                    for (size_t i = 0; i < config_.scenes.size(); ++i)
-                        if (config_.scenes[i].pedal == in.pedal)
-                            engine_.switchTo(static_cast<int>(i));
-                return;
-            }
-            if (in.kind != eurekaprom::Input::Kind::None)
-                return;
-        }
-        if (m.type() == 0xC0)
-            for (size_t i = 0; i < config_.scenes.size(); ++i)
-                if (config_.scenes[i].program == m.data1)
-                    engine_.switchTo(static_cast<int>(i));
+    void push(const MidiMessage& m) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.push_back(m);
     }
-
-    void step(int delta) {
-        const int n = static_cast<int>(engine_.numChains());
-        const int cur = active_.load();
-        engine_.switchTo(((cur < 0 ? 0 : cur) + delta + n) % n);
-    }
-
-    void onEvent(const EngineEvent& ev) {
-        if (ev.type != EngineEvent::Type::ChainActive)
-            return;
-        const int previous = active_.exchange(ev.chain);
-        if (config_.warm == "next" && engine_.numChains() > 1)
-            engine_.setWarm((ev.chain + 1) % static_cast<int>(engine_.numChains()));
-        if (config_.midi.profile == "eurekaprom") {
-            const uint8_t ch = config_.midi.channel;
-            if (previous >= 0 && config_.scenes[previous].pedal >= 1 && config_.scenes[previous].pedal <= 10)
-                queue(eurekaprom::led(ch, config_.scenes[previous].pedal, false));
-            const int pedal = config_.scenes[ev.chain].pedal;
-            if (pedal >= 1 && pedal <= 10)
-                queue(eurekaprom::led(ch, pedal, true));
-            queue(eurekaprom::displayNumber(ch, ev.chain + 1));
-        }
-    }
-
-    int active() const { return active_.load(); }
-
-    void queue(const MidiMessage& m) {
-        std::lock_guard<std::mutex> lock(outMutex_);
-        out_.push_back(m);
-    }
-
-    // MIDI thread.
-    void flushOut() {
-        std::vector<MidiMessage> pending;
+    void flush(AlsaMidi& midi) {
+        std::vector<MidiMessage> out;
         {
-            std::lock_guard<std::mutex> lock(outMutex_);
-            pending.swap(out_);
+            std::lock_guard<std::mutex> lock(mutex_);
+            out.swap(pending_);
         }
-        if (midi_)
-            for (const auto& m : pending)
-                midi_->send(m);
+        for (const auto& m : out)
+            midi.send(m);
     }
 
 private:
-    Engine& engine_;
-    const Config& config_;
-    AlsaMidi* midi_ = nullptr;
-    std::atomic<int> active_{-1};
-    std::mutex outMutex_;
-    std::vector<MidiMessage> out_;
+    std::mutex mutex_;
+    std::vector<MidiMessage> pending_;
 };
 
 // ------------------------------------------------------------ status
@@ -136,7 +80,8 @@ struct SceneSample {
     uint64_t ns = 0, blocks = 0;
 };
 
-std::string sceneStatus(Engine& engine, std::vector<SceneSample>& last, double periodUs) {
+// The chains that are running, with their CPU use since the last call.
+std::string chainStatus(Engine& engine, const Rig& rig, std::vector<SceneSample>& last) {
     std::string s;
     char buf[160];
     for (size_t i = 0; i < engine.numChains(); ++i) {
@@ -147,10 +92,11 @@ std::string sceneStatus(Engine& engine, std::vector<SceneSample>& last, double p
         const double avgUs = dBlocks ? dNs / 1000.0 / dBlocks : 0.0;
         const double maxUs = st.maxBlockNs.exchange(0) / 1000.0;
         const auto state = static_cast<ChainState>(st.state.load());
-        std::snprintf(buf, sizeof buf, "%s%zu:%s %.0f/%.0fus", s.empty() ? "" : "  ", i + 1, toString(state), avgUs, maxUs);
+        if (state == ChainState::Idle)
+            continue;
+        std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), avgUs, maxUs);
         s += buf;
     }
-    (void)periodUs;
     return s;
 }
 
@@ -217,7 +163,16 @@ int cmdRun(const std::string& path) {
     }
     std::printf("audio: %s\n", audio.describe().c_str());
 
-    Controller controller(engine, config);
+    MidiOutQueue midiOut;
+    RigOutput output(rig, [&](const MidiMessage& m) { midiOut.push(m); });
+    Show show(output);
+    if (!show.load(config, rig.showPlugins(), &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    for (const auto& w : show.warnings())
+        std::fprintf(stderr, "warning: %s\n", w.c_str());
+
     AlsaMidi midi;
     std::thread midiThread;
     std::atomic<bool> midiRun{true};
@@ -227,13 +182,14 @@ int cmdRun(const std::string& path) {
             const int outs = config.midi.out.empty() ? 0 : midi.connectOutputTo(config.midi.out);
             std::printf("midi: input from %d port(s) matching '%s', output to %d port(s) matching '%s', profile %s\n", ins,
                         config.midi.in.c_str(), outs, config.midi.out.c_str(), config.midi.profile.c_str());
-            controller.attach(&midi);
+            if (ins == 0)
+                std::fprintf(stderr, "warning: no MIDI input matches '%s' (cue devices lists the ports)\n", config.midi.in.c_str());
             midiThread = std::thread([&] {
                 MidiMessage m;
                 while (midiRun) {
                     if (midi.read(m, 5))
-                        controller.onMidi(m);
-                    controller.flushOut();
+                        show.onMidi(m);
+                    midiOut.flush(midi);
                 }
             });
         } else {
@@ -252,8 +208,8 @@ int cmdRun(const std::string& path) {
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
-    engine.switchTo(0);
-    std::printf("keys: 1-9 select scene, n/p next/previous, q quit\n");
+    show.start();
+    std::printf("keys: 1-9 select preset, n/p next/previous, q quit\n");
 
     RawTerminal term;
     std::vector<SceneSample> last(engine.numChains());
@@ -266,17 +222,19 @@ int cmdRun(const std::string& path) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         rig.pumpMainThread();
         EngineEvent ev;
-        while (engine.nextEvent(ev))
-            controller.onEvent(ev);
+        while (engine.nextEvent(ev)) {
+        }
         const int k = term.key();
-        if (k == 'q')
-            break;
-        if (k >= '1' && k <= '9')
-            engine.switchTo(k - '1');
-        if (k == 'n')
-            controller.step(+1);
-        if (k == 'p')
-            controller.step(-1);
+        if (k > 0 && !show.onKey(static_cast<char>(k))) {
+            if (k == 'q')
+                break;
+            if (k >= '1' && k <= '9')
+                show.selectPreset(k - '1');
+            if (k == 'n')
+                show.stepPreset(+1);
+            if (k == 'p')
+                show.stepPreset(-1);
+        }
 
         auto& st = const_cast<AlsaStats&>(audio.stats());
         if (st.failed) {
@@ -295,11 +253,9 @@ int cmdRun(const std::string& path) {
             lastCycles = cycles;
             lastNs = ns;
             const double maxUs = st.maxCycleNs.exchange(0) / 1000.0;
-            const int a = controller.active();
-            std::printf("%s[%s] dsp %3.0f%% (max %3.0f%%) xruns %llu | %s   %s",
-                        term.active ? "\r" : "", a >= 0 ? config.scenes[a].name.c_str() : "-", 100.0 * avgUs / periodUs,
-                        100.0 * maxUs / periodUs, static_cast<unsigned long long>(st.xruns.load()),
-                        sceneStatus(engine, last, periodUs).c_str(), term.active ? "" : "\n");
+            std::printf("%s%s | dsp %3.0f%% (max %3.0f%%) xruns %llu | %s\033[K%s", term.active ? "\r" : "", show.status().c_str(),
+                        100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs, static_cast<unsigned long long>(st.xruns.load()),
+                        chainStatus(engine, rig, last).c_str(), term.active ? "" : "\n");
             std::fflush(stdout);
         }
     }
@@ -390,8 +346,8 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
         float* outs[2] = {o1.data(), o2.data()};
         const size_t blocksPerSwitch = std::max<size_t>(1, static_cast<size_t>(switchSeconds * config.audio.rate / frames));
         const size_t total = static_cast<size_t>(totalSeconds * config.audio.rate / frames);
-        // Phase 1: scene 1 alone, nothing warm, to show what one scene costs
-        // with every other scene loaded but idle.
+        // Phase 1: chain 1 alone, nothing warm, to show what one chain costs
+        // with every other chain loaded but idle.
         const size_t aloneBlocks = std::min(total, static_cast<size_t>(3.0 * config.audio.rate / frames));
         // Paced like live audio: one block per period. Unpaced, a real-time
         // thread that never sleeps is throttled by the kernel (sched_rt_runtime_us),
@@ -430,7 +386,7 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
         for (size_t i = 0; i < engine.numChains(); ++i)
             othersProcessed += i == 0 ? 0 : engine.stats(i).processBlocks.load();
 
-        // Phase 2: switch through every scene, with the warm setting from the config.
+        // Phase 2: switch through every chain, with the warm setting from the config.
         if (config.warm == "next" && engine.numChains() > 1)
             engine.setWarm(1);
         int next = 1;
@@ -460,20 +416,20 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     };
     std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s\n", frames, periodUs, realtime ? "real-time" : "not real-time",
                 pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
-    stats(aloneUs, ("scene 1 alone, " + std::to_string(engine.numChains() - 1) + " others idle:").c_str());
-    std::printf("%-34s %llu blocks processed by the idle scenes (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
+    stats(aloneUs, ("chain 1 alone, " + std::to_string(engine.numChains() - 1) + " others idle:").c_str());
+    std::printf("%-34s %llu blocks processed by the idle chains (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
     char what[96];
     std::snprintf(what, sizeof what, "switching every %.1f s, warm %s:", switchSeconds, config.warm.c_str());
     stats(blockUs, what);
     const uint64_t totalBlocks = aloneUs.size() + blockUs.size();
-    std::printf("\n%-24s %10s %12s %12s %10s\n", "scene", "blocks", "avg us/blk", "worst us", "share");
+    std::printf("\n%-24s %10s %12s %12s %10s\n", "chain", "blocks", "avg us/blk", "worst us", "share");
     for (size_t i = 0; i < engine.numChains(); ++i) {
         ChainStats& st = engine.stats(i);
         const uint64_t blocks = st.processBlocks.load();
-        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%\n", config.scenes[i].name.c_str(), static_cast<unsigned long long>(blocks),
+        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%\n", rig.chainNames[i].c_str(), static_cast<unsigned long long>(blocks),
                     blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks);
     }
-    std::printf("\n'share' is the fraction of blocks in which the scene was processed at all. Idle scenes cost nothing.\n");
+    std::printf("\n'share' is the fraction of blocks in which the chain was processed at all. Idle chains cost nothing.\n");
     if (worstUs > periodUs)
         std::printf("WARNING: the worst block took longer than the period; live, that would be a dropout.\n");
     if (!wavPath.empty()) {
@@ -505,6 +461,98 @@ int cmdDevices() {
     for (const auto& p : midi.listPorts())
         std::printf("  %3d:%-2d  %-28s %-28s %s%s\n", p.client, p.port, p.clientName.c_str(), p.portName.c_str(), p.canRead ? "in " : "",
                     p.canWrite ? "out" : "");
+    return 0;
+}
+
+// Loads the config and every plug-in, compiles the mappings, and prints
+// what the performance holds. No audio or MIDI is opened.
+int cmdCheck(const std::string& path) {
+    Config config;
+    if (!load(path, config))
+        return 2;
+    Rig rig;
+    std::string err;
+    if (!buildRig(config, rig, &err)) {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    struct NoOutput : ShowOutput {
+        void switchTo(int) override {}
+        void setWarm(int) override {}
+        void setBypass(int, size_t, bool) override {}
+        void setParam(int, size_t, uint32_t, double) override {}
+        void setMute(bool) override {}
+        void sendMidi(const MidiMessage&) override {}
+        void forwardMidi(int, size_t, const MidiMessage&) override {}
+    } none;
+    Show show(none);
+    if (!show.load(config, rig.showPlugins(), &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    std::printf("\nperformance%s%s: %zu scene(s), %zu chain(s), %zu preset(s)\n", config.performance.empty() ? "" : " ",
+                config.performance.c_str(), config.scenes.size(), rig.chainNames.size(), show.numPresets());
+    int presetNo = 0;
+    for (const auto& scene : config.scenes) {
+        std::printf("scene %s%s\n", scene.name.c_str(), scene.pedal ? (", pedal " + std::to_string(scene.pedal)).c_str() : "");
+        for (const auto& c : scene.chains) {
+            auto where = [&](const TapSpec& t) {
+                const LineSpec& l = c.lines[t.line];
+                const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
+                return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
+            };
+            std::printf("  chain %s: %zu plug-in(s); out 1 = %s, out 2 = %s\n", c.name.c_str(), chainPlugins(c).size(), where(c.out[0]).c_str(),
+                        where(c.out[1]).c_str());
+        }
+        for (const auto& p : scene.presets)
+            std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),
+                        p.pedal ? (", pedal " + std::to_string(p.pedal)).c_str() : "", p.display.empty() ? "" : (", shows " + p.display).c_str(),
+                        p.actions.size());
+    }
+    for (const auto& c : config.controls) {
+        std::string values;
+        for (const auto& l : c.labels)
+            values += (values.empty() ? "" : ", ") + l;
+        if (values.empty()) {
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%g to %g", c.min, c.max);
+            values = buf;
+        }
+        std::printf("control %s: %s, starts at %s%s\n", c.name.c_str(), values.c_str(), show.valueText(c.name).c_str(),
+                    c.pedal ? (", pedal " + std::to_string(c.pedal)).c_str() : "");
+    }
+    for (const auto& t : config.triggers)
+        std::printf("trigger %s: %zu input(s), %zu action(s)\n", t.name.c_str(), t.inputs.size(), t.actions.size());
+    for (const auto& g : config.groups)
+        std::printf("group %s: %zu action(s)\n", g.name.c_str(), g.actions.size());
+    for (const auto& w : show.warnings())
+        std::printf("warning: %s\n", w.c_str());
+    std::printf("config OK\n");
+    return 0;
+}
+
+int cmdParams(const std::string& spec) {
+    const auto hash = spec.rfind('#');
+    const std::string path = hash == std::string::npos ? spec : spec.substr(0, hash);
+    const std::string id = hash == std::string::npos ? "" : spec.substr(hash + 1);
+    std::string err;
+    std::unique_ptr<Processor> p;
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0)
+        p = Vst3Processor::load(path, id, &err);
+    else
+        p = ClapProcessor::load(path, id, &err);
+    if (!p || !p->activate(48000, 64)) {
+        std::fprintf(stderr, "%s: %s\n", spec.c_str(), err.empty() ? "could not activate" : err.c_str());
+        return 1;
+    }
+    const auto params = p->params();
+    std::printf("%s: %zu parameter(s)%s\n", p->name().c_str(), params.size(),
+                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "");
+    std::printf("%10s  %-32s %10s %10s %10s\n", "id", "name", "min", "max", "default");
+    for (const auto& i : params)
+        std::printf("%10u  %-32s %10g %10g %10g%s\n", i.id, i.name.c_str(), i.min, i.max, i.def,
+                    i.steps > 0 ? ("  " + std::to_string(i.steps + 1) + " steps").c_str() : "");
+    p->deactivate();
     return 0;
 }
 
@@ -588,7 +636,9 @@ int usage() {
                  "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
+                 "  cue check <config.ini>\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
+                 "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue midi-monitor [port-match]\n"
                  "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -619,6 +669,10 @@ int main(int argc, char** argv) {
     }
     if (cmd == "devices")
         return cmdDevices();
+    if (cmd == "check" && argc >= 3)
+        return cmdCheck(argv[2]);
+    if (cmd == "params" && argc >= 3)
+        return cmdParams(argv[2]);
     if (cmd == "scan" && argc >= 3)
         return cmdScan(argv[2]);
     if (cmd == "midi-monitor")

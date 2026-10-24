@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace cue {
 
@@ -11,6 +12,13 @@ namespace cue {
 constexpr int kChainChannels = 2;
 
 constexpr uint32_t kInfiniteTail = std::numeric_limits<uint32_t>::max();
+
+struct ParamInfo {
+    uint32_t id;
+    std::string name, module;
+    double min, max, def;
+    int steps = 0; // number of steps for a stepped parameter, 0 = continuous
+};
 
 // One loaded, activated audio processor (a plug-in or a built-in block).
 //
@@ -48,6 +56,13 @@ public:
     // where the pedal is now when its chain starts, not every move since.
     virtual bool acceptsMidi() const { return false; }
     virtual void sendMidi(uint8_t /*status*/, uint8_t /*data1*/, uint8_t /*data2*/) {}
+
+    // Any non-real-time thread: queued, delivered with the next processed
+    // block, or by flushIdle() in an idle chain. CLAP plug-ins take the
+    // parameter's own value, VST3 plug-ins a normalised 0..1.
+    virtual bool setParam(uint32_t /*id*/, double /*value*/) { return false; }
+    // Main thread.
+    virtual std::vector<ParamInfo> params() const { return {}; }
 
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.

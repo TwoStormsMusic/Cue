@@ -13,8 +13,10 @@
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/processdata.h"
+#include "public.sdk/source/vst/utility/stringconvert.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -121,7 +123,20 @@ std::vector<Vst3PluginInfo> scanVst3(const std::string& path, std::string* error
     return out;
 }
 
-std::unique_ptr<Vst3Processor> Vst3Processor::load(const std::string& path, const std::string& name, std::string* error) {
+namespace {
+// "{ABCD...}" or "abcd..." to upper-case hex without braces or dashes.
+std::string normalUid(const std::string& s) {
+    std::string out;
+    for (char c : s)
+        if (std::isxdigit(static_cast<unsigned char>(c)))
+            out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        else if (c != '{' && c != '}' && c != '-')
+            return {};
+    return out.size() == 32 ? out : std::string();
+}
+} // namespace
+
+std::unique_ptr<Vst3Processor> Vst3Processor::load(const std::string& path, const std::string& which, std::string* error) {
     ensureHostContext();
     auto module = openModule(path, error);
     if (!module)
@@ -129,23 +144,33 @@ std::unique_ptr<Vst3Processor> Vst3Processor::load(const std::string& path, cons
     const auto& factory = module->getFactory();
     std::unique_ptr<Vst3Processor> p(new Vst3Processor());
     Impl& d = *p->impl_;
-    for (const auto& ci : factory.classInfos()) {
-        if (ci.category() != kVstAudioEffectClass || (!name.empty() && ci.name() != name))
-            continue;
-        d.provider = owned(new PlugProvider(factory, ci, true));
-        if (!d.provider->initialize()) {
-            if (error)
-                *error = "could not initialise " + ci.name();
-            return nullptr;
+    std::vector<VST3::Hosting::ClassInfo> effects;
+    for (const auto& ci : factory.classInfos())
+        if (ci.category() == kVstAudioEffectClass)
+            effects.push_back(ci);
+    const std::string uid = normalUid(which);
+    const VST3::Hosting::ClassInfo* chosen = nullptr;
+    for (const auto& ci : effects)
+        if (which.empty() || ci.name() == which || (!uid.empty() && normalUid(ci.ID().toString()) == uid)) {
+            chosen = &ci;
+            break;
         }
-        p->name_ = ci.name();
-        break;
-    }
-    if (!d.provider) {
+    // REAPER's names can differ from the class name ("Parallax (mono)"); a
+    // module with one effect has only one candidate.
+    if (!chosen && effects.size() == 1)
+        chosen = &effects[0];
+    if (!chosen) {
         if (error)
-            *error = name.empty() ? "no audio effect in module" : "no audio effect named '" + name + "'";
+            *error = effects.empty() ? "no audio effect in module" : "no audio effect named '" + which + "' in module";
         return nullptr;
     }
+    d.provider = owned(new PlugProvider(factory, *chosen, true));
+    if (!d.provider->initialize()) {
+        if (error)
+            *error = "could not initialise " + chosen->name();
+        return nullptr;
+    }
+    p->name_ = chosen->name();
     d.module = module;
     d.component = d.provider->getComponentPtr();
     d.controller = d.provider->getControllerPtr();
@@ -313,6 +338,20 @@ bool Vst3Processor::setParam(uint32_t id, double normalized) {
     const bool ok = impl_->audioQueue.push({id, normalized});
     impl_->controllerQueue.push({id, normalized});
     return ok;
+}
+
+std::vector<ParamInfo> Vst3Processor::params() const {
+    std::vector<ParamInfo> out;
+    const Impl& d = *impl_;
+    if (!d.controller)
+        return out;
+    for (int32 i = 0, n = d.controller->getParameterCount(); i < n; ++i) {
+        ParameterInfo info{};
+        if (d.controller->getParameterInfo(i, info) != kResultOk || (info.flags & ParameterInfo::kIsReadOnly))
+            continue;
+        out.push_back({info.id, Steinberg::Vst::StringConvert::convert(info.title), "", 0.0, 1.0, info.defaultNormalizedValue, info.stepCount});
+    }
+    return out;
 }
 
 void Vst3Processor::startProcessing() {
