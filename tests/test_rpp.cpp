@@ -5,9 +5,13 @@
 #include "app/config.h"
 #include "app/rpp.h"
 
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 using namespace cue;
 
@@ -166,7 +170,7 @@ TEST(rpp_import_makes_chains_branches_and_states) {
     CHECK(ultra.path == "/vst3/Darkglass Ultra.vst3");
     const PluginSpec& delay = punk.lines[0].plugins[2];
     CHECK(delay.label == "Slapback"); // REAPER's own name for it
-    CHECK(delay.path.find(".clap/TwoStorms Delay.clap") != std::string::npos); // not found: a guess
+    CHECK(delay.path.find(".clap/CLAP Plugins Linux/TwoStorms Delay.clap") != std::string::npos); // not found: where TwoStorms installs
     CHECK(imp.config.find("NOT FOUND") != std::string::npos);
     CHECK(c.audio.inputChannel == 0 && c.mix == OutputMix::Left && c.midi.in == "M2");
 
@@ -209,4 +213,80 @@ TEST(rpp_import_rejects_what_is_not_a_project) {
     std::string err;
     CHECK(!convertRpp("hello\n", "x", loc, "", imp, &err) && err == "not a REAPER project");
     CHECK(!convertRpp("<REAPER_PROJECT 0.1\n  <TRACK\n", "x", loc, "", imp, &err));
+}
+
+TEST(rpp_import_keys_sidechains_and_embeds_ir_files) {
+    // A 4-sample mono 16-bit WAV for the IR Loader to name by path.
+    char wavPath[] = "/tmp/cue-ir-XXXXXX";
+    const int fd = mkstemp(wavPath);
+    if (fd >= 0)
+        close(fd);
+    {
+        std::vector<uint8_t> w;
+        auto tag = [&](const char* t) { w.insert(w.end(), t, t + 4); };
+        auto u16 = [&](uint16_t x) { w.push_back(x & 255); w.push_back(x >> 8); };
+        tag("RIFF");
+        put32(w, 36 + 8);
+        tag("WAVE");
+        tag("fmt ");
+        put32(w, 16);
+        u16(1);
+        u16(1);
+        put32(w, 48000);
+        put32(w, 96000);
+        u16(2);
+        u16(16);
+        tag("data");
+        put32(w, 8);
+        for (int16_t v : {16384, -16384, 0, 8192})
+            u16(static_cast<uint16_t>(v));
+        std::ofstream(wavPath, std::ios::binary).write(reinterpret_cast<const char*>(w.data()), static_cast<std::streamsize>(w.size()));
+    }
+    const std::string irState = std::string("TWOSTORMS 0 1\np 50 1\nx ir0name Cab\nx ir0path ") + wavPath + "\nx ir1path /nonexistent/cab.wav\n";
+    auto clap = [](const std::string& name, const std::string& id, const std::string& pins, const std::string& state = "") {
+        std::string out = "      BYPASS 0 0 0\n      <CLAP \"CLAP: " + name + " (TwoStorms)\" " + id + " \"\"\n" + pins;
+        if (!state.empty())
+            out += "        <STATE\n" + lines(bytes(state), "          ") + "        >\n";
+        return out + "      >\n";
+    };
+    const std::string rpp = "<REAPER_PROJECT 0.1 \"7.82/linux-x86_64\" 1792805934 0\n"
+                            "  <TRACK {D23E2D9F-8959-C083-4EE2-90E84B6F3B99}\n    NAME Djent\n    NCHAN 6\n"
+                            "    HWOUT 1024 0 1 0 0 0 1024 -1:U -1\n    HWOUT 1025 0 1 0 0 0 1024 -1:U -1\n    <FXCHAIN\n" +
+                            clap("TwoStorms Gate", "com.twostorms.gate", "        <OUT_PINS\n          PIN 0 0 4\n          PIN 1 1 5\n        >\n") +
+                            clap("TwoStorms Gate", "com.twostorms.gate",
+                                 "        <IN_PINS\n          PIN 0 0\n          PIN 1 1\n          PIN 2 4\n          PIN 3 5\n        >\n") +
+                            clap("TwoStorms Compressor", "com.twostorms.compressor", "        <OUT_PINS\n          PIN 0 0\n          PIN 1 4\n        >\n") +
+                            clap("TwoStorms IR Loader", "com.twostorms.irloader", "", irState) + "    >\n  >\n>\n";
+    FakeLocator loc;
+    Import imp;
+    std::string err;
+    const bool converted = convertRpp(rpp, "Keys", loc, "", imp, &err);
+    std::remove(wavPath);
+    CHECK_MSG(converted, "%s", err.c_str());
+    Config c;
+    const bool ok = parseConfigText(imp.config, "/out/Keys.ini", c, &err);
+    CHECK_MSG(ok, "%s\n%s", err.c_str(), imp.config.c_str());
+    if (!ok)
+        return;
+    const auto& p = c.scenes[0].chains[0].lines[0].plugins;
+    CHECK(p.size() == 4);
+    if (p.size() < 4)
+        return;
+    // The second gate's pins 3-4 read channels 5-6, which the first gate writes.
+    CHECK_MSG(p[1].sidechain == "TwoStorms Gate:1", "sidechain '%s'", p[1].sidechain.c_str());
+    CHECK(p[0].sidechain.empty() && p[2].sidechain.empty());
+
+    // The IR's samples are added to its state; the missing file is a note.
+    std::string ir;
+    for (const auto& f : imp.files)
+        if (f.path.find("twostorms-ir-loader") != std::string::npos)
+            ir.assign(f.data.begin(), f.data.end());
+    CHECK_MSG(ir.find("\nx ir0data 4 1 48000 AAAAPwAAAL8AAAAAAACAPg==\n") != std::string::npos, "%s", ir.c_str());
+    CHECK(ir.find("x ir1data") == std::string::npos);
+    bool missingIr = false, oneChannel = false;
+    for (const auto& n : imp.notes) {
+        missingIr = missingIr || (n.find("/nonexistent/cab.wav") != std::string::npos && n.find("starts without it") != std::string::npos);
+        oneChannel = oneChannel || (n.find("TwoStorms Compressor writes channel 1 but not 2") != std::string::npos);
+    }
+    CHECK(missingIr && oneChannel);
 }

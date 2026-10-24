@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace cue {
@@ -24,8 +25,9 @@ struct EngineSettings {
     float stopFadeMs = 50.0f;    // fade applied when a releasing chain stops
     float bypassFadeMs = 10.0f;  // crossfade when a plug-in is bypassed or brought back
     float muteFadeMs = 10.0f;    // fade of the outputs when they are muted (the tuner)
-    // A warm chain's delays and reverbs have heard the old chain's playing.
-    // Resetting them on switch avoids echoes of notes played before it.
+    // A warm chain's delays and reverbs would hear the old chain's playing.
+    // They are fed silence until the switch, so no echoes of notes played
+    // before it are heard.
     bool resetTailsOnWarmSwitch = true;
     float tailResetMinMs = 50.0f; // slots with at least this tail count as delays/reverbs
 };
@@ -72,6 +74,11 @@ public:
     int addChain(std::unique_ptr<Chain> chain);
     bool activate();
     void deactivate();
+    // Main thread, after activate and before audio starts: runs every chain
+    // on silence for a moment, on a helper thread, so plug-ins do their
+    // first-block setup (an IR loader preparing its IR) now rather than
+    // when the chain is first switched to.
+    void prime(float milliseconds);
 
     size_t numChains() const { return chains_.size(); }
     Chain& chain(size_t i) { return *chains_[i].chain; }
@@ -103,15 +110,21 @@ public:
     ChainState state(size_t i) const { return chains_[i].state; }
 
 private:
+    // An idle chain's plug-ins: rung out to silence or reset (clean), or
+    // waiting for the reset helper (dirty, resetting). Only clean chains
+    // start; one that is not waits, a few milliseconds at most.
+    enum CleanState : uint8_t { kClean, kDirty, kResetting, kInUse };
     struct Slot {
         std::unique_ptr<Chain> chain;
         std::unique_ptr<ChainStats> stats;
+        std::unique_ptr<std::atomic<uint8_t>> clean;
         ChainState state = ChainState::Idle;
         Ramp inGain{0.0f};
         Ramp outGain{0.0f};
         int64_t prerollLeft = 0;
         uint64_t releaseFrames = 0;
         uint64_t quietFrames = 0;
+        bool quietEnd = false; // its tail died away rather than being capped
     };
 
     uint32_t ms(float milliseconds) const;
@@ -120,7 +133,9 @@ private:
     void commit(int target);
     void setWarmTarget(int target);
     void startChain(Slot& s, ChainState state);
-    void stopChain(int index);
+    bool claimIdle(Slot& s);
+    void stopChain(int index, bool rangOut);
+    void resetLoop();
     void setState(int index, ChainState state);
     void emit(EngineEvent::Type type, int chain);
     void advance(int index, uint32_t frames, float peak);
@@ -132,6 +147,11 @@ private:
     int active_ = -1;
     int pending_ = -1;
     int warm_ = -1;
+    int deferredSwitch_ = -1; // a switch waiting for its chain's reset
+    bool warmWaiting_ = false; // the warm chain is waiting for its reset
+
+    std::thread resetter_;
+    std::atomic<bool> stopResetter_{false};
 
     CommandQueue<EngineCommand, 256> commands_;
     CommandQueue<EngineEvent, 1024> events_;

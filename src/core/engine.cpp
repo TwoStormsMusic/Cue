@@ -7,6 +7,7 @@
 
 namespace cue {
 
+
 const char* toString(ChainState s) {
     switch (s) {
     case ChainState::Idle: return "idle";
@@ -27,6 +28,7 @@ int Engine::addChain(std::unique_ptr<Chain> chain) {
     Slot slot;
     slot.chain = std::move(chain);
     slot.stats = std::make_unique<ChainStats>();
+    slot.clean = std::make_unique<std::atomic<uint8_t>>(kClean);
     chains_.push_back(std::move(slot));
     return static_cast<int>(chains_.size()) - 1;
 }
@@ -34,6 +36,7 @@ int Engine::addChain(std::unique_ptr<Chain> chain) {
 bool Engine::activate() {
     const uint32_t maxFrames = settings_.maxFrames;
     for (size_t i = 0; i < chains_.size(); ++i) {
+        chains_[i].chain->setDrain(std::pow(10.0f, settings_.tailQuietDb / 20.0f), ms(settings_.tailHoldMs), ms(settings_.tailCapMs));
         if (chains_[i].chain->numOutputs() != settings_.numOutputs || !chains_[i].chain->activate(settings_.sampleRate, maxFrames)) {
             for (size_t j = 0; j < i; ++j)
                 chains_[j].chain->deactivate();
@@ -47,12 +50,59 @@ bool Engine::activate() {
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         chainOuts_[o] = chainOutStorage_.data() + o * maxFrames;
     activated_ = true;
+    stopResetter_ = false;
+    resetter_ = std::thread([this] { resetLoop(); });
     return true;
+}
+
+// The reset helper: an audio thread in CLAP's terms, working only on idle
+// chains, which nothing else processes or resets meanwhile.
+void Engine::resetLoop() {
+    markAudioThread();
+    while (!stopResetter_.load(std::memory_order_relaxed)) {
+        bool worked = false;
+        for (auto& s : chains_) {
+            uint8_t expected = kDirty;
+            if (s.clean->compare_exchange_strong(expected, kResetting)) {
+                s.chain->resetProcessors();
+                s.clean->store(kClean);
+                worked = true;
+            }
+        }
+        if (!worked)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void Engine::prime(float milliseconds) {
+    std::thread([&] {
+        markAudioThread();
+        const uint32_t frames = settings_.maxFrames;
+        std::vector<float> buffers(4 * static_cast<size_t>(frames), 0.0f);
+        const float* silence[kChainChannels] = {buffers.data(), buffers.data() + frames};
+        float* scratch[kChainChannels] = {buffers.data() + 2 * frames, buffers.data() + 3 * frames};
+        const size_t blocks = std::max<uint32_t>(1, ms(milliseconds) / frames);
+        // Every plug-in, bypassed ones too: they may be switched on mid-song.
+        for (auto& s : chains_) {
+            if (s.state != ChainState::Idle)
+                continue;
+            for (size_t i = 0; i < s.chain->numSlots(); ++i) {
+                Processor& p = s.chain->slot(i);
+                p.startProcessing();
+                for (size_t b = 0; b < blocks; ++b)
+                    p.process(silence, scratch, frames);
+                p.stopProcessing();
+            }
+        }
+    }).join();
 }
 
 void Engine::deactivate() {
     if (!activated_)
         return;
+    stopResetter_ = true;
+    if (resetter_.joinable())
+        resetter_.join();
     for (size_t i = 0; i < chains_.size(); ++i) {
         if (chains_[i].state != ChainState::Idle)
             chains_[i].chain->stopProcessing();
@@ -90,12 +140,25 @@ void Engine::startChain(Slot& s, ChainState state) {
     setState(index, state);
 }
 
-void Engine::stopChain(int index) {
+// An idle chain may start once its plug-ins are clean: then only the chain's
+// own fades need resetting, which is cheap.
+bool Engine::claimIdle(Slot& s) {
+    uint8_t expected = kClean;
+    if (!s.clean->compare_exchange_strong(expected, kInUse))
+        return false;
+    s.chain->resetRamps();
+    return true;
+}
+
+// rangOut: its tail died away, so its plug-ins hold silence and need no
+// reset; otherwise the reset helper clears them.
+void Engine::stopChain(int index, bool rangOut) {
     Slot& s = chains_[index];
     s.chain->stopProcessing();
     s.inGain.set(0.0f);
     s.outGain.set(0.0f);
     setState(index, ChainState::Idle);
+    s.clean->store(rangOut && s.chain->settled() ? kClean : kDirty);
     emit(EngineEvent::Type::ChainIdle, index);
 }
 
@@ -106,7 +169,8 @@ void Engine::handle(const EngineCommand& cmd) {
     case EngineCommand::Type::SetBypass:
         if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
             Slot& s = chains_[cmd.chain];
-            s.chain->setBypass(cmd.slot, cmd.on, s.state == ChainState::Idle ? 0 : ms(settings_.bypassFadeMs));
+            const bool idle = s.state == ChainState::Idle;
+            s.chain->setBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
         }
         break;
     case EngineCommand::Type::SetMute:
@@ -121,6 +185,7 @@ void Engine::handle(const EngineCommand& cmd) {
 void Engine::requestSwitch(int target) {
     if (target < 0 || target >= static_cast<int>(chains_.size()))
         return;
+    deferredSwitch_ = -1; // a newer request replaces one still waiting
     if (target == pending_)
         return;
 
@@ -131,7 +196,7 @@ void Engine::requestSwitch(int target) {
         if (cancelled == warm_)
             setState(cancelled, ChainState::Warm);
         else
-            stopChain(cancelled);
+            stopChain(cancelled, false);
     }
     if (target == active_)
         return;
@@ -139,7 +204,10 @@ void Engine::requestSwitch(int target) {
     Slot& s = chains_[target];
     switch (s.state) {
     case ChainState::Idle:
-        s.chain->reset();
+        if (!claimIdle(s)) {
+            deferredSwitch_ = target; // starts when its reset is done
+            return;
+        }
         startChain(s, ChainState::PreRoll);
         // Fade the input in: delay lines repeat an abrupt start as a click
         // one delay time later, after the chain has become audible.
@@ -154,7 +222,7 @@ void Engine::requestSwitch(int target) {
         break;
     case ChainState::Warm:
         if (settings_.resetTailsOnWarmSwitch)
-            s.chain->resetTails(ms(settings_.tailResetMinMs), ms(settings_.crossfadeMs));
+            s.chain->holdTails(false, ms(settings_.crossfadeMs), ms(settings_.tailResetMinMs));
         commit(target);
         break;
     case ChainState::PreRoll:
@@ -197,14 +265,20 @@ void Engine::setWarmTarget(int target) {
         return;
     const int previous = warm_;
     warm_ = target;
+    warmWaiting_ = false;
     if (previous >= 0 && chains_[previous].state == ChainState::Warm)
-        stopChain(previous);
+        stopChain(previous, false);
     if (target < 0)
         return;
     Slot& s = chains_[target];
     if (s.state == ChainState::Idle) {
-        s.chain->reset();
+        if (!claimIdle(s)) {
+            warmWaiting_ = true; // starts when its reset is done
+            return;
+        }
         startChain(s, ChainState::Warm);
+        if (settings_.resetTailsOnWarmSwitch)
+            s.chain->holdTails(true, 0, ms(settings_.tailResetMinMs));
         s.inGain.set(0.0f);
         s.inGain.dbTo(1.0f, ms(settings_.crossfadeMs));
         s.outGain.set(0.0f);
@@ -231,6 +305,7 @@ void Engine::advance(int index, uint32_t frames, float peak) {
         const bool quiet = inputGone && s.quietFrames >= ms(settings_.tailHoldMs);
         const bool capped = s.releaseFrames >= ms(settings_.tailCapMs);
         if (quiet || capped) {
+            s.quietEnd = quiet;
             setState(index, ChainState::Stopping);
             s.outGain.linearTo(0.0f, ms(settings_.stopFadeMs));
         }
@@ -240,9 +315,11 @@ void Engine::advance(int index, uint32_t frames, float peak) {
         if (s.outGain.done()) {
             if (index == warm_) {
                 setState(index, ChainState::Warm);
+                if (settings_.resetTailsOnWarmSwitch)
+                    s.chain->holdTails(true, 0, ms(settings_.tailResetMinMs));
                 s.inGain.dbTo(1.0f, ms(settings_.crossfadeMs));
             } else {
-                stopChain(index);
+                stopChain(index, s.quietEnd);
             }
         }
         break;
@@ -257,6 +334,14 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     frames = std::min(frames, settings_.maxFrames);
     while (auto cmd = commands_.pop())
         handle(*cmd);
+    // Starts that waited for a chain's reset.
+    if (deferredSwitch_ >= 0 && chains_[deferredSwitch_].clean->load() == kClean)
+        requestSwitch(deferredSwitch_);
+    if (warmWaiting_ && warm_ >= 0 && chains_[warm_].clean->load() == kClean) {
+        const int target = warm_;
+        warm_ = -1;
+        setWarmTarget(target);
+    }
 
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         std::memset(outs[o], 0, frames * sizeof(float));
@@ -269,7 +354,8 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
         if (s.state == ChainState::Idle) {
-            if (flushIdle)
+            // Not while the reset helper has it.
+            if (flushIdle && s.clean->load() == kClean)
                 s.chain->flushIdle();
             continue;
         }

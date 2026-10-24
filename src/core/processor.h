@@ -13,6 +13,11 @@ constexpr int kChainChannels = 2;
 
 constexpr uint32_t kInfiniteTail = std::numeric_limits<uint32_t>::max();
 
+// Marks the calling thread as one that processes audio (CLAP's audio
+// thread), for plug-ins that check which thread calls them.
+void markAudioThread();
+bool isAudioThread();
+
 struct ParamInfo {
     uint32_t id;
     std::string name, module;
@@ -56,6 +61,13 @@ public:
     // where the pedal is now when its chain starts, not every move since.
     virtual bool acceptsMidi() const { return false; }
     virtual void sendMidi(uint8_t /*status*/, uint8_t /*data1*/, uint8_t /*data2*/) {}
+
+    // A second, side-chain input (a gate keyed by another signal). Main
+    // thread, after activate: key holds kChainChannels buffers of at least
+    // maxFrames that the chain fills before each process() call; nullptr =
+    // silence. Without a key the side-chain input gets silence.
+    virtual bool hasSidechain() const { return false; }
+    virtual void setSidechain(const float* const* /*key*/) {}
 
     // Any non-real-time thread: queued, delivered with the next processed
     // block, or by flushIdle() in an idle chain. CLAP plug-ins take the

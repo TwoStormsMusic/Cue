@@ -16,7 +16,6 @@ namespace cue {
 namespace {
 std::thread::id g_mainThread;
 std::once_flag g_mainThreadOnce;
-thread_local bool t_isAudioThread = false;
 std::atomic<uint64_t> g_droppedAudioThreadLogs{0};
 
 void noteMainThread() {
@@ -24,7 +23,7 @@ void noteMainThread() {
 }
 } // namespace
 
-void markClapAudioThread() { t_isAudioThread = true; }
+void markClapAudioThread() { markAudioThread(); }
 
 // ---------------------------------------------------------------- library
 
@@ -110,7 +109,7 @@ namespace {
 ClapProcessor* owner(const clap_host_t* host) { return static_cast<ClapProcessor*>(host->host_data); }
 
 bool hostIsMainThread(const clap_host_t*) { return std::this_thread::get_id() == g_mainThread; }
-bool hostIsAudioThread(const clap_host_t*) { return t_isAudioThread; }
+bool hostIsAudioThread(const clap_host_t*) { return isAudioThread(); }
 const clap_host_thread_check_t kThreadCheck = {hostIsMainThread, hostIsAudioThread};
 
 void hostLog(const clap_host_t* host, clap_log_severity severity, const char* msg) { owner(host)->onLog(severity, msg); }
@@ -132,6 +131,10 @@ const clap_host_tail_t kTailHost = {hostTailChanged};
 void hostStateMarkDirty(const clap_host_t*) {}
 const clap_host_state_t kStateHost = {hostStateMarkDirty};
 
+bool hostRegisterTimer(const clap_host_t* host, uint32_t periodMs, clap_id* id) { return owner(host)->onRegisterTimer(periodMs, id); }
+bool hostUnregisterTimer(const clap_host_t* host, clap_id id) { return owner(host)->onUnregisterTimer(id); }
+const clap_host_timer_support_t kTimerSupport = {hostRegisterTimer, hostUnregisterTimer};
+
 const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &kThreadCheck;
     if (!std::strcmp(id, CLAP_EXT_LOG)) return &kLog;
@@ -139,6 +142,7 @@ const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &kLatencyHost;
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTailHost;
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kStateHost;
+    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &kTimerSupport;
     return nullptr;
 }
 void hostRequestRestart(const clap_host_t* host) { owner(host)->onRequestRestart(); }
@@ -163,11 +167,29 @@ struct ClapProcessor::InputEvents {
 
 void ClapProcessor::onLog(int severity, const char* msg) const {
     // Printing can block; logs from the audio thread are counted, not printed.
-    if (t_isAudioThread) {
+    if (isAudioThread()) {
         g_droppedAudioThreadLogs++;
         return;
     }
     std::fprintf(stderr, "[%s] log(%d): %s\n", name_.c_str(), severity, msg ? msg : "");
+}
+
+bool ClapProcessor::onRegisterTimer(uint32_t periodMs, clap_id* id) {
+    if (!id || std::this_thread::get_id() != g_mainThread)
+        return false;
+    // Serviced every few milliseconds; faster timers run at that rate.
+    const auto period = std::chrono::milliseconds(std::max<uint32_t>(periodMs, 1));
+    *id = nextTimerId_++;
+    timers_.push_back({*id, period, std::chrono::steady_clock::now() + period});
+    return true;
+}
+
+bool ClapProcessor::onUnregisterTimer(clap_id id) {
+    const auto it = std::find_if(timers_.begin(), timers_.end(), [&](const Timer& t) { return t.id == id; });
+    if (it == timers_.end())
+        return false;
+    timers_.erase(it);
+    return true;
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -219,6 +241,7 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->state_ = static_cast<const clap_plugin_state_t*>(ext(CLAP_EXT_STATE));
     p->latency_ = static_cast<const clap_plugin_latency_t*>(ext(CLAP_EXT_LATENCY));
     p->tail_ = static_cast<const clap_plugin_tail_t*>(ext(CLAP_EXT_TAIL));
+    p->timerExt_ = static_cast<const clap_plugin_timer_support_t*>(ext(CLAP_EXT_TIMER_SUPPORT));
     if (const auto* notes = static_cast<const clap_plugin_note_ports_t*>(ext(CLAP_EXT_NOTE_PORTS))) {
         for (uint32_t i = 0, n = notes->count(p->plugin_, true); i < n; ++i) {
             clap_note_port_info_t info{};
@@ -325,6 +348,18 @@ void ClapProcessor::deactivate() {
 void ClapProcessor::pumpMainThread() {
     if (callbackRequested_.exchange(false))
         plugin_->on_main_thread(plugin_);
+    if (timerExt_ && !timers_.empty()) {
+        // A timer callback may register or unregister timers: collect first.
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<clap_id> due;
+        for (auto& t : timers_)
+            if (now >= t.due) {
+                due.push_back(t.id);
+                t.due = std::max(t.due + t.period, now);
+            }
+        for (clap_id id : due)
+            timerExt_->on_timer(plugin_, id);
+    }
     if (activated_ && latencyDirty_.exchange(false))
         cachedLatency_ = latency_ ? latency_->get(plugin_) : 0;
     if (tailDirty_.exchange(false))
@@ -468,10 +503,15 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
             for (uint32_t c = 0; c < ch; ++c)
                 inBuffers_[0].data32[c] = const_cast<float*>(in[std::min<uint32_t>(c, kChainChannels - 1)]);
         }
-        // Spare inputs (side-chains) get silence.
+        // The second port is the side-chain: the key signal if the chain
+        // feeds one. Other spare inputs get silence.
         for (size_t p = 1; p < inBuffers_.size(); ++p)
-            for (uint32_t c = 0; c < inPortChannels_[p]; ++c)
-                std::memset(inBuffers_[p].data32[c], 0, frames * sizeof(float));
+            for (uint32_t c = 0; c < inPortChannels_[p]; ++c) {
+                if (p == 1 && key_[0])
+                    std::memcpy(inBuffers_[p].data32[c], key_[std::min<uint32_t>(c, kChainChannels - 1)], frames * sizeof(float));
+                else
+                    std::memset(inBuffers_[p].data32[c], 0, frames * sizeof(float));
+            }
     }
     // Main output port.
     const uint32_t outCh = outPortChannels_[0];
@@ -581,6 +621,23 @@ void ClapProcessor::drainMidi() {
         more = true; // the queue may still hold messages
     if (more)
         midiPending_.store(true, std::memory_order_relaxed);
+}
+
+bool ClapProcessor::hasSidechain() const {
+    if (!ports_ || ports_->count(plugin_, true) < 2)
+        return false;
+    // The port after the main one.
+    for (uint32_t i = 0, n = ports_->count(plugin_, true); i < n; ++i) {
+        clap_audio_port_info_t info{};
+        if (ports_->get(plugin_, i, true, &info) && !(info.flags & CLAP_AUDIO_PORT_IS_MAIN) && info.channel_count > 0)
+            return true;
+    }
+    return false;
+}
+
+void ClapProcessor::setSidechain(const float* const* key) {
+    for (int c = 0; c < kChainChannels; ++c)
+        key_[c] = key ? key[c] : nullptr;
 }
 
 uint32_t ClapProcessor::latencySamples() const { return cachedLatency_.load(std::memory_order_relaxed); }

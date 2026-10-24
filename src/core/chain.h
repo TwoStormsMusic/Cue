@@ -51,6 +51,14 @@ public:
     // Before activation: whether a slot starts bypassed.
     void setInitialBypass(size_t slot, bool bypassed);
     bool bypassed(size_t slot) const { return slots_[slot].bypassed; }
+    // Before activation: what a bypassed slot passes on. Thru (the default)
+    // passes its input on untouched; mute passes silence.
+    void setMuteOnBypass(size_t slot, bool mute) { slots_[slot].muteOnBypass = mute; }
+    bool muteOnBypass(size_t slot) const { return slots_[slot].muteOnBypass; }
+    // Before activation: feeds slot's side-chain input with the signal
+    // after source, an earlier slot (in processing order: line 0 first,
+    // then each branch). False if source does not come first.
+    bool setSidechain(size_t slot, size_t source);
 
     // Main thread. Allocates every buffer the audio thread will need.
     bool activate(double sampleRate, uint32_t maxFrames);
@@ -60,19 +68,38 @@ public:
     uint32_t tailSamples() const;
     uint32_t latencySamples() const;
 
+    // Before activation: when a bypassed slot counts as rung out. After it
+    // is bypassed it is fed silence until its output stays below quietLevel
+    // for holdFrames, or for capFrames at most, and then no longer processed.
+    void setDrain(float quietLevel, uint32_t holdFrames, uint32_t capFrames);
+
     // Audio thread.
     void startProcessing();
     void stopProcessing();
+    // Clears every plug-in and the chain's own fades.
     void reset();
-    // Resets only the slots that report a tail of at least minTail samples
-    // (delays, reverbs), leaving amp sims and filters settled. Their input is
-    // faded in over fadeFrames: a delay line that starts on an abrupt note
-    // repeats that abrupt start as a click one delay time later.
-    void resetTails(uint32_t minTail, uint32_t fadeFrames);
+    // The two halves of reset(). Plug-in resets can be slow (a delay clears
+    // seconds of buffer), so the engine runs them on a helper thread while
+    // the chain is idle; resetRamps() is cheap and runs on the audio thread
+    // when the chain starts.
+    void resetProcessors();
+    void resetRamps();
+    // False while a bypassed slot is still ringing out, or did not ring out
+    // and needs a reset before it is heard again.
+    bool settled() const;
+    // While held, slots with a tail of at least minTail samples (delays,
+    // reverbs) are fed silence, so a warm chain's delay holds no echoes of
+    // notes played before it is heard. Releasing fades their input in over
+    // fadeFrames: a delay line that starts on an abrupt note repeats that
+    // abrupt start as a click one delay time later.
+    void holdTails(bool hold, uint32_t fadeFrames, uint32_t minTail);
     // Bypasses a slot, or brings it back, with a crossfade over fadeFrames
-    // (0 = at once). A bypassed slot is not processed. One coming back is
-    // reset first, since its state is from before it was bypassed.
-    void setBypass(size_t slot, bool bypassed, uint32_t fadeFrames);
+    // (0 = at once). A bypassed slot rings out on silence and is then no
+    // longer processed; one coming back fades its input in, so a delay
+    // starts without a click and with no stale echoes. A slot set to mute on
+    // bypass fades to and from silence instead of its input. idle: the chain
+    // is not being processed; only the slot's flags change.
+    void setBypass(size_t slot, bool bypassed, uint32_t fadeFrames, bool idle = false);
     // For idle chains: delivers queued parameter changes without processing.
     void flushIdle();
     // in: frames mono samples. outs: numOutputs() buffers, each overwritten.
@@ -91,9 +118,16 @@ private:
         Ramp inGain{1.0f}; // input fade after a reset
         Ramp wet{1.0f};    // 1 = processed, 0 = bypassed
         bool bypassed = false;
+        bool muteOnBypass = false;
+        int sidechainFrom = -1;                  // slot whose output keys this one
+        float* keyOut[kChainChannels] = {};      // this slot's output, kept for a slot it keys
+        bool draining = false;                   // bypassed, still ringing out on silence
+        bool needsReset = false;                 // bypassed without ringing out
+        uint32_t quietFrames = 0, drainFrames = 0;
     };
 
     void processSlot(SlotState& s, float**& cur, float**& next, uint32_t frames);
+    void drain(SlotState& s, float** scratch, uint32_t frames);
     void writeTap(size_t tap, const float* const* signal, float* out, uint32_t frames) const;
 
     std::string name_;
@@ -105,6 +139,11 @@ private:
     std::vector<float> storage_;
     std::vector<float> gainScratch_, wetScratch_;
     float* tmp_[kChainChannels] = {};
+    float* silence_[kChainChannels] = {};
+    float quietLevel_ = 3.2e-5f; // -90 dB
+    uint32_t drainHold_ = 14400, drainCap_ = 480000;
+    bool holdTails_ = false;
+    uint32_t tailMin_ = 0;
 };
 
 } // namespace cue

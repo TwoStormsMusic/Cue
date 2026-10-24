@@ -16,7 +16,7 @@ They come back at the next login, or with `systemctl --user start pipewire.socke
 ./run-tests.sh
 ```
 
-Runs the 53 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass and mute, CLAP and VST3 hosting, the config, the mapping, the REAPER import) and two benches. Every test should say `OK`. **Send** the last 30 lines if anything fails.
+Runs the 64 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import) and two benches. Every test should say `OK`. **Send** the last 30 lines if anything fails.
 
 ## 2. Real-time settings
 
@@ -90,6 +90,21 @@ The pedals do what ReaLearn did:
 | 4 | Wah: Off, Auto, Pedal, Off ... The pedal wah follows the right expression pedal (it listens to CC 103) |
 | 5 | Tuner: mutes both outputs and shows TU; press again to unmute |
 | Up, Down | next and previous preset |
+
+## 6. The TwoStorms template
+
+`Cue Template 2S.RPP` is your template with every plug-in that has a TwoStorms counterpart replaced by it (everything but the Neural DSP ones). In REAPER, open each IR Loader once and load its IR again: the converted project names the IRs but has no samples saved yet, and the IR Loader only plays saved samples. Save the project, then import it like the first one:
+
+```sh
+bin/cue import-rpp "Cue Template 2S.RPP" --mapping configs/cue-template-mapping.ini
+bin/cue check "$HOME/cue/Cue Template 2S/Cue Template 2S.ini"
+bin/cue bench "$HOME/cue/Cue Template 2S/Cue Template 2S.ini" --seconds 60 --wav template-2s.wav
+```
+
+The import reads each IR file named in the project and stores its samples in the IR Loader's state, so the IRs play in Cue even if you skipped the step above (it lists any file it could not read). `check` should print `side-chain from 'TwoStorms Gate:1'` for Djent's second gate and `primed every plug-in in ... ms`. **Send** what the import, `check` and `bench` printed. Then run it live as in step 5 and listen for the same things, plus:
+
+- **Out 2 (amp)** gets everything but the IR and the Saturator after it, chorus, delay and tremolo included; **out 1 (FOH)** gets all of it. The time effects run twice for that (one copy on each side of the IR), and every mapping that names them switches both.
+- A bypassed IR Loader is set to pass its input (thru) unless you add `bypass_mode = mute` under it.
 
 ## What passes
 

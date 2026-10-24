@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <unistd.h>
 
@@ -249,6 +251,88 @@ TEST(config_reports_the_line_of_a_mistake) {
     CHECK(parse("[chain A]\nplugin = builtin:gain 1\n[chain B]\nplugin = builtin:gain 1\n[preset B]\n[preset Loud]\n", g, err));
     CHECK_MSG(g.warnings.size() == 1 && g.warnings[0].find("preset 'Loud'") != std::string::npos && g.warnings[0].find("test.ini:6") != std::string::npos,
               "%s", g.warnings.empty() ? "no warning" : g.warnings[0].c_str());
+}
+
+TEST(config_reads_bypass_modes_with_a_default) {
+    Config c;
+    std::string err;
+    const bool ok = parse(R"(
+[switching]
+bypass_mode = mute
+
+[chain A]
+plugin = builtin:gain 1
+name = Drive
+plugin = builtin:gain 1
+name = Chorus
+bypass_mode = thru
+plugin = builtin:gain 1
+name = IR
+bypass_mode = Mute
+)",
+                          c, err);
+    CHECK_MSG(ok, "%s", err.c_str());
+    if (!ok)
+        return;
+    const auto& p = c.scenes[0].chains[0].lines[0].plugins;
+    CHECK(c.muteOnBypass);
+    CHECK(p[0].muteOnBypass && !p[0].bypassModeSet); // the [switching] default
+    CHECK(!p[1].muteOnBypass && p[1].bypassModeSet);
+    CHECK(p[2].muteOnBypass);
+
+    Config d;
+    CHECK(parse("[chain A]\nplugin = builtin:gain 1\n", d, err));
+    CHECK(!d.muteOnBypass && !d.scenes[0].chains[0].lines[0].plugins[0].muteOnBypass); // thru unless told
+    Config e;
+    CHECK(!parse("[chain A]\nplugin = builtin:gain 1\nbypass_mode = off\n", e, err));
+    CHECK_MSG(err.find("thru or mute") != std::string::npos && err.find("test.ini:3") != std::string::npos, "%s", err.c_str());
+}
+
+TEST(config_resolves_sidechains_to_earlier_plugins) {
+    Config c;
+    std::string err;
+    const bool ok = parse(R"(
+[chain Djent]
+plugin = builtin:gain 1
+name = Gate
+plugin = builtin:gain 1
+name = Amp
+branch = FOH
+plugin = builtin:gain 1
+name = Gate
+sidechain = Gate:1
+plugin = builtin:gain 1
+name = Comp
+sidechain = Gate
+
+[branch FOH]
+plugin = builtin:gain 1
+name = IR
+sidechain = Amp
+)",
+                          c, err);
+    CHECK_MSG(ok, "%s", err.c_str());
+    if (!ok)
+        return;
+    const ChainSpec& djent = c.scenes[0].chains[0];
+    const std::vector<std::string> labels{"Gate", "Amp", "Gate", "Comp", "IR"};
+    std::vector<std::pair<size_t, size_t>> feeds;
+    CHECK_MSG(chainSidechains(djent, labels, feeds, &err), "%s", err.c_str());
+    // Gate:1 is the first Gate; a bare Gate is the nearest one before; the
+    // branch comes after the whole main line.
+    using Feed = std::pair<size_t, size_t>;
+    const std::vector<Feed> expected{Feed(2, 0), Feed(3, 2), Feed(4, 1)};
+    CHECK(feeds == expected);
+
+    Config d;
+    CHECK(parse("[chain A]\nplugin = builtin:gain 1\nname = Gate\nsidechain = Comp\nplugin = builtin:gain 1\nname = Comp\n", d, err));
+    const std::vector<std::string> gateComp{"Gate", "Comp"}, gainComp{"gain", "Comp"};
+    CHECK(!chainSidechains(d.scenes[0].chains[0], gateComp, feeds, &err));
+    CHECK_MSG(err.find("test.ini:2") != std::string::npos && err.find("no plug-in named 'Comp' before it") != std::string::npos, "%s", err.c_str());
+    Config f;
+    CHECK(parse("[chain A]\nplugin = builtin:gain 1\nsidechain = Comp:1\nplugin = builtin:gain 1\nname = Comp\n", f, err));
+    CHECK(!chainSidechains(f.scenes[0].chains[0], gainComp, feeds, &err));
+    CHECK_MSG(err.find("comes after") != std::string::npos, "%s", err.c_str());
 }
 
 TEST(eurekaprom_decodes_pedals_and_expression) {

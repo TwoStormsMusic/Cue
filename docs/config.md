@@ -45,7 +45,8 @@ tail_quiet_db = -90
 bypass_fade_ms = 10 ; crossfade when a plug-in is switched on or off
 mute_fade_ms = 10
 warm = next         ; next: the next preset's chain runs muted in the background; none
-reset_tails_on_warm = yes
+reset_tails_on_warm = yes ; delays and reverbs in the warm chain hear silence until the switch
+bypass_mode = thru  ; what a bypassed plug-in passes on, unless it says otherwise: thru (its input) or mute (nothing)
 
 [midi]
 in = M2             ; any MIDI port whose name contains this; 'any' for all
@@ -79,16 +80,21 @@ midi = no                     ; do not pass MIDI to this one
 branch = FOH                  ; the branch called FOH leaves here
 tap = out2                    ; out 2 takes the signal here
 plugin = clap:~/.clap/TwoStorms Delay.clap
+plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms Gate.clap
+sidechain = TwoStorms Gain Stage ; its key input hears the signal after that earlier plug-in
 
 [branch FOH]                  ; a branch of the chain above
-plugin = clap:~/.clap/lsp-plugins.clap#in.lsp-plug.impulse_responses_mono
+plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms IR Loader.clap
+bypass_mode = mute            ; bypassed, it passes nothing instead of its input
 tap = out1                    ; out 1 takes the end of this branch
 ```
 
 - **Plug-ins**: `clap:<file>[#id]`, `vst3:<bundle>[#name or class id]`, or `builtin:<name> <numbers>` (gain, drive, lowpass, delay, burn). Paths may start with `~`; relative paths are relative to the file they are written in.
 - **param** values are the plug-in's own values for CLAP, and 0 to 1 for VST3. They are applied after `state`.
 - **Outputs**: each output takes the end of the main line unless a `tap` line says otherwise. A tap can sit on the main line or on a branch, after any plug-in.
-- Branches can leave a branch too. A chain's plug-ins are all loaded at start; a bypassed plug-in costs nothing.
+- Branches can leave a branch too. A chain's plug-ins are all loaded at start; a bypassed plug-in costs nothing once its tail has died away.
+- **bypass_mode** is `thru` or `mute`: whether a bypassed plug-in passes its input on, or silence. Either way it fades over `bypass_fade_ms`. Without it, the `[switching]` default applies (thru unless set).
+- **sidechain** feeds the plug-in's side-chain input (its second input, like a gate's key) with the signal after an earlier plug-in of the same chain, named as mappings name it: `Gate` is the nearest Gate before this one, `Gate:2` the chain's second Gate. Earlier means on the main line before it, or for a plug-in on a branch, anywhere on the main line or an earlier branch. `cue check` reports a plug-in with no side-chain input.
 - An old-style scene with `plugin` lines directly under `[scene Name]` is still read: it is a scene with one chain and one preset of the same name.
 
 ## Presets
@@ -243,7 +249,8 @@ cue import-rpp "Cue Template.RPP" [--out DIR] [--mapping FILE] [--search DIR]...
 Writes `DIR/<project>.ini` (default `~/cue/<project>/`) and the plug-ins' settings in `DIR/states/`. Every track that plays to a hardware output becomes a chain of one scene named after the project:
 
 - CLAP and VST3 plug-ins keep their settings, bypass state and REAPER name; VST2, JS and LV2 are left out and listed.
-- A plug-in that writes other channels than the main pair (an IR loader writing channels 3-4 for FOH) starts a branch, and each output is tapped where REAPER's hardware send took its channel.
+- A plug-in that writes other channels than the main pair (an IR loader writing channels 3-4 for FOH) starts a branch, and each output is tapped where REAPER's hardware send took its channel. A plug-in whose side-chain pins (3-4) read channels an earlier plug-in wrote gets a `sidechain` line.
+- A TwoStorms IR Loader names its IRs by file but only plays the samples saved in its state; the import reads each named WAV and adds its samples, so the IR plays in Cue. A file it cannot read is listed.
 - Plug-ins are found through REAPER's plug-in caches and paths, `~/.clap`, `~/.vst3` (including yabridge's folders), `/usr/lib` and any `--search` folder; as a last resort native `.clap` files are opened to read their ids (`--no-scan` skips that). Anything not found is written with a guessed path and marked `NOT FOUND`.
 - With `--mapping FILE`, that file is included after the chains instead of a generated preset per chain, so its `[preset]` sections pick the imported chains by name. `configs/cue-template-mapping.ini` is the one for the Cue Template project.
 - Re-running the import refreshes the states; the previous config is kept as `.bak`.

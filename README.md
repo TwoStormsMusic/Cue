@@ -16,12 +16,15 @@ A **performance** is the whole config: **scenes** in the order you play them. A 
 | --- | --- |
 | Engine: pre-roll, crossfade, tail ring-out, warm next chain | done, tested offline |
 | Branches, outputs tapped anywhere, plug-in bypass and output mute with short fades | done, tested offline |
+| Bypass mode per plug-in: thru (passes its input) or mute (passes nothing); bypassed plug-ins ring out, then cost nothing | done, tested offline |
+| Side-chains: a plug-in's key input fed from an earlier plug-in (the Djent keyed gate) | done, tested with test plug-ins |
+| Switches never wait on a plug-in: resets run on a helper thread while a chain is idle, every plug-in is primed at load | done, benched with the TwoStorms plug-ins |
 | CLAP hosting (in process, one library instance per file), MIDI into plug-ins | done, tested with test plug-ins |
 | VST3 hosting (native and yabridge-bridged) | done, tested with a test plug-in |
 | Performance, scenes, presets | done, tested offline |
 | Mapping: named controls (on/off, steps, continuous with range and wrap), triggers with many actions, groups, conditions | done, tested offline |
 | FCB1010 with EurekaPROM 3.0: pedals, expression, LEDs and display follow the state | done, needs the FCB to test |
-| Import from REAPER: tracks become chains with plug-in settings and routing | done, tested offline on Cue Template.RPP |
+| Import from REAPER: tracks become chains with plug-in settings, routing and side-chains; TwoStorms IRs embedded from their files | done, tested offline on Cue Template.RPP and Cue Template 2S.RPP |
 | ALSA direct audio, real-time thread pinned to a performance core | done, needs the M2 to test |
 | `doctor` real-time settings check | done |
 | Per-plug-in process isolation | **not yet**: next step, after we know the in-process numbers |
@@ -78,7 +81,8 @@ branch = FOH                 ; out 1 gets the IR, out 2 does not
 tap = out2
 
 [branch FOH]
-plugin = clap:~/.clap/lsp-plugins.clap#in.lsp-plug.impulse_responses_mono
+plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms IR Loader.clap
+bypass_mode = mute           ; bypassing the IR silences FOH instead of sending it the raw amp sim
 tap = out1
 
 [preset Punk]
@@ -97,10 +101,12 @@ enable = Wah when Auto
 Presets switch chains; two presets on the same chain switch without a crossfade, by their actions alone.
 
 1. A switch request arrives (FCB pedal, program change or key).
-2. If the target chain is idle, its plug-ins are reset and it starts processing live input, muted, for `preroll_ms`. Its input is faded in, so a delay line never starts on an abrupt edge that would echo back as a click.
+2. If the target chain is idle, it starts processing live input, muted, for `preroll_ms`. Its input is faded in, so a delay line never starts on an abrupt edge that would echo back as a click. The chain is already clean: a chain whose tail rang out to silence needs nothing, and one that was cut off is cleared by a helper thread while it sits idle, so a slow plug-in reset (a delay clearing seconds of buffer) never lands in an audio block.
 3. The new chain's output fades in over `crossfade_ms` (linear: the chains share one input, so their signals are correlated). At the same time the old chain's **input** fades out in dB; its output stays up, so its delays and reverbs ring out naturally.
 4. The old chain keeps processing silence until it is below `tail_quiet_db` for `tail_hold_ms`, or until `tail_cap_ms`, then fades to nothing and stops costing CPU.
-5. With `warm = next`, the chain of the next preset keeps processing in the background, muted, so switching to it skips the pre-roll. Its delays are cleared at the switch so it does not replay notes from before.
+5. With `warm = next`, the chain of the next preset keeps processing in the background, muted, so switching to it skips the pre-roll. Its delays and reverbs hear silence until the switch, so it never replays notes from before and has nothing to clear.
+
+A bypassed plug-in, with `bypass_mode = thru` (the default), passes its input on; with `mute` it passes nothing, so whatever follows it goes quiet. Either way it is fed silence until its tail dies away, then no longer processed, so bringing a delay back starts it clean.
 
 Idle chains are never processed. Parameter changes still reach idle CLAP plug-ins (flushed every 5 ms); idle VST3 plug-ins receive them when their chain starts, during pre-roll.
 
@@ -110,7 +116,8 @@ Idle chains are never processed. Parameter changes still reach idle CLAP plug-in
 - **No isolation yet.** A plug-in crash takes the host down. Isolation is the next milestone.
 - **Plug-in GUIs** are not shown. Set sounds up in REAPER and import the project, or set parameters in the config.
 - **Tuner.** The TwoStorms Tuner only measures while its window is open, so the Tuner pedal mutes and shows TU for now. A tuner on the FCB display is planned.
-- **VST2** plug-ins (ReaEQ, ReaGate, ReaXcomp) are not hosted and are left out of an import.
+- **VST2** plug-ins (ReaEQ, ReaGate, ReaXcomp) are not hosted and are left out of an import. `Cue Template 2S` replaces them, and the LSP and FabFilter plug-ins, with TwoStorms ones.
+- **Side-chains** come from an earlier plug-in of the same chain (main line first, then each branch), not from another input.
 - **Bench numbers in a virtual machine** are noisy; only numbers from the mini PC count.
 
 See `TESTING.md` for the test procedure on the rig.

@@ -6,6 +6,7 @@
 #include <clap/clap.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -59,6 +60,10 @@ public:
     bool acceptsMidi() const override { return midiPort_ >= 0; }
     void sendMidi(uint8_t status, uint8_t data1, uint8_t data2) override;
 
+    // The plug-in's second input port, if it has one, is its side-chain.
+    bool hasSidechain() const override;
+    void setSidechain(const float* const* key) override;
+
     uint32_t latencySamples() const override;
     uint32_t tailSamples() const override;
 
@@ -69,6 +74,8 @@ public:
     void onLatencyChanged() { latencyDirty_ = true; }
     void onTailChanged() { tailDirty_ = true; }
     void onLog(int severity, const char* msg) const;
+    bool onRegisterTimer(uint32_t periodMs, clap_id* id);
+    bool onUnregisterTimer(clap_id id);
 
 private:
     struct ParamChange {
@@ -84,6 +91,12 @@ private:
         clap_event_midi_t midi;
     };
     struct InputEvents;
+    // A timer the plug-in registered: pumpMainThread calls it when due.
+    struct Timer {
+        clap_id id;
+        std::chrono::milliseconds period;
+        std::chrono::steady_clock::time_point due;
+    };
 
     ClapProcessor() = default;
     void drainParams(uint32_t maxEvents);
@@ -99,6 +112,7 @@ private:
     const clap_plugin_state_t* state_ = nullptr;
     const clap_plugin_latency_t* latency_ = nullptr;
     const clap_plugin_tail_t* tail_ = nullptr;
+    const clap_plugin_timer_support_t* timerExt_ = nullptr;
 
     std::string name_, id_;
     bool activated_ = false;
@@ -111,6 +125,7 @@ private:
     std::vector<float*> inPtrs_, outPtrs_;
     std::vector<float> scratch_; // mono adaptation and spare ports
     uint32_t maxFrames_ = 0;
+    const float* key_[kChainChannels] = {}; // side-chain signal, or null
 
     CommandQueue<ParamChange, 512> paramQueue_;
     std::vector<Event> events_;
@@ -131,6 +146,9 @@ private:
     std::atomic<bool> restartRequested_{false}, callbackRequested_{false}, rescanRequested_{false};
     std::atomic<bool> latencyDirty_{false}, tailDirty_{false};
     std::atomic<uint32_t> cachedLatency_{0}, cachedTail_{0};
+
+    std::vector<Timer> timers_; // main thread only
+    clap_id nextTimerId_ = 1;
 };
 
 } // namespace cue

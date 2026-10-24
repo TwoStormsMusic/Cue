@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <random>
+#include <thread>
 #include <vector>
 
 using namespace cue;
@@ -113,6 +114,29 @@ float steadyStep(std::function<std::unique_ptr<Chain>()> make, int output = 0) {
     return maxStep(h.out[output], from);
 }
 
+// Plays its side-chain input instead of its main input.
+class KeyProcessor : public Processor {
+public:
+    const std::string& name() const override { return name_; }
+    bool activate(double, uint32_t) override { return true; }
+    void deactivate() override {}
+    void reset() override {}
+    bool hasSidechain() const override { return true; }
+    void setSidechain(const float* const* key) override {
+        for (int c = 0; c < kChainChannels; ++c)
+            key_[c] = key ? key[c] : nullptr;
+    }
+    void process(const float* const*, float* const* out, uint32_t frames) override {
+        for (int c = 0; c < kChainChannels; ++c)
+            for (uint32_t n = 0; n < frames; ++n)
+                out[c][n] = key_[c] ? key_[c][n] : 0.0f;
+    }
+
+private:
+    std::string name_ = "Key";
+    const float* key_[kChainChannels] = {};
+};
+
 } // namespace
 
 TEST(idle_chains_are_never_processed) {
@@ -166,7 +190,7 @@ TEST(preroll_delays_the_new_chain_by_the_preroll_time) {
     const size_t preroll = samples(0.050);
     CHECK_MSG(firstChange >= preroll && firstChange <= preroll + kBlock, "new sound began %zu samples after the switch, pre-roll is %zu",
               firstChange, preroll);
-    CHECK(b.reset == 1);                   // reset once before pre-roll
+    CHECK(b.reset == 0);                   // never played: its plug-ins need no reset
     CHECK(b.frames >= preroll);            // processed live input while muted
     CHECK(std::fabs(h.out[0].back() - 0.25f) < 1e-4f);
     CHECK(e.activeChain() == 1);
@@ -297,22 +321,30 @@ TEST(warm_chain_switches_without_preroll) {
     CHECK(std::fabs(h.out[0].back() - 0.25f) < 1e-4f);
 }
 
-TEST(warm_chain_delay_is_cleared_on_switch) {
+TEST(warm_chain_delay_hears_nothing_until_the_switch) {
     CountingProcessor::Counts delay, amp;
     Engine e(settings());
     e.addChain(chain("A", slots(new GainProcessor(1.0f))));
     e.addChain(chain("B", slots(new CountingProcessor(std::make_unique<DriveProcessor>(2.0f), amp),
                                 new CountingProcessor(std::make_unique<DelayProcessor>(300.0f, 0.6f, 0.5f), delay))));
     CHECK(e.activate());
-    Harness h{e, Sine{}};
+    bool playing = true;
+    Sine sine;
+    Harness h{e, [&] { return playing ? sine() : 0.0f; }};
     h.settleOn(0);
     e.setWarm(1);
     h.runSeconds(1.0);
+    CHECK(amp.frames >= samples(0.99)); // the amp is warm on the live input
     const uint64_t delayResets = delay.reset, ampResets = amp.reset;
+    // Stop playing at the switch: anything B then plays is an echo of
+    // notes played while it was warm.
+    playing = false;
     e.switchTo(1);
-    h.runSeconds(0.1);
-    CHECK(delay.reset == delayResets + 1); // the delay starts empty
-    CHECK(amp.reset == ampResets);         // the amp stays settled
+    const size_t switchAt = h.out[0].size();
+    h.runSeconds(1.0);
+    const float echo = peak(h.out[0], switchAt, h.out[0].size());
+    CHECK_MSG(echo < 1e-4f, "echo of the warm period %.5f", echo);
+    CHECK(delay.reset == delayResets && amp.reset == ampResets); // nothing to clear at the switch
 }
 
 TEST(newer_request_cancels_a_preroll) {
@@ -404,8 +436,8 @@ TEST(random_switching_stays_sane) {
 }
 
 TEST(warm_switch_into_a_delay_has_no_late_click) {
-    // The warm chain's delay is reset at the switch; its first echo, one
-    // delay time later, must not start with a click.
+    // The warm chain's delay hears nothing until the switch; its first
+    // echo, one delay time later, must not start with a click.
     auto makeA = [] { return chain("A", slots(new GainProcessor(0.4f))); };
     auto makeB = [] { return chain("B", slots(new DriveProcessor(6.0f), new DelayProcessor(300.0f, 0.5f, 0.7f))); };
     const float steady = std::max(steadyStep(makeA), steadyStep(makeB));
@@ -467,9 +499,9 @@ TEST(bypass_is_not_processed_and_crossfades_without_clicks) {
     const float worst = maxStep(h.out[0], from);
     CHECK_MSG(worst <= 2.0f * steady, "largest step %.5f, steady reaches %.5f", worst, steady);
 
-    // Fully bypassed: no more process calls.
+    // Bypassed and rung out (on silence, for the 300 ms hold): no more process calls.
     e.setBypass(0, 1, true);
-    h.runSeconds(0.1);
+    h.runSeconds(0.5);
     const uint64_t before = drive.process.load();
     h.runSeconds(0.5);
     CHECK_MSG(drive.process.load() == before, "bypassed slot processed %llu more blocks",
@@ -528,4 +560,131 @@ TEST(bypass_click_detector_catches_a_hard_cut) {
             e.setBypass(0, 1, (b / h.blocksFor(0.3)) % 2 == 0);
     });
     CHECK_MSG(maxStep(h.out[0], from) > 2.0f * steady, "hard bypass not detected: %.5f vs %.5f", maxStep(h.out[0], from), steady);
+}
+
+TEST(bypass_mode_mute_passes_silence_and_thru_passes_the_input) {
+    auto c = chain("A", slots(new GainProcessor(0.5f), new GainProcessor(0.5f)));
+    c->setMuteOnBypass(1, true);
+    Engine e(settings());
+    e.addChain(std::move(c));
+    CHECK(e.activate());
+    Harness h{e, [] { return 1.0f; }};
+    h.settleOn(0);
+    CHECK(std::fabs(h.out[0].back() - 0.25f) < 1e-6f);
+    e.setBypass(0, 0, true); // thru: the first gain passes its input on
+    h.runSeconds(0.1);
+    CHECK_MSG(std::fabs(h.out[0].back() - 0.5f) < 1e-6f, "thru bypass plays %.5f, expected 0.5", h.out[0].back());
+    e.setBypass(0, 1, true); // mute: the second passes nothing
+    h.runSeconds(0.1);
+    CHECK_MSG(h.out[0].back() == 0.0f && h.out[1].back() == 0.0f, "mute bypass plays %.5f", h.out[0].back());
+    e.setBypass(0, 0, false);
+    e.setBypass(0, 1, false);
+    h.runSeconds(0.1);
+    CHECK(std::fabs(h.out[0].back() - 0.25f) < 1e-6f);
+}
+
+TEST(mute_on_bypass_fades_without_clicks) {
+    auto make = [] {
+        auto c = chain("A", slots(new GainProcessor(0.8f)));
+        c->setMuteOnBypass(0, true);
+        return c;
+    };
+    const float steady = steadyStep(make);
+    Engine e(settings());
+    e.addChain(make());
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    const size_t from = h.out[0].size();
+    h.run(h.blocksFor(3.0), [&](size_t b) {
+        if (b % h.blocksFor(0.3) == 0)
+            e.setBypass(0, 0, (b / h.blocksFor(0.3)) % 2 == 0);
+    });
+    const float worst = maxStep(h.out[0], from);
+    CHECK_MSG(worst <= 1.5f * steady, "largest step %.5f, steady reaches %.5f", worst, steady);
+}
+
+TEST(sidechain_feeds_a_slot_from_an_earlier_one) {
+    auto c = chain("A", slots(new GainProcessor(0.5f), new GainProcessor(0.1f), new KeyProcessor));
+    CHECK(!c->setSidechain(0, 2)); // a later slot cannot key an earlier one
+    CHECK(c->setSidechain(2, 0));
+    Engine e(settings());
+    e.addChain(std::move(c));
+    CHECK(e.activate());
+    Harness h{e, [] { return 1.0f; }};
+    h.settleOn(0);
+    CHECK_MSG(std::fabs(h.out[0].back() - 0.5f) < 1e-6f, "keyed slot plays %.5f, expected 0.5 from the first gain", h.out[0].back());
+    // The key is what the source passes on, bypassed or not.
+    e.setBypass(0, 0, true);
+    h.runSeconds(0.1);
+    CHECK_MSG(std::fabs(h.out[0].back() - 1.0f) < 1e-6f, "keyed slot plays %.5f, expected 1.0 with its source bypassed", h.out[0].back());
+}
+
+TEST(bypassed_delay_rings_out_then_stops_and_comes_back_without_a_reset) {
+    CountingProcessor::Counts delay;
+    Engine e(settings());
+    e.addChain(chain("A", slots(new CountingProcessor(std::make_unique<DelayProcessor>(100.0f, 0.3f, 0.5f), delay))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    const uint64_t resets = delay.reset;
+    e.setBypass(0, 0, true);
+    // Echoes fall 90 dB in about 0.9 s, then 300 ms of quiet.
+    h.runSeconds(0.5);
+    CHECK(delay.process.load() > 0);
+    h.runSeconds(1.5);
+    const uint64_t before = delay.process.load();
+    h.runSeconds(0.5);
+    CHECK_MSG(delay.process.load() == before, "rung-out delay processed %llu more blocks", (unsigned long long)(delay.process.load() - before));
+    e.setBypass(0, 0, false);
+    h.runSeconds(0.1);
+    CHECK_MSG(delay.reset == resets, "%llu resets bringing back a delay that rang out", (unsigned long long)(delay.reset - resets));
+}
+
+TEST(bypassed_delay_that_never_rings_out_is_reset_when_it_comes_back) {
+    CountingProcessor::Counts delay;
+    EngineSettings s = settings();
+    s.tailCapMs = 500.0f;
+    Engine e(s);
+    e.addChain(chain("A", slots(new CountingProcessor(std::make_unique<DelayProcessor>(100.0f, 1.0f, 0.5f), delay))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    const uint64_t resets = delay.reset;
+    e.setBypass(0, 0, true);
+    h.runSeconds(1.0); // capped at 500 ms
+    const uint64_t before = delay.process.load();
+    h.runSeconds(0.2);
+    CHECK(delay.process.load() == before);
+    e.setBypass(0, 0, false);
+    h.runSeconds(0.1);
+    CHECK_MSG(delay.reset == resets + 1, "%llu resets, expected one for a delay still full of echoes", (unsigned long long)(delay.reset - resets));
+}
+
+TEST(switch_after_a_cancelled_preroll_waits_for_the_reset) {
+    CountingProcessor::Counts b;
+    Engine e(settings());
+    e.addChain(chain("A", slots(new GainProcessor(1.0f))));
+    e.addChain(chain("B", slots(new CountingProcessor(std::make_unique<DelayProcessor>(200.0f, 0.5f, 0.5f), b))));
+    CHECK(e.activate());
+    Harness h{e, [] { return 0.5f; }};
+    h.settleOn(0);
+    const uint64_t resets = b.reset;
+    e.switchTo(1);
+    h.run(2); // B pre-rolls on live input: its delay now holds echoes
+    CHECK(e.state(1) == ChainState::PreRoll);
+    e.switchTo(0);
+    h.run(1);
+    CHECK(e.state(1) == ChainState::Idle);
+    // Straight back to B: it starts once the helper thread has cleared it.
+    e.switchTo(1);
+    for (int i = 0; i < 2000 && e.activeChain() != 1; ++i) {
+        h.run(1);
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    CHECK_MSG(e.activeChain() == 1, "B never started");
+    CHECK_MSG(b.reset == resets + 1, "B reset %llu times, expected once", (unsigned long long)(b.reset - resets));
+    CHECK(b.processWhileStopped == 0);
+    h.runSeconds(0.5);
+    CHECK(std::fabs(h.out[0].back() - 0.5f) > 0.1f); // B's echoes on top of the input
 }

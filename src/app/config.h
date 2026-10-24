@@ -26,6 +26,9 @@ struct PluginSpec {
     std::string controllerStateFile; // VST3 only: the edit controller's state
     std::string label;               // `name =`: what mappings call it
     bool bypassed = false;           // loaded, but not processed until a mapping enables it
+    bool muteOnBypass = false;       // bypass_mode: when bypassed, pass silence (mute) instead of the input (thru)
+    bool bypassModeSet = false;      // false: [switching] bypass_mode decides
+    std::string sidechain;           // `sidechain =`: the earlier plug-in whose output feeds its side-chain input
     bool midi = true;                // receives MIDI, if it has a MIDI input
     std::string text, where;         // as written, for messages
 };
@@ -129,6 +132,7 @@ struct Config {
     OutputMix mix = OutputMix::Sum;
     EngineSettings engine;
     std::string warm = "next"; // "none" or "next"
+    bool muteOnBypass = false; // [switching] bypass_mode: what plug-ins without their own do
     MidiSettings midi;
     std::string performance;   // the performance's name
     std::vector<SceneSpec> scenes;
@@ -146,6 +150,12 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
 
 // Every plug-in of a chain, line by line: the order of the engine's slots.
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain);
+
+// The side-chain feeds of a chain as (slot, source slot) pairs, given each
+// slot's label. `sidechain = Gate` is the nearest Gate before the plug-in;
+// `Gate:2` is the chain's second Gate, which must come before it.
+bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
+                     std::string* error);
 
 std::string expandPath(std::string path);
 

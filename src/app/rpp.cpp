@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -366,6 +368,8 @@ struct RppPlugin {
     std::string state, controllerState; // file names
     std::vector<std::string> comments;
     std::vector<std::string> params;
+    int keyLine = -1;   // the plug-in whose output feeds its side-chain:
+    size_t keyIndex = 0; // line and index in it
 };
 
 struct RppLine {
@@ -389,12 +393,159 @@ std::vector<int> pinChannels(const RppNode* pins, int pin) {
     return {};
 }
 
+// Every channel a pin list maps; REAPER's default (no PIN lines) is the main pair.
+std::vector<int> allPinChannels(const RppNode* pins) {
+    std::set<int> ch;
+    bool any = false;
+    if (pins)
+        for (const auto& t : pins->values("PIN")) {
+            any = true;
+            for (size_t i = 1; i < t.size(); ++i)
+                ch.insert(std::atoi(t[i].c_str()));
+        }
+    if (!any)
+        return {0, 1};
+    return std::vector<int>(ch.begin(), ch.end());
+}
+
 std::vector<int> maskChannels(uint64_t mask) {
     std::vector<int> ch;
     for (int i = 0; i < 64; ++i)
         if (mask >> i & 1)
             ch.push_back(i);
     return ch;
+}
+
+std::string encodeBase64(const uint8_t* p, size_t n) {
+    static const char* abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((n + 2) / 3 * 4);
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t v = static_cast<uint32_t>(p[i]) << 16 | (i + 1 < n ? p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        out += abc[v >> 18 & 63];
+        out += abc[v >> 12 & 63];
+        out += i + 1 < n ? abc[v >> 6 & 63] : '=';
+        out += i + 2 < n ? abc[v & 63] : '=';
+    }
+    return out;
+}
+
+// A .wav file's samples, as the TwoStorms IR Loader reads them: PCM 8 to 32
+// bit or float, its first two channels, at most 262144 frames.
+struct Wav {
+    int frames = 0, channels = 0;
+    double rate = 0;
+    std::vector<float> samples; // interleaved
+};
+
+bool readWav(const std::string& path, Wav& wav, std::string* error) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        *error = "cannot open it";
+        return false;
+    }
+    std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), {});
+    auto u16 = [&](size_t at) { return static_cast<uint32_t>(b[at] | b[at + 1] << 8); };
+    if (b.size() < 44 || (std::memcmp(b.data(), "RIFF", 4) && std::memcmp(b.data(), "RF64", 4)) || std::memcmp(b.data() + 8, "WAVE", 4)) {
+        *error = "not a .wav file";
+        return false;
+    }
+    int format = 0, channels = 0, bits = 0;
+    uint32_t rate = 0;
+    size_t data = 0, length = 0;
+    for (size_t at = 12; at + 8 <= b.size();) {
+        const uint32_t len = u32(b, at + 4);
+        if (!std::memcmp(b.data() + at, "fmt ", 4) && len >= 16 && at + 24 <= b.size()) {
+            format = static_cast<int>(u16(at + 8));
+            channels = static_cast<int>(u16(at + 10));
+            rate = u32(b, at + 12);
+            bits = static_cast<int>(u16(at + 22));
+            if (format == 0xFFFE && len >= 40 && at + 34 <= b.size())
+                format = static_cast<int>(u16(at + 32)); // extensible: the sub-format
+        } else if (!std::memcmp(b.data() + at, "data", 4)) {
+            data = at + 8;
+            length = std::min<size_t>(len == 0xFFFFFFFFu ? b.size() : len, b.size() - data);
+            break;
+        }
+        at += 8 + static_cast<size_t>(len) + (len & 1);
+    }
+    const bool pcm = format == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+    const bool flt = format == 3 && (bits == 32 || bits == 64);
+    if (!data || channels < 1 || rate < 8000 || (!pcm && !flt)) {
+        *error = "a .wav format the IR Loader does not read";
+        return false;
+    }
+    const size_t bytes = bits / 8;
+    wav.frames = static_cast<int>(std::min<size_t>(length / (bytes * channels), 262144));
+    wav.channels = std::min(2, channels);
+    wav.rate = rate;
+    wav.samples.resize(static_cast<size_t>(wav.frames) * wav.channels);
+    for (int i = 0; i < wav.frames; ++i)
+        for (int c = 0; c < wav.channels; ++c) {
+            const uint8_t* q = b.data() + data + (static_cast<size_t>(i) * channels + c) * bytes;
+            double v;
+            if (flt && bits == 32) {
+                float x;
+                std::memcpy(&x, q, 4);
+                v = x;
+            } else if (flt) {
+                double x;
+                std::memcpy(&x, q, 8);
+                v = x;
+            } else if (bits == 8) {
+                v = (q[0] - 128) / 128.0;
+            } else if (bits == 16) {
+                v = static_cast<int16_t>(q[0] | q[1] << 8) / 32768.0;
+            } else if (bits == 24) {
+                v = static_cast<int32_t>(static_cast<uint32_t>(q[0]) << 8 | static_cast<uint32_t>(q[1]) << 16 | static_cast<uint32_t>(q[2]) << 24) /
+                    2147483648.0;
+            } else {
+                v = static_cast<int32_t>(q[0] | q[1] << 8 | q[2] << 16 | static_cast<uint32_t>(q[3]) << 24) / 2147483648.0;
+            }
+            wav.samples[static_cast<size_t>(i) * wav.channels + c] = static_cast<float>(v);
+        }
+    if (wav.frames <= 0) {
+        *error = "it has no audio";
+        return false;
+    }
+    return true;
+}
+
+// A TwoStorms IR Loader state names its IRs by path but only plays the
+// samples saved in it. For an IR given only by path, read the file and add
+// its samples, so the IR plays in Cue. Returns notes on files it could not use.
+std::vector<std::string> embedTwoStormsIrs(std::vector<uint8_t>& state) {
+    std::vector<std::string> notes;
+    std::string text(state.begin(), state.end());
+    if (!startsWith(text, "TWOSTORMS "))
+        return notes;
+    std::string added;
+    for (int k = 0; k < 2; ++k) {
+        const std::string key = "x ir" + std::to_string(k);
+        if (text.find("\n" + key + "data ") != std::string::npos)
+            continue;
+        const auto at = text.find("\n" + key + "path ");
+        if (at == std::string::npos)
+            continue;
+        const size_t from = at + key.size() + 6;
+        const std::string path = trim(text.substr(from, text.find('\n', from) - from));
+        Wav wav;
+        std::string err;
+        if (!readWav(path, wav, &err)) {
+            notes.push_back("IR " + path + ": " + err + "; that IR Loader starts without it");
+            continue;
+        }
+        char head[96];
+        std::snprintf(head, sizeof head, "%sdata %d %d %.17g ", key.c_str(), wav.frames, wav.channels, wav.rate);
+        added += head + encodeBase64(reinterpret_cast<const uint8_t*>(wav.samples.data()), wav.samples.size() * sizeof(float)) + "\n";
+    }
+    if (!added.empty()) {
+        if (!text.empty() && text.back() != '\n')
+            text += '\n';
+        text += added;
+        state.assign(text.begin(), text.end());
+    }
+    return notes;
 }
 
 } // namespace
@@ -457,6 +608,7 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
         // the output of one line, the main line or a branch off it.
         std::vector<RppLine> lines(1);
         std::map<int, int> owner{{0, 0}, {1, 0}};
+        std::map<int, std::pair<int, size_t>> writer; // channel -> the plug-in that last wrote it
         int branches = 0;
         int index = 0;
         bool bypassNext = false, offlineNext = false;
@@ -490,7 +642,8 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                 }
                 RppPlugin p;
                 p.bypassed = bypassed;
-                std::vector<int> inCh{0}, outCh{0};
+                std::vector<int> inCh{0}, outCh{0}, written{0, 1};
+                int keyCh = -1; // the channel its side-chain input reads
                 std::string custom;
                 if (type == "CLAP") {
                     p.kind = "clap";
@@ -498,11 +651,18 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                     custom = fx.head.size() > 3 ? fx.head[3] : "";
                     p.label = plainName(display);
                     p.path = locator.findClap(p.id, p.label);
-                    p.guess = startsWith(p.id, "in.lsp-plug.") ? "~/.clap/lsp-plugins.clap" : "~/.clap/" + p.label + ".clap";
+                    p.guess = startsWith(p.id, "in.lsp-plug.")     ? "~/.clap/lsp-plugins.clap"
+                              : startsWith(p.id, "com.twostorms.") ? "~/.clap/CLAP Plugins Linux/" + p.label + ".clap"
+                                                                   : "~/.clap/" + p.label + ".clap";
                     if (auto ch = pinChannels(fx.child("OUT_PINS"), 0); !ch.empty())
                         outCh = ch;
                     if (auto ch = pinChannels(fx.child("IN_PINS"), 0); !ch.empty())
                         inCh = ch;
+                    written = allPinChannels(fx.child("OUT_PINS"));
+                    // Pins 2-3 are the side-chain input of a stereo plug-in:
+                    // only an explicit mapping counts.
+                    if (auto ch = pinChannels(fx.child("IN_PINS"), 2); !ch.empty())
+                        keyCh = ch[0];
                     std::vector<std::string> b64;
                     if (const RppNode* st = fx.child("STATE"))
                         for (const auto& it : st->items)
@@ -510,6 +670,9 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                                 b64.push_back(it.line);
                     std::vector<uint8_t> state;
                     if (!b64.empty() && decodeBase64(b64, state) && !state.empty()) {
+                        if (p.id == "com.twostorms.irloader")
+                            for (const auto& n : embedTwoStormsIrs(state))
+                                out.notes.push_back(chainName + ": " + n);
                         p.state = "states/" + slug(chainName) + "-" + (index < 10 ? "0" : "") + std::to_string(index) + "-" + slug(p.label) + ".clapstate";
                         out.files.push_back({p.state, state});
                     }
@@ -545,8 +708,14 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                         at += 8ull * nIn;
                         const uint32_t nOut = u32(body, at);
                         at += 4;
-                        if (nOut > 0)
+                        if (nOut > 0) {
                             outCh = maskChannels(u64(body, at));
+                            std::set<int> all;
+                            for (uint32_t k = 0; k < nOut && k < 64; ++k)
+                                for (int c : maskChannels(u64(body, at + 8ull * k)))
+                                    all.insert(c);
+                            written.assign(all.begin(), all.end());
+                        }
                         at += 8ull * nOut;
                         const uint32_t size = u32(body, at);
                         at += 12;
@@ -605,8 +774,17 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                     lines.push_back(b);
                     target = static_cast<int>(lines.size()) - 1;
                 }
-                for (int c : outCh)
+                if (continues && std::count(written.begin(), written.end(), inCh[0]) && !std::count(written.begin(), written.end(), inCh[0] + 1))
+                    out.notes.push_back(chainName + ": " + p.label + " writes channel " + std::to_string(inCh[0] + 1) + " but not " +
+                                        std::to_string(inCh[0] + 2) + " in REAPER; Cue's chains are stereo, so both carry its output");
+                if (keyCh >= 0 && writer.count(keyCh)) {
+                    p.keyLine = writer[keyCh].first;
+                    p.keyIndex = writer[keyCh].second;
+                }
+                for (int c : written) {
                     owner[c] = target;
+                    writer[c] = {target, lines[target].plugins.size()};
+                }
                 lines[target].plugins.push_back(p);
             }
         }
@@ -644,8 +822,44 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
             if (tapLine[o] > 0 && startsWith(lines[tapLine[o]].name, "Branch "))
                 lines[tapLine[o]].name = "Out " + std::to_string(o + 1);
 
+        // Slots as the config will number them: the main line, then the
+        // branches in the order their branch lines appear.
+        std::vector<int> order{0};
+        for (size_t li = 0; li < lines.size(); ++li)
+            for (size_t k = 0; k <= lines[li].plugins.size(); ++k)
+                for (size_t b = 1; b < lines.size(); ++b)
+                    if (lines[b].parent == static_cast<int>(li) && lines[b].after == k)
+                        order.push_back(static_cast<int>(b));
+        std::map<std::pair<int, size_t>, size_t> slotOf;
+        std::vector<std::string> labels;
+        for (int li : order)
+            for (size_t k = 0; k < lines[li].plugins.size(); ++k) {
+                slotOf[{li, k}] = labels.size();
+                labels.push_back(lines[li].plugins[k].label);
+            }
+        // `sidechain = Label`, numbered as Label:N when the chain has more than one.
+        auto keyRef = [&](const RppPlugin& p, int li, size_t k) -> std::string {
+            if (p.keyLine < 0)
+                return "";
+            const size_t from = slotOf[{p.keyLine, p.keyIndex}], self = slotOf[{li, static_cast<size_t>(k)}];
+            const std::string& label = labels[from];
+            if (from >= self) {
+                out.notes.push_back(chainName + ": " + p.label + " takes its side-chain from " + label +
+                                    ", which Cue processes after it; its side-chain gets silence");
+                return "";
+            }
+            int count = 0, nth = 0;
+            for (size_t i = 0; i < labels.size(); ++i)
+                if (labels[i] == label) {
+                    ++count;
+                    if (i == from)
+                        nth = count;
+                }
+            return count > 1 ? label + ":" + std::to_string(nth) : label;
+        };
+
         // Write the chain.
-        auto writePlugin = [&](const RppPlugin& p) {
+        auto writePlugin = [&](const RppPlugin& p, int li, size_t k) {
             const std::string path = p.path.empty() ? p.guess : homeShort(p.path);
             chainsText << "plugin = " << p.kind << ":" << path << (p.id.empty() ? "" : "#" + p.id);
             if (p.path.empty())
@@ -660,6 +874,8 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                 chainsText << "param = " << p.params[i] << (i < p.comments.size() ? "   ; " + p.comments[i] : "") << "\n";
             if (p.bypassed)
                 chainsText << "bypass = yes\n";
+            if (auto ref = keyRef(p, li, k); !ref.empty())
+                chainsText << "sidechain = " << ref << "\n";
         };
         auto writeLine = [&](int li) {
             const RppLine& l = lines[li];
@@ -668,7 +884,7 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                     if (lines[b].parent == li && lines[b].after == k)
                         chainsText << "branch = " << lines[b].name << "\n";
                 if (k < l.plugins.size())
-                    writePlugin(l.plugins[k]);
+                    writePlugin(l.plugins[k], li, k);
             }
             for (int o = 0; o < 2; ++o)
                 if (tapLine[o] == li && li > 0)

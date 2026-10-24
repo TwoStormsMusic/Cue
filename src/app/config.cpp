@@ -36,6 +36,18 @@ bool parseBool(const std::string& v, bool& out) {
     return true;
 }
 
+// thru (the input passes untouched) or mute (nothing passes): out = mute.
+bool parseBypassMode(const std::string& v, bool& mute) {
+    const std::string l = lower(v);
+    if (l == "thru" || l == "through")
+        mute = false;
+    else if (l == "mute")
+        mute = true;
+    else
+        return false;
+    return true;
+}
+
 bool parseNumber(const std::string& v, double& out) {
     if (v.empty())
         return false;
@@ -261,6 +273,11 @@ struct Parser {
         else if (key == "bypass_fade_ms" && isNum) config.engine.bypassFadeMs = static_cast<float>(n);
         else if (key == "mute_fade_ms" && isNum) config.engine.muteFadeMs = static_cast<float>(n);
         else if (key == "reset_tails_on_warm" && parseBool(value, b)) config.engine.resetTailsOnWarmSwitch = b;
+        else if (key == "bypass_mode") {
+            if (!parseBypassMode(value, b))
+                return fail("bypass_mode is thru or mute");
+            config.muteOnBypass = b;
+        }
         else if (key == "warm") {
             config.warm = lower(value);
             if (config.warm != "none" && config.warm != "next")
@@ -344,6 +361,19 @@ struct Parser {
             if (!parseBool(value, b))
                 return fail("bypass is yes or no");
             last->bypassed = b;
+        } else if (key == "bypass_mode") {
+            if (!needPlugin("bypass_mode"))
+                return false;
+            if (!parseBypassMode(value, b))
+                return fail("bypass_mode is thru or mute");
+            last->muteOnBypass = b;
+            last->bypassModeSet = true;
+        } else if (key == "sidechain") {
+            if (!needPlugin("sidechain"))
+                return false;
+            if (value.empty())
+                return fail("sidechain names an earlier plug-in of the chain, like sidechain = TwoStorms Gate");
+            last->sidechain = value;
         } else if (key == "midi") {
             if (!needPlugin("midi"))
                 return false;
@@ -601,6 +631,46 @@ std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain) {
     return out;
 }
 
+bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
+                     std::string* error) {
+    feeds.clear();
+    const auto plugins = chainPlugins(chain);
+    for (size_t slot = 0; slot < plugins.size() && slot < labels.size(); ++slot) {
+        const PluginSpec& ps = *plugins[slot];
+        if (ps.sidechain.empty())
+            continue;
+        std::string label = trim(ps.sidechain);
+        int nth = 0;
+        double n = 0;
+        const auto colon = label.rfind(':');
+        if (colon != std::string::npos && parseNumber(trim(label.substr(colon + 1)), n) && n >= 1) {
+            nth = static_cast<int>(n);
+            label = trim(label.substr(0, colon));
+        }
+        int source = -1, count = 0;
+        for (size_t i = 0; i < labels.size(); ++i) {
+            if (lower(labels[i]) != lower(label))
+                continue;
+            ++count;
+            if (nth ? count == nth : i < slot)
+                source = static_cast<int>(i);
+            if (nth && count == nth)
+                break;
+        }
+        const std::string where = ps.where + ": sidechain = " + ps.sidechain + ": ";
+        if (source < 0) {
+            *error = where + "no plug-in named '" + label + "'" + (nth ? " (number " + std::to_string(nth) + ")" : " before it") + " in chain " + chain.name;
+            return false;
+        }
+        if (static_cast<size_t>(source) >= slot) {
+            *error = where + "it comes after the plug-in it would feed; a side-chain comes from an earlier plug-in (main line first, then each branch)";
+            return false;
+        }
+        feeds.push_back({slot, static_cast<size_t>(source)});
+    }
+    return true;
+}
+
 bool parseConfigText(const std::string& text, const std::string& path, Config& config, std::string* error) {
     Parser parser{config, error};
     if (!parser.parse(text, path))
@@ -652,6 +722,10 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
                     c.out[o].line = 0;
                     c.out[o].after = c.lines[0].plugins.size();
                 }
+            for (auto& l : c.lines)
+                for (auto& p : l.plugins)
+                    if (!p.bypassModeSet)
+                        p.muteOnBypass = config.muteOnBypass;
         }
     }
     for (auto& c : config.controls)

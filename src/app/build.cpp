@@ -85,7 +85,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             const int chainIndex = static_cast<int>(rig.chainNames.size());
             std::printf("  chain '%s'\n", cs.name.c_str());
             std::vector<Line> lines;
-            std::vector<bool> initialBypass;
+            std::vector<bool> initialBypass, muteOnBypass;
+            std::vector<std::string> labels;
             size_t slot = 0;
             for (const LineSpec& ls : cs.lines) {
                 Line line;
@@ -138,21 +139,35 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     rp.label = ps.label.empty() ? p->name() : ps.label;
                     rp.midi = ps.midi && p->acceptsMidi();
                     rp.bypassed = ps.bypassed;
-                    std::printf("    %-34s %7.1f ms%s%s%s\n", p->name().c_str(), ms, rp.label == p->name() ? "" : ("  as '" + rp.label + "'").c_str(),
-                                ps.bypassed ? "  bypassed" : "", rp.midi ? "  takes MIDI" : "");
+                    std::printf("    %-34s %7.1f ms%s%s%s%s%s\n", p->name().c_str(), ms, rp.label == p->name() ? "" : ("  as '" + rp.label + "'").c_str(),
+                                ps.bypassed ? "  bypassed" : "", ps.muteOnBypass ? "  mutes when bypassed" : "", rp.midi ? "  takes MIDI" : "",
+                                ps.sidechain.empty() ? "" : ("  side-chain from '" + ps.sidechain + "'").c_str());
                     rig.plugins.push_back(rp);
                     initialBypass.push_back(ps.bypassed);
+                    muteOnBypass.push_back(ps.muteOnBypass);
+                    labels.push_back(rp.label);
+                    if (!ps.sidechain.empty() && !p->hasSidechain()) {
+                        *error = ps.where + ": sidechain = " + ps.sidechain + ": " + p->name() + " has no side-chain input";
+                        return false;
+                    }
                     line.slots.push_back(std::move(p));
                 }
                 lines.push_back(std::move(line));
             }
+            std::vector<std::pair<size_t, size_t>> feeds;
+            if (!chainSidechains(cs, labels, feeds, error))
+                return false;
             std::vector<OutputTap> taps;
             for (const TapSpec& t : cs.out)
                 taps.push_back({t.line, t.after, config.mix});
             auto chain = std::make_unique<Chain>(cs.name, std::move(lines), std::move(taps));
-            for (size_t i = 0; i < initialBypass.size(); ++i)
+            for (size_t i = 0; i < initialBypass.size(); ++i) {
                 if (initialBypass[i])
                     chain->setInitialBypass(i, true);
+                chain->setMuteOnBypass(i, muteOnBypass[i]);
+            }
+            for (auto [slot, source] : feeds)
+                chain->setSidechain(slot, source);
             rig.engine->addChain(std::move(chain));
             rig.chainNames.push_back(cs.name);
         }
@@ -183,6 +198,11 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     if (!p->setParam(id, value))
                         std::fprintf(stderr, "warning: %s: %s did not take param %u\n", ps->where.c_str(), p->name().c_str(), id);
             }
+
+    // First-block setup now, not on the first switch to a chain.
+    const auto t1 = std::chrono::steady_clock::now();
+    rig.engine->prime(100.0f);
+    std::printf("primed every plug-in in %.1f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
     return true;
 }
 

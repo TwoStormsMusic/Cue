@@ -334,6 +334,7 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     uint64_t othersProcessed = 0;
     std::vector<float> wav1, wav2;
     bool realtime = false, pinned = false;
+    std::atomic<bool> done{false};
     std::thread worker([&] {
         enableFlushToZero();
         markClapAudioThread();
@@ -407,7 +408,13 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
                 if (ev.type == EngineEvent::Type::ChainActive && config.warm == "next" && engine.numChains() > 1)
                     engine.setWarm((ev.chain + 1) % static_cast<int>(engine.numChains()));
         }
+        done = true;
     });
+    // Plug-in callbacks and timers, as cue run services them.
+    while (!done) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        rig.pumpMainThread();
+    }
     worker.join();
 
     auto stats = [&](std::vector<double> v, const char* what) {
@@ -491,11 +498,18 @@ int cmdCheck(const std::string& path, bool loadPlugins) {
         for (const auto& scene : config.scenes)
             for (const auto& c : scene.chains) {
                 size_t slot = 0;
+                std::vector<std::string> labels;
                 for (const PluginSpec* ps : chainPlugins(c)) {
                     std::string label = ps->label;
                     if (label.empty())
                         label = ps->kind == "builtin" ? ps->args[0] : std::filesystem::path(ps->path).stem().string();
                     plugins.push_back({static_cast<int>(chains), slot++, label, ps->midi, ps->bypassed});
+                    labels.push_back(label);
+                }
+                std::vector<std::pair<size_t, size_t>> feeds;
+                if (!chainSidechains(c, labels, feeds, &err)) {
+                    std::fprintf(stderr, "config: %s\n", err.c_str());
+                    return 2;
                 }
                 ++chains;
             }

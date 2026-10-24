@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.2.0 LANGUAGES C CXX)
+project(cue VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +46,7 @@ target_link_libraries(vst3_hosting PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 add_library(cue_core STATIC
   src/core/engine.cpp
   src/core/chain.cpp
+  src/core/processor.cpp
 )
 target_include_directories(cue_core PUBLIC src)
 
