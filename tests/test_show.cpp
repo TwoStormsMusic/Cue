@@ -8,6 +8,7 @@
 #include "midi/eurekaprom.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -396,7 +397,8 @@ TEST(show_template_mapping_does_what_reaLearn_did) {
                 "]\nplugin = builtin:gain 1\nname = TwoStorms Gain Stage\n"
                 "plugin = builtin:gain 1\nname = TwoStorms Wah\nbypass = yes\n"
                 "plugin = builtin:gain 1\nname = TwoStorms Wah\nbypass = yes\n";
-    text += "include = " CUE_SOURCE_DIR "/configs/cue-template-mapping.ini\n";
+    const char* configs = std::getenv("CUE_CONFIGS") ? std::getenv("CUE_CONFIGS") : CUE_SOURCE_DIR "/configs";
+    text += std::string("include = ") + configs + "/cue-template-mapping.ini\n";
     Recorder out;
     Show show(out);
     Config c;

@@ -137,6 +137,7 @@ struct Config {
     std::vector<GroupSpec> groups;
     FcbSpec fcb;
     std::string path;          // the file that was loaded
+    std::vector<std::string> warnings; // things that load but are probably mistakes
 };
 
 // Parses the INI-style config described in docs/config.md.

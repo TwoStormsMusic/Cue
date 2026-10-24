@@ -6,6 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 export CUE_TEST_CLAP="$here/plugins/Cue Test Plugins.clap"
 export CUE_TEST_VST3="$here/plugins/Cue Test.vst3"
 export CUE_TEST_VST3_SO="$here/plugins/Cue Test.vst3/Contents/x86_64-linux/Cue Test.so"
+export CUE_CONFIGS="$here/configs"
 
 status=0
 echo "== unit tests"

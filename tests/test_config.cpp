@@ -242,6 +242,13 @@ TEST(config_reports_the_line_of_a_mistake) {
     Config f;
     CHECK(!parse("[chain A]\nplugin = builtin:gain 1\n[control Wah]\nvalues = Off, On\ndefault = Maybe\n", f, err));
     CHECK_MSG(err.find("Maybe") != std::string::npos, "%s", err.c_str());
+
+    // A preset that plays the first chain only because it names none is
+    // probably a mistake when the scene has several.
+    Config g;
+    CHECK(parse("[chain A]\nplugin = builtin:gain 1\n[chain B]\nplugin = builtin:gain 1\n[preset B]\n[preset Loud]\n", g, err));
+    CHECK_MSG(g.warnings.size() == 1 && g.warnings[0].find("preset 'Loud'") != std::string::npos && g.warnings[0].find("test.ini:6") != std::string::npos,
+              "%s", g.warnings.empty() ? "no warning" : g.warnings[0].c_str());
 }
 
 TEST(eurekaprom_decodes_pedals_and_expression) {

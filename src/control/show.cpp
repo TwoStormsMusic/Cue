@@ -1025,6 +1025,7 @@ struct Show::Impl {
     bool load(const Config& cfg, const std::vector<ShowPlugin>& plugs, std::string* error) {
         config = cfg;
         plugins = plugs;
+        warnings = cfg.warnings;
         bypassed.clear();
         for (const ShowPlugin& p : plugins)
             bypassed.push_back(p.bypassed ? 1 : 0);

@@ -629,9 +629,14 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
             if (p.chain.empty()) {
                 // The chain of the same name, or the scene's first chain.
                 p.chain = s.chains.front().name;
+                bool named = false;
                 for (const auto& c : s.chains)
-                    if (lower(c.name) == lower(p.name))
+                    if (lower(c.name) == lower(p.name)) {
                         p.chain = c.name;
+                        named = true;
+                    }
+                if (!named && s.chains.size() > 1)
+                    config.warnings.push_back(p.where + ": preset '" + p.name + "' has no 'chain =' line and no chain of its name, so it plays the first chain, " + p.chain);
             }
             bool found = false;
             for (const auto& c : s.chains)
