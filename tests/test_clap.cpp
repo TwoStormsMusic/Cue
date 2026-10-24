@@ -66,12 +66,12 @@ float runConstant(Engine& e, float value, size_t blocks, std::vector<float>* all
 TEST(clap_file_lists_its_plugins) {
     std::string err;
     auto list = scanClapFile(kTestClap, &err);
-    CHECK_MSG(list.size() == 4, "found %zu plug-ins (%s)", list.size(), err.c_str());
-    if (list.size() == 4)
+    CHECK_MSG(list.size() == 5, "found %zu plug-ins (%s)", list.size(), err.c_str());
+    if (list.size() == 5)
         CHECK(list[0].id == "cue.test.gain" && list[1].name == "Test Delay");
 }
 
-TEST(clap_gain_runs_in_a_scene) {
+TEST(clap_gain_runs_in_a_chain) {
     markClapAudioThread();
     Engine e(settings());
     std::vector<std::unique_ptr<Processor>> chain;
@@ -163,4 +163,58 @@ TEST(clap_state_round_trips) {
     CHECK(g->loadState(other));
     CHECK(g->saveState(state) && std::memcmp(state.data(), &v, sizeof v) == 0);
     g->deactivate();
+}
+
+TEST(clap_midi_reaches_a_plugin_with_a_midi_input) {
+    markClapAudioThread();
+    auto pedal = load("cue.test.pedal");
+    auto gain = load("cue.test.gain");
+    CHECK(pedal && gain);
+    if (!pedal || !gain)
+        return;
+    CHECK(pedal->acceptsMidi());
+    CHECK(!gain->acceptsMidi());
+    ClapProcessor* pp = pedal.get();
+    Engine e(settings());
+    std::vector<std::unique_ptr<Processor>> a, b;
+    a.push_back(std::move(pedal));
+    b.push_back(std::move(gain));
+    e.addChain(chainOf(std::move(a)));
+    e.addChain(chainOf(std::move(b)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    CHECK(std::fabs(runConstant(e, 1.0f, 200) - 1.0f) < 1e-4f);
+    pp->sendMidi(0xB0, 11, 64); // the pedal halfway
+    const float half = runConstant(e, 1.0f, 2);
+    CHECK_MSG(std::fabs(half - 64.0f / 127.0f) < 1e-4f, "output %.4f after CC 11 = 64", half);
+    CHECK(stat("last_cc") == 11 && stat("last_cc_value") == 64);
+}
+
+TEST(clap_idle_plugin_gets_the_latest_pedal_position_when_its_chain_starts) {
+    markClapAudioThread();
+    auto pedal = load("cue.test.pedal");
+    auto gain = load("cue.test.gain");
+    if (!pedal || !gain)
+        return;
+    ClapProcessor* pp = pedal.get();
+    Engine e(settings());
+    std::vector<std::unique_ptr<Processor>> a, b;
+    a.push_back(std::move(gain));
+    b.push_back(std::move(pedal));
+    e.addChain(chainOf(std::move(a)));
+    e.addChain(chainOf(std::move(b)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    runConstant(e, 1.0f, 50);
+    // The pedal moves 100 times while its chain is idle.
+    const long before = stat("midi_events");
+    for (int v = 0; v < 100; ++v)
+        pp->sendMidi(0xB0, 11, static_cast<uint8_t>(v));
+    pp->sendMidi(0xB0, 11, 32);
+    runConstant(e, 1.0f, 50);
+    CHECK(stat("midi_events") == before); // not processed, nothing delivered yet
+    e.switchTo(1);
+    const float out = runConstant(e, 1.0f, 400);
+    CHECK_MSG(std::fabs(out - 32.0f / 127.0f) < 1e-4f, "output %.4f, expected the last position 32/127", out);
+    CHECK_MSG(stat("midi_events") - before == 1, "%ld events delivered, expected only the latest", stat("midi_events") - before);
 }

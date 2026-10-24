@@ -219,12 +219,21 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->state_ = static_cast<const clap_plugin_state_t*>(ext(CLAP_EXT_STATE));
     p->latency_ = static_cast<const clap_plugin_latency_t*>(ext(CLAP_EXT_LATENCY));
     p->tail_ = static_cast<const clap_plugin_tail_t*>(ext(CLAP_EXT_TAIL));
+    if (const auto* notes = static_cast<const clap_plugin_note_ports_t*>(ext(CLAP_EXT_NOTE_PORTS))) {
+        for (uint32_t i = 0, n = notes->count(p->plugin_, true); i < n; ++i) {
+            clap_note_port_info_t info{};
+            if (notes->get(p->plugin_, i, true, &info) && (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI)) {
+                p->midiPort_ = static_cast<int>(i);
+                break;
+            }
+        }
+    }
 
     p->inEvents_ = std::make_unique<InputEvents>();
     p->inEvents_->list = {p->inEvents_.get(), InputEvents::size, InputEvents::get};
     p->inEvents_->self = p.get();
     p->outEvents_ = {nullptr, outTryPush};
-    p->events_.resize(512);
+    p->events_.resize(1024);
     return p;
 }
 
@@ -383,7 +392,7 @@ void ClapProcessor::drainParams(uint32_t maxEvents) {
         auto change = paramQueue_.pop();
         if (!change)
             break;
-        clap_event_param_value_t& ev = events_[n++];
+        clap_event_param_value_t& ev = events_[n++].param;
         ev = {};
         ev.header.size = sizeof ev;
         ev.header.time = 0;
@@ -436,9 +445,11 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
         return;
     }
     if (paramsPending_.load(std::memory_order_acquire))
-        drainParams(static_cast<uint32_t>(events_.size()));
+        drainParams(static_cast<uint32_t>(events_.size() / 2));
     else
         inEvents_->count = 0;
+    if (midiPending_.load(std::memory_order_acquire))
+        drainMidi();
 
     float* monoIn = scratch_.data() + scratch_.size() - 2 * static_cast<size_t>(maxFrames_);
     float* monoOut = monoIn + maxFrames_;
@@ -493,6 +504,80 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
         for (int c = 0; c < kChainChannels; ++c)
             std::memset(out[c], 0, frames * sizeof(float));
     }
+}
+
+void ClapProcessor::sendMidi(uint8_t status, uint8_t data1, uint8_t data2) {
+    if (midiPort_ < 0 || status < 0x80)
+        return;
+    const uint8_t type = status & 0xF0, ch = status & 0x0F;
+    if (type == 0xB0) {
+        const size_t i = ch * 128u + (data1 & 0x7F);
+        ccValue_[i].store(data2 & 0x7F, std::memory_order_relaxed);
+        ccDirty_[i / 64].fetch_or(uint64_t{1} << (i % 64), std::memory_order_release);
+    } else if (type == 0xE0) {
+        bendValue_[ch].store(static_cast<uint16_t>((data2 & 0x7F) << 7 | (data1 & 0x7F)), std::memory_order_relaxed);
+        bendDirty_.fetch_or(1u << ch, std::memory_order_release);
+    } else if (!midiQueue_.push({{status, data1, data2}})) {
+        return; // the plug-in's chain is idle and the queue is full: drop
+    }
+    midiPending_.store(true, std::memory_order_release);
+}
+
+void ClapProcessor::pushMidiEvent(uint8_t s, uint8_t d1, uint8_t d2) {
+    clap_event_midi_t& ev = events_[inEvents_->count++].midi;
+    ev = {};
+    ev.header.size = sizeof ev;
+    ev.header.time = 0;
+    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    ev.header.type = CLAP_EVENT_MIDI;
+    ev.header.flags = 0;
+    ev.port_index = static_cast<uint16_t>(midiPort_);
+    ev.data[0] = s;
+    ev.data[1] = d1;
+    ev.data[2] = d2;
+}
+
+void ClapProcessor::drainMidi() {
+    midiPending_.store(false, std::memory_order_relaxed);
+    const uint32_t capacity = static_cast<uint32_t>(events_.size());
+    bool more = false;
+    for (size_t w = 0; w < 16 * 128 / 64; ++w) {
+        uint64_t bits = ccDirty_[w].exchange(0, std::memory_order_acquire);
+        while (bits) {
+            const int b = __builtin_ctzll(bits);
+            bits &= bits - 1;
+            const size_t i = w * 64 + b;
+            if (inEvents_->count >= capacity) {
+                ccDirty_[w].fetch_or(uint64_t{1} << b, std::memory_order_relaxed);
+                more = true;
+                continue;
+            }
+            pushMidiEvent(static_cast<uint8_t>(0xB0 | (i / 128)), static_cast<uint8_t>(i % 128),
+                          ccValue_[i].load(std::memory_order_relaxed));
+        }
+    }
+    uint32_t bends = bendDirty_.exchange(0, std::memory_order_acquire);
+    while (bends) {
+        const int ch = __builtin_ctz(bends);
+        bends &= bends - 1;
+        if (inEvents_->count >= capacity) {
+            bendDirty_.fetch_or(1u << ch, std::memory_order_relaxed);
+            more = true;
+            continue;
+        }
+        const uint16_t v = bendValue_[ch].load(std::memory_order_relaxed);
+        pushMidiEvent(static_cast<uint8_t>(0xE0 | ch), static_cast<uint8_t>(v & 0x7F), static_cast<uint8_t>(v >> 7));
+    }
+    while (inEvents_->count < capacity) {
+        auto m = midiQueue_.pop();
+        if (!m)
+            break;
+        pushMidiEvent(m->data[0], m->data[1], m->data[2]);
+    }
+    if (inEvents_->count >= capacity)
+        more = true; // the queue may still hold messages
+    if (more)
+        midiPending_.store(true, std::memory_order_relaxed);
 }
 
 uint32_t ClapProcessor::latencySamples() const { return cachedLatency_.load(std::memory_order_relaxed); }

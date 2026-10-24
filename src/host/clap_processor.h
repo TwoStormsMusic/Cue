@@ -62,6 +62,9 @@ public:
     void process(const float* const* in, float* const* out, uint32_t frames) override;
     void flushIdle() override;
 
+    bool acceptsMidi() const override { return midiPort_ >= 0; }
+    void sendMidi(uint8_t status, uint8_t data1, uint8_t data2) override;
+
     uint32_t latencySamples() const override;
     uint32_t tailSamples() const override;
 
@@ -78,10 +81,20 @@ private:
         uint32_t id;
         double value;
     };
+    struct MidiBytes {
+        uint8_t data[3];
+    };
+    union Event {
+        clap_event_header_t header;
+        clap_event_param_value_t param;
+        clap_event_midi_t midi;
+    };
     struct InputEvents;
 
     ClapProcessor() = default;
     void drainParams(uint32_t maxEvents);
+    void drainMidi();
+    void pushMidiEvent(uint8_t s, uint8_t d1, uint8_t d2);
     void queryPorts();
 
     std::shared_ptr<ClapLibrary> library_;
@@ -106,10 +119,20 @@ private:
     uint32_t maxFrames_ = 0;
 
     CommandQueue<ParamChange, 512> paramQueue_;
-    std::vector<clap_event_param_value_t> events_;
+    std::vector<Event> events_;
     std::unique_ptr<InputEvents> inEvents_;
     clap_output_events_t outEvents_{};
     std::atomic<bool> paramsPending_{false};
+
+    // MIDI in: the latest value of every controller and pitch bend, with a
+    // bit set for each one changed since the last block; other messages queued.
+    int midiPort_ = -1;
+    std::atomic<uint8_t> ccValue_[16 * 128] = {};
+    std::atomic<uint64_t> ccDirty_[16 * 128 / 64] = {};
+    std::atomic<uint16_t> bendValue_[16] = {};
+    std::atomic<uint32_t> bendDirty_{0};
+    CommandQueue<MidiBytes, 256> midiQueue_;
+    std::atomic<bool> midiPending_{false};
 
     std::atomic<bool> restartRequested_{false}, callbackRequested_{false}, rescanRequested_{false};
     std::atomic<bool> latencyDirty_{false}, tailDirty_{false};

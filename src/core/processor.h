@@ -41,6 +41,14 @@ public:
     // being processed. Must be cheap when there is nothing to do.
     virtual void flushIdle() {}
 
+    // MIDI for plug-ins that take it (a wah moved by an expression pedal).
+    // sendMidi may be called from any non-real-time thread; the message is
+    // delivered with the next processed block. Controller and pitch-bend
+    // values are kept as the latest value, so a plug-in in an idle chain gets
+    // where the pedal is now when its chain starts, not every move since.
+    virtual bool acceptsMidi() const { return false; }
+    virtual void sendMidi(uint8_t /*status*/, uint8_t /*data1*/, uint8_t /*data2*/) {}
+
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.
     virtual uint32_t tailSamples() const { return 0; }
