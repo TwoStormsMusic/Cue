@@ -62,6 +62,7 @@ add_executable(cue
   src/app/main.cpp
   src/app/build.cpp
   src/app/config.cpp
+  src/app/rpp.cpp
   src/control/show.cpp
   src/app/cpu.cpp
   src/app/doctor.cpp
@@ -94,9 +95,10 @@ target_sources(cue_test_vst3 PRIVATE
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp src/app/config.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp src/app/config.cpp src/app/rpp.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
+    CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"
     CUE_TEST_VST3="${TEST_VST3_BUNDLE}"
     CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>")

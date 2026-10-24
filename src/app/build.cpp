@@ -138,8 +138,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     rp.label = ps.label.empty() ? p->name() : ps.label;
                     rp.midi = ps.midi && p->acceptsMidi();
                     rp.bypassed = ps.bypassed;
-                    std::printf("    %-34s %-28s %7.1f ms%s%s\n", p->name().c_str(), rp.label == p->name() ? "" : ("as '" + rp.label + "'").c_str(), ms,
-                                ps.bypassed ? "  bypassed" : "", rp.midi ? "  midi" : "");
+                    std::printf("    %-34s %7.1f ms%s%s%s\n", p->name().c_str(), ms, rp.label == p->name() ? "" : ("  as '" + rp.label + "'").c_str(),
+                                ps.bypassed ? "  bypassed" : "", rp.midi ? "  takes MIDI" : "");
                     rig.plugins.push_back(rp);
                     initialBypass.push_back(ps.bypassed);
                     line.slots.push_back(std::move(p));

@@ -5,8 +5,10 @@
 //   cue doctor [--device M2]     check real-time settings
 //   cue devices                  list sound cards and MIDI ports
 //   cue check <config>           load everything, check the mappings, print the performance
+//                                (--no-load: check without loading plug-ins)
 //   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
 //   cue params <file>[#id]       list a plug-in's parameters and their ids
+//   cue import-rpp <file.rpp>    make a config from a REAPER project
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
@@ -14,6 +16,7 @@
 #include "app/config.h"
 #include "app/cpu.h"
 #include "app/doctor.h"
+#include "app/rpp.h"
 #include "control/show.h"
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
@@ -35,8 +38,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -466,15 +471,34 @@ int cmdDevices() {
 
 // Loads the config and every plug-in, compiles the mappings, and prints
 // what the performance holds. No audio or MIDI is opened.
-int cmdCheck(const std::string& path) {
+int cmdCheck(const std::string& path, bool loadPlugins) {
     Config config;
     if (!load(path, config))
         return 2;
     Rig rig;
     std::string err;
-    if (!buildRig(config, rig, &err)) {
-        std::fprintf(stderr, "error: %s\n", err.c_str());
-        return 1;
+    std::vector<ShowPlugin> plugins;
+    size_t chains = 0;
+    if (loadPlugins) {
+        if (!buildRig(config, rig, &err)) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        plugins = rig.showPlugins();
+        chains = rig.chainNames.size();
+    } else {
+        // Plug-ins named by their name = lines, or their file name.
+        for (const auto& scene : config.scenes)
+            for (const auto& c : scene.chains) {
+                size_t slot = 0;
+                for (const PluginSpec* ps : chainPlugins(c)) {
+                    std::string label = ps->label;
+                    if (label.empty())
+                        label = ps->kind == "builtin" ? ps->args[0] : std::filesystem::path(ps->path).stem().string();
+                    plugins.push_back({static_cast<int>(chains), slot++, label, ps->midi, ps->bypassed});
+                }
+                ++chains;
+            }
     }
     struct NoOutput : ShowOutput {
         void switchTo(int) override {}
@@ -486,12 +510,13 @@ int cmdCheck(const std::string& path) {
         void forwardMidi(int, size_t, const MidiMessage&) override {}
     } none;
     Show show(none);
-    if (!show.load(config, rig.showPlugins(), &err)) {
+    if (!show.load(config, plugins, &err)) {
         std::fprintf(stderr, "config: %s\n", err.c_str());
         return 2;
     }
+    show.start(); // values as the first preset leaves them
     std::printf("\nperformance%s%s: %zu scene(s), %zu chain(s), %zu preset(s)\n", config.performance.empty() ? "" : " ",
-                config.performance.c_str(), config.scenes.size(), rig.chainNames.size(), show.numPresets());
+                config.performance.c_str(), config.scenes.size(), chains, show.numPresets());
     int presetNo = 0;
     for (const auto& scene : config.scenes) {
         std::printf("scene %s%s\n", scene.name.c_str(), scene.pedal ? (", pedal " + std::to_string(scene.pedal)).c_str() : "");
@@ -527,7 +552,7 @@ int cmdCheck(const std::string& path) {
         std::printf("group %s: %zu action(s)\n", g.name.c_str(), g.actions.size());
     for (const auto& w : show.warnings())
         std::printf("warning: %s\n", w.c_str());
-    std::printf("config OK\n");
+    std::printf(loadPlugins ? "config OK\n" : "config OK (plug-ins not loaded)\n");
     return 0;
 }
 
@@ -554,6 +579,59 @@ int cmdParams(const std::string& spec) {
                     i.steps > 0 ? ("  " + std::to_string(i.steps + 1) + " steps").c_str() : "");
     p->deactivate();
     return 0;
+}
+
+int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vector<std::string>& search, std::string mapping, bool scan) {
+    namespace fs = std::filesystem;
+    std::ifstream f(rppPath);
+    if (!f) {
+        std::fprintf(stderr, "cannot open %s\n", rppPath.c_str());
+        return 1;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string project = fs::path(rppPath).stem().string();
+    if (outDir.empty())
+        outDir = expandPath("~/cue/" + project);
+    if (!mapping.empty()) {
+        std::error_code ec;
+        const auto abs = fs::absolute(mapping, ec);
+        if (!fs::exists(abs, ec)) {
+            std::fprintf(stderr, "mapping file %s not found\n", mapping.c_str());
+            return 1;
+        }
+        mapping = abs.string();
+    }
+    std::printf("looking for plug-ins%s...\n", scan ? " (opening native .clap files if needed)" : "");
+    SystemLocator locator(search, "~/.config/REAPER", scan);
+    Import result;
+    std::string err;
+    if (!convertRpp(ss.str(), project, locator, mapping, result, &err)) {
+        std::fprintf(stderr, "%s: %s\n", rppPath.c_str(), err.c_str());
+        return 1;
+    }
+    std::error_code ec;
+    fs::create_directories(fs::path(outDir) / "states", ec);
+    if (ec) {
+        std::fprintf(stderr, "cannot create %s: %s\n", outDir.c_str(), ec.message().c_str());
+        return 1;
+    }
+    for (const auto& file : result.files) {
+        std::ofstream o(fs::path(outDir) / file.path, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(file.data.data()), static_cast<std::streamsize>(file.data.size()));
+    }
+    const fs::path configPath = fs::path(outDir) / (project + ".ini");
+    if (fs::exists(configPath, ec)) {
+        fs::copy_file(configPath, configPath.string() + ".bak", fs::copy_options::overwrite_existing, ec);
+        std::printf("kept the previous config as %s.bak\n", configPath.c_str());
+    }
+    std::ofstream(configPath) << result.config;
+    std::printf("\nwrote %s\n  %d chain(s), %d plug-in(s), %zu state file(s); %d left out, %d not found\n", configPath.c_str(), result.chains,
+                result.plugins, result.files.size(), result.skipped, result.missing);
+    for (const auto& n : result.notes)
+        std::printf("  - %s\n", n.c_str());
+    std::printf("\nnext: cue check \"%s\"\n", configPath.c_str());
+    return result.missing ? 3 : 0;
 }
 
 int cmdScan(const std::string& path) {
@@ -636,9 +714,10 @@ int usage() {
                  "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
-                 "  cue check <config.ini>\n"
+                 "  cue check <config.ini> [--no-load]\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
+                 "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
                  "  cue midi-monitor [port-match]\n"
                  "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -669,8 +748,22 @@ int main(int argc, char** argv) {
     }
     if (cmd == "devices")
         return cmdDevices();
-    if (cmd == "check" && argc >= 3)
-        return cmdCheck(argv[2]);
+    if (cmd == "import-rpp" && argc >= 3) {
+        std::vector<std::string> search;
+        for (int i = 3; i + 1 < argc; ++i)
+            if (std::strcmp(argv[i], "--search") == 0)
+                search.push_back(argv[i + 1]);
+        bool scan = true;
+        for (int i = 3; i < argc; ++i)
+            scan = scan && std::strcmp(argv[i], "--no-scan") != 0;
+        return cmdImportRpp(argv[2], opt("--out", ""), search, opt("--mapping", ""), scan);
+    }
+    if (cmd == "check" && argc >= 3) {
+        bool loadPlugins = true;
+        for (int i = 3; i < argc; ++i)
+            loadPlugins = loadPlugins && std::strcmp(argv[i], "--no-load") != 0;
+        return cmdCheck(argv[2], loadPlugins);
+    }
     if (cmd == "params" && argc >= 3)
         return cmdParams(argv[2]);
     if (cmd == "scan" && argc >= 3)

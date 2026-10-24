@@ -387,3 +387,35 @@ TEST(show_reports_mistakes_with_their_line) {
     fails("[control X]\nenable = Flanger when on\n", "no plug-in named 'Flanger'");
     fails("[fcb]\nled 3 = Wah is Purple\n", "not a value of Wah");
 }
+
+TEST(show_template_mapping_does_what_reaLearn_did) {
+    // The shipped mapping, included after five chains as an import makes them.
+    std::string text = "[scene Cue Template]\n";
+    for (const char* name : {"Punk", "Slap", "2000s", "Motown", "Djent"})
+        text += std::string("[chain ") + name +
+                "]\nplugin = builtin:gain 1\nname = TwoStorms Gain Stage\n"
+                "plugin = builtin:gain 1\nname = TwoStorms Wah\nbypass = yes\n"
+                "plugin = builtin:gain 1\nname = TwoStorms Wah\nbypass = yes\n";
+    text += "include = " CUE_SOURCE_DIR "/configs/cue-template-mapping.ini\n";
+    Recorder out;
+    Show show(out);
+    Config c;
+    std::string err;
+    CHECK_MSG(loadShow(show, text, c, err), "%s", err.c_str());
+    show.start();
+    CHECK(show.numPresets() == 5 && show.presetName(0) == "Punk" && show.display() == "PU");
+    CHECK(show.valueText("Effect 1") == "on" && out.ledLit(1) && out.ledLit(6));
+    show.onMidi(press(9));
+    CHECK(show.presetName(show.preset()) == "Motown" && out.switches.back() == 3 && show.display() == "MO");
+    show.onMidi(press(4)); // auto wah: the first wah, in every chain
+    CHECK(show.valueText("Wah") == "Auto");
+    for (int chain = 0; chain < 5; ++chain)
+        CHECK(out.by(chain, 1) == 0 && out.by(chain, 2) == -1);
+    show.onMidi(press(4)); // pedal wah: the second
+    CHECK(show.valueText("Wah") == "Pedal" && out.by(3, 1) == 1 && out.by(3, 2) == 0);
+    show.onMidi(press(5));
+    CHECK(show.muted() && show.display() == "TU");
+    show.onMidi(press(5));
+    show.onMidi(press(8)); // 2000s: the wah resets
+    CHECK(show.valueText("Wah") == "Off" && out.by(3, 2) == 1 && show.display() == "OO" && !show.muted());
+}
