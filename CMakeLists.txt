@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(stagehost VERSION 0.1.0 LANGUAGES C CXX)
+project(cue VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-option(STAGEHOST_BUILD_TESTS "Build the offline tests" ON)
+option(CUE_BUILD_TESTS "Build the offline tests" ON)
 
 find_package(Threads REQUIRED)
 
@@ -43,22 +43,22 @@ target_compile_options(vst3_hosting PRIVATE -w)
 set_target_properties(vst3_hosting PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(vst3_hosting PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 
-add_library(stagehost_core STATIC
+add_library(cue_core STATIC
   src/core/engine.cpp
   src/core/scene.cpp
 )
-target_include_directories(stagehost_core PUBLIC src)
+target_include_directories(cue_core PUBLIC src)
 
-add_library(stagehost_host STATIC
+add_library(cue_host STATIC
   src/host/clap_processor.cpp
   src/host/vst3_processor.cpp
 )
-target_link_libraries(stagehost_host PUBLIC stagehost_core clap_headers vst3_hosting ${CMAKE_DL_LIBS})
+target_link_libraries(cue_host PUBLIC cue_core clap_headers vst3_hosting ${CMAKE_DL_LIBS})
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
 
-add_executable(stagehost
+add_executable(cue
   src/app/main.cpp
   src/app/build.cpp
   src/app/config.cpp
@@ -67,39 +67,39 @@ add_executable(stagehost
   src/audio/alsa_backend.cpp
   src/midi/alsa_midi.cpp
 )
-target_link_libraries(stagehost PRIVATE stagehost_host PkgConfig::ALSA Threads::Threads)
+target_link_libraries(cue PRIVATE cue_host PkgConfig::ALSA Threads::Threads)
 # Self-contained C++ runtime, so the binary runs on any distribution with glibc 2.38 or newer.
-target_link_options(stagehost PRIVATE -static-libstdc++ -static-libgcc)
+target_link_options(cue PRIVATE -static-libstdc++ -static-libgcc)
 
 # Test plug-ins: one .clap file with gain, delay, burn and crash plug-ins.
-add_library(stagehost_test_plugins MODULE plugins/test/test_plugins.cpp)
-target_link_libraries(stagehost_test_plugins PRIVATE clap_headers)
-set_target_properties(stagehost_test_plugins PROPERTIES PREFIX "" SUFFIX ".clap"
-  OUTPUT_NAME "Stagehost Test Plugins" CXX_VISIBILITY_PRESET hidden)
+add_library(cue_test_plugins MODULE plugins/test/test_plugins.cpp)
+target_link_libraries(cue_test_plugins PRIVATE clap_headers)
+set_target_properties(cue_test_plugins PROPERTIES PREFIX "" SUFFIX ".clap"
+  OUTPUT_NAME "Cue Test Plugins" CXX_VISIBILITY_PRESET hidden)
 
 # Test VST3: a bundle with the shared object at Contents/x86_64-linux.
-set(TEST_VST3_BUNDLE "${CMAKE_BINARY_DIR}/Stagehost Test.vst3")
-add_library(stagehost_test_vst3 MODULE plugins/test/test_vst3.cpp)
-target_include_directories(stagehost_test_vst3 PRIVATE ${VST3_DIR})
-target_compile_definitions(stagehost_test_vst3 PRIVATE RELEASE=1)
-target_compile_options(stagehost_test_vst3 PRIVATE -Wno-unused-function)
-set_target_properties(stagehost_test_vst3 PROPERTIES PREFIX "" SUFFIX ".so" OUTPUT_NAME "Stagehost Test"
+set(TEST_VST3_BUNDLE "${CMAKE_BINARY_DIR}/Cue Test.vst3")
+add_library(cue_test_vst3 MODULE plugins/test/test_vst3.cpp)
+target_include_directories(cue_test_vst3 PRIVATE ${VST3_DIR})
+target_compile_definitions(cue_test_vst3 PRIVATE RELEASE=1)
+target_compile_options(cue_test_vst3 PRIVATE -Wno-unused-function)
+set_target_properties(cue_test_vst3 PROPERTIES PREFIX "" SUFFIX ".so" OUTPUT_NAME "Cue Test"
   LIBRARY_OUTPUT_DIRECTORY "${TEST_VST3_BUNDLE}/Contents/x86_64-linux" CXX_VISIBILITY_PRESET hidden)
 # The interfaces' IIDs are defined in funknown/coreiids sources the plug-in needs too.
-target_sources(stagehost_test_vst3 PRIVATE
+target_sources(cue_test_vst3 PRIVATE
   ${VST3_DIR}/pluginterfaces/base/coreiids.cpp
   ${VST3_DIR}/pluginterfaces/base/funknown.cpp
   ${VST3_DIR}/public.sdk/source/vst/vstinitiids.cpp)
 
-if(STAGEHOST_BUILD_TESTS)
+if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(stagehost_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp src/app/config.cpp)
-  target_link_libraries(stagehost_tests PRIVATE stagehost_host PkgConfig::ALSA)
-  target_compile_definitions(stagehost_tests PRIVATE
-    STAGEHOST_TEST_CLAP="$<TARGET_FILE:stagehost_test_plugins>"
-    STAGEHOST_TEST_VST3="${TEST_VST3_BUNDLE}"
-    STAGEHOST_TEST_VST3_SO="$<TARGET_FILE:stagehost_test_vst3>")
-  add_dependencies(stagehost_tests stagehost_test_plugins stagehost_test_vst3)
-  target_link_options(stagehost_tests PRIVATE -static-libstdc++ -static-libgcc)
-  add_test(NAME stagehost_tests COMMAND stagehost_tests)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp src/app/config.cpp)
+  target_link_libraries(cue_tests PRIVATE cue_host PkgConfig::ALSA)
+  target_compile_definitions(cue_tests PRIVATE
+    CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"
+    CUE_TEST_VST3="${TEST_VST3_BUNDLE}"
+    CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>")
+  add_dependencies(cue_tests cue_test_plugins cue_test_vst3)
+  target_link_options(cue_tests PRIVATE -static-libstdc++ -static-libgcc)
+  add_test(NAME cue_tests COMMAND cue_tests)
 endif()

@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 struct PluginSpec {
     std::string kind;              // "clap", "vst3" or "builtin"
@@ -50,4 +50,4 @@ struct Config {
 // Parses the INI-style config described in configs/example.ini.
 bool loadConfig(const std::string& path, Config& config, std::string* error);
 
-} // namespace sh
+} // namespace cue

@@ -4,7 +4,7 @@
 //
 // Like a well-behaved plug-in it clears its delay line when processing is
 // switched on, and it records how the host drives it in counters exported
-// as stagehost_vst3_test_stat().
+// as cue_vst3_test_stat().
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -227,7 +227,7 @@ public:
         std::memcpy(info->cid, kClassId, sizeof(TUID));
         info->cardinality = PClassInfo::kManyInstances;
         std::strncpy(info->category, kVstAudioEffectClass, PClassInfo::kCategorySize - 1);
-        std::strncpy(info->name, "Stagehost Test Delay", PClassInfo::kNameSize - 1);
+        std::strncpy(info->name, "Cue Test Delay", PClassInfo::kNameSize - 1);
         return kResultOk;
     }
     tresult PLUGIN_API createInstance(FIDString cid, FIDString iid, void** obj) override {
@@ -251,7 +251,7 @@ SMTG_EXPORT_SYMBOL bool ModuleEntry(void*) { return true; }
 SMTG_EXPORT_SYMBOL bool ModuleExit() { return true; }
 SMTG_EXPORT_SYMBOL IPluginFactory* PLUGIN_API GetPluginFactory() { return &g_factory; }
 
-SMTG_EXPORT_SYMBOL long stagehost_vst3_test_stat(const char* name) {
+SMTG_EXPORT_SYMBOL long cue_vst3_test_stat(const char* name) {
     if (!std::strcmp(name, "processing_on")) return g_setProcessingOn;
     if (!std::strcmp(name, "processing_off")) return g_setProcessingOff;
     if (!std::strcmp(name, "process_while_off")) return g_processWhileOff;

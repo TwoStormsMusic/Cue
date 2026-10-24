@@ -11,7 +11,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace sh {
+namespace cue {
 
 void enableFlushToZero() {
     // FTZ (bit 15) and DAZ (bit 6) in MXCSR.
@@ -329,4 +329,4 @@ void AlsaBackend::close() {
     capture_ = playback_ = nullptr;
 }
 
-} // namespace sh
+} // namespace cue

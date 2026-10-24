@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 struct ClapPluginInfo {
     std::string path, id, name, vendor, version;
@@ -116,4 +116,4 @@ private:
     std::atomic<uint32_t> cachedLatency_{0}, cachedTail_{0};
 };
 
-} // namespace sh
+} // namespace cue

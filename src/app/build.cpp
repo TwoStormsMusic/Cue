@@ -7,7 +7,7 @@
 #include <fstream>
 #include <iterator>
 
-namespace sh {
+namespace cue {
 
 namespace {
 float arg(const PluginSpec& s, size_t i, float def) {
@@ -112,4 +112,4 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     return true;
 }
 
-} // namespace sh
+} // namespace cue

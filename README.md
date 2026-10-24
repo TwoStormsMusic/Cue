@@ -1,10 +1,10 @@
-# Stagehost
+# Cue
 
 A live plug-in host for a Linux bass rig, built to replace REAPER + ReaLearn on stage. This is the **prototype**: it exists to prove one claim on the real mini PC before anything else is built.
 
 > Every scene stays loaded, only the scene you hear is processed, and switching is instant and pop-free: the new scene is reset and pre-rolled on live input while muted, then crossfaded in, while the old scene's delays and reverbs ring out.
 
-Working name; easy to change.
+Cue is the working name, after the repository.
 
 ## What is in the prototype
 
@@ -30,7 +30,7 @@ On the mini PC (AV Linux MXE-25, Debian based):
 sudo apt install build-essential cmake ninja-build pkg-config libasound2-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-./build/stagehost_tests
+./build/cue_tests
 ```
 
 All third-party code is vendored under `third_party/`: the CLAP headers (MIT) and the VST3 SDK's interfaces and hosting helpers (MIT since SDK 3.8).
@@ -38,13 +38,13 @@ All third-party code is vendored under `third_party/`: the CLAP headers (MIT) an
 ## Commands
 
 ```sh
-stagehost doctor                       # real-time settings: priority, governor, IRQs, USB, sound servers
-stagehost devices                      # sound cards and MIDI ports
-stagehost scan "<file.clap or bundle.vst3>"   # what is inside a plug-in file
-stagehost midi-monitor FCB             # print what the FCB sends, decoded
-stagehost fcb-test FCB --channel 1     # walk the FCB's LEDs and display
-stagehost bench configs/my-rig.ini --wav out.wav   # offline: CPU per scene + a WAV of the switching
-stagehost run configs/my-rig.ini       # live
+cue doctor                       # real-time settings: priority, governor, IRQs, USB, sound servers
+cue devices                      # sound cards and MIDI ports
+cue scan "<file.clap or bundle.vst3>"   # what is inside a plug-in file
+cue midi-monitor FCB             # print what the FCB sends, decoded
+cue fcb-test FCB --channel 1     # walk the FCB's LEDs and display
+cue bench configs/my-rig.ini --wav out.wav   # offline: CPU per scene + a WAV of the switching
+cue run configs/my-rig.ini       # live
 ```
 
 While `run` is going: keys `1`-`9` pick a scene, `n`/`p` step, `q` quits. The status line shows the active scene, DSP load as a share of the period, xruns, and each scene's state and cost (`avg/max` microseconds per block).

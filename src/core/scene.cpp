@@ -4,7 +4,7 @@
 #include <cstring>
 #include <utility>
 
-namespace sh {
+namespace cue {
 
 Scene::Scene(std::string name, std::vector<std::unique_ptr<Processor>> chain, std::vector<OutputTap> taps)
     : name_(std::move(name)), chain_(std::move(chain)), taps_(std::move(taps)) {
@@ -129,4 +129,4 @@ void Scene::process(const float* in, float* const* outs, uint32_t frames) {
     }
 }
 
-} // namespace sh
+} // namespace cue

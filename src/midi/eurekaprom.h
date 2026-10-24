@@ -6,7 +6,7 @@
 
 #include "alsa_midi.h"
 
-namespace sh::eurekaprom {
+namespace cue::eurekaprom {
 
 constexpr uint8_t kPressCC = 104, kReleaseCC = 105;
 constexpr uint8_t kLeftExprCC = 102, kRightExprCC = 103;
@@ -67,4 +67,4 @@ inline MidiMessage displayLetter(uint8_t channel, bool tens, char letter) {
     return MidiMessage::cc(channel, tens ? kDisplayTensLetterCC : kDisplayOnesLetterCC, v);
 }
 
-} // namespace sh::eurekaprom
+} // namespace cue::eurekaprom

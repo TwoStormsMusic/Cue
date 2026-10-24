@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace sh {
+namespace cue {
 
 // A gain that moves towards a target over a fixed number of samples.
 //
@@ -87,4 +87,4 @@ private:
     bool exponential_ = false;
 };
 
-} // namespace sh
+} // namespace cue

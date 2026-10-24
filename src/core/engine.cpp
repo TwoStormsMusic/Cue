@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace sh {
+namespace cue {
 
 const char* toString(SceneState s) {
     switch (s) {
@@ -305,4 +305,4 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     }
 }
 
-} // namespace sh
+} // namespace cue

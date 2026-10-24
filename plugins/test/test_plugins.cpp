@@ -1,9 +1,9 @@
 // Test CLAP plug-ins for the host's own tests. One .clap file, four plug-ins:
 //
-//   stagehost.test.gain   stereo gain, parameter "Gain" (0..2, default 1)
-//   stagehost.test.delay  feedback delay with a tail (500 ms, feedback 0.5)
-//   stagehost.test.burn   burns CPU per sample, parameter "Load" (0..1)
-//   stagehost.test.crash  passes audio through; parameter "Crash" >= 0.5 crashes it
+//   cue.test.gain   stereo gain, parameter "Gain" (0..2, default 1)
+//   cue.test.delay  feedback delay with a tail (500 ms, feedback 0.5)
+//   cue.test.burn   burns CPU per sample, parameter "Load" (0..1)
+//   cue.test.crash  passes audio through; parameter "Crash" >= 0.5 crashes it
 //
 // They also record how the host drives them (reset, start/stop processing,
 // process outside start/stop) in a few exported counters, so tests can check
@@ -48,10 +48,10 @@ const char* kFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, nullptr};
 #define DESCRIPTOR(var, id, nm)                                                                                         \
     const clap_plugin_descriptor_t var = {CLAP_VERSION_INIT, id, nm, "TwoStorms test", "", "", "", "0.1", "Host test plug-in", kFeatures}
 
-DESCRIPTOR(kGainDesc, "stagehost.test.gain", "Test Gain");
-DESCRIPTOR(kDelayDesc, "stagehost.test.delay", "Test Delay");
-DESCRIPTOR(kBurnDesc, "stagehost.test.burn", "Test Burn");
-DESCRIPTOR(kCrashDesc, "stagehost.test.crash", "Test Crash");
+DESCRIPTOR(kGainDesc, "cue.test.gain", "Test Gain");
+DESCRIPTOR(kDelayDesc, "cue.test.delay", "Test Delay");
+DESCRIPTOR(kBurnDesc, "cue.test.burn", "Test Burn");
+DESCRIPTOR(kCrashDesc, "cue.test.crash", "Test Crash");
 const clap_plugin_descriptor_t* kDescs[] = {&kGainDesc, &kDelayDesc, &kBurnDesc, &kCrashDesc};
 
 constexpr double kDelayMs = 500.0;
@@ -284,7 +284,7 @@ extern "C" {
 extern CLAP_EXPORT const clap_plugin_entry_t clap_entry = {CLAP_VERSION_INIT, entryInit, entryDeinit, entryFactory};
 
 // Lifecycle counters for the host tests (not part of CLAP).
-CLAP_EXPORT long stagehost_test_stat(const char* name) {
+CLAP_EXPORT long cue_test_stat(const char* name) {
     if (!std::strcmp(name, "instances")) return g_stats.instances;
     if (!std::strcmp(name, "resets")) return g_stats.resets;
     if (!std::strcmp(name, "starts")) return g_stats.starts;

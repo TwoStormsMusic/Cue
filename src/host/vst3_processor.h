@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 struct Vst3PluginInfo {
     std::string path, name, vendor, version, category, uid;
@@ -61,4 +61,4 @@ private:
     std::atomic<uint32_t> latency_{0}, tail_{0};
 };
 
-} // namespace sh
+} // namespace cue

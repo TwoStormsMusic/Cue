@@ -9,7 +9,7 @@
 #include <memory>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 struct EngineSettings {
     double sampleRate = 48000.0;
@@ -132,4 +132,4 @@ private:
     uint32_t idleFlushCounter_ = 0;
 };
 
-} // namespace sh
+} // namespace cue

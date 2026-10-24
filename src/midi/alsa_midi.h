@@ -6,7 +6,7 @@
 
 typedef struct _snd_seq snd_seq_t;
 
-namespace sh {
+namespace cue {
 
 struct MidiMessage {
     uint8_t status = 0; // includes the channel (0-based) in the low nibble
@@ -49,4 +49,4 @@ private:
     int inPort_ = -1, outPort_ = -1, client_ = -1;
 };
 
-} // namespace sh
+} // namespace cue

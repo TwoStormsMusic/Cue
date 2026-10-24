@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace sh {
+namespace cue {
 
 namespace {
 std::string lower(std::string s) {
@@ -152,4 +152,4 @@ void AlsaMidi::send(const MidiMessage& m) {
     snd_seq_event_output_direct(seq_, &ev);
 }
 
-} // namespace sh
+} // namespace cue

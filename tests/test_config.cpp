@@ -11,11 +11,11 @@
 
 #include <unistd.h>
 
-using namespace sh;
+using namespace cue;
 
 namespace {
 std::string writeTemp(const std::string& text) {
-    char name[] = "/tmp/stagehost-config-XXXXXX";
+    char name[] = "/tmp/cue-config-XXXXXX";
     const int fd = mkstemp(name);
     if (fd >= 0)
         close(fd);

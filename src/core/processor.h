@@ -4,7 +4,7 @@
 #include <limits>
 #include <string>
 
-namespace sh {
+namespace cue {
 
 // Every processor in a scene chain is stereo in, stereo out. Plug-ins with
 // other layouts are adapted by their wrapper.
@@ -46,4 +46,4 @@ public:
     virtual uint32_t tailSamples() const { return 0; }
 };
 
-} // namespace sh
+} // namespace cue

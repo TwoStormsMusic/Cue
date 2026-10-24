@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 // How a stereo chain signal becomes one mono output channel.
 enum class OutputMix { Left, Right, Sum };
@@ -70,4 +70,4 @@ private:
     float* bufB_[kChainChannels] = {};
 };
 
-} // namespace sh
+} // namespace cue

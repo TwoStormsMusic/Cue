@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 // Everything loaded from a config: the engine with its scenes, plus the
 // CLAP plug-ins that need main-thread servicing.
@@ -33,4 +33,4 @@ std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* erro
 // it loads. On failure returns false with the reason.
 bool buildRig(const Config& config, Rig& rig, std::string* error);
 
-} // namespace sh
+} // namespace cue

@@ -6,7 +6,7 @@
 #include <mutex>
 #include <optional>
 
-namespace sh {
+namespace cue {
 
 // Bounded lock-free queue with one consumer (the audio thread). Pushes from
 // several non-real-time threads are serialised by a mutex on the producer
@@ -45,4 +45,4 @@ private:
     std::mutex producerMutex_;
 };
 
-} // namespace sh
+} // namespace cue

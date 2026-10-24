@@ -1,4 +1,4 @@
-// stagehost doctor: checks the real-time settings a live rig depends on.
+// cue doctor: checks the real-time settings a live rig depends on.
 // Read-only: it reports and suggests, it never changes the system.
 
 #include "cpu.h"
@@ -17,7 +17,7 @@
 #include <thread>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 namespace {
 
@@ -181,7 +181,7 @@ int runDoctor(const DoctorOptions& opt) {
             cards.find(opt.deviceMatch) != std::string::npos ? "'" + opt.deviceMatch + "' present" : "'" + opt.deviceMatch + "' not in /proc/asound/cards");
 
     int fails = 0, warns = 0;
-    std::printf("Stagehost doctor\n\n");
+    std::printf("Cue doctor\n\n");
     for (const auto& r : results) {
         std::printf("%s  %-20s %s\n", label(r.level), r.check.c_str(), r.detail.c_str());
         if (!r.fix.empty())
@@ -193,4 +193,4 @@ int runDoctor(const DoctorOptions& opt) {
     return fails ? 1 : 0;
 }
 
-} // namespace sh
+} // namespace cue

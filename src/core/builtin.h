@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 class BuiltinProcessor : public Processor {
 public:
@@ -195,4 +195,4 @@ private:
     Counts& counts_;
 };
 
-} // namespace sh
+} // namespace cue

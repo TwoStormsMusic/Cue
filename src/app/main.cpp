@@ -1,12 +1,12 @@
-// stagehost: the live plug-in host prototype.
+// cue: the live plug-in host prototype.
 //
-//   stagehost run <config>             play live: ALSA audio, FCB1010 switching
-//   stagehost bench <config> [opts]    offline: measure CPU per scene and render a WAV
-//   stagehost doctor [--device M2]     check real-time settings
-//   stagehost devices                  list sound cards and MIDI ports
-//   stagehost scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
-//   stagehost midi-monitor             print incoming MIDI, decoded for EurekaPROM
-//   stagehost fcb-test [--channel N]   walk the FCB1010 LEDs and display
+//   cue run <config>             play live: ALSA audio, FCB1010 switching
+//   cue bench <config> [opts]    offline: measure CPU per scene and render a WAV
+//   cue doctor [--device M2]     check real-time settings
+//   cue devices                  list sound cards and MIDI ports
+//   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
+//   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
+//   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
 #include "app/build.h"
 #include "app/config.h"
@@ -38,7 +38,7 @@
 #include <thread>
 #include <vector>
 
-using namespace sh;
+using namespace cue;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -208,7 +208,7 @@ int cmdRun(const std::string& path) {
     Engine& engine = *rig.engine;
 
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
-        std::fprintf(stderr, "warning: could not lock memory (see stagehost doctor)\n");
+        std::fprintf(stderr, "warning: could not lock memory (see cue doctor)\n");
 
     AlsaBackend audio;
     if (!audio.open(config.audio, &err)) {
@@ -222,7 +222,7 @@ int cmdRun(const std::string& path) {
     std::thread midiThread;
     std::atomic<bool> midiRun{true};
     if (config.midi.enabled) {
-        if (midi.open("Stagehost", &err)) {
+        if (midi.open("Cue", &err)) {
             const int ins = midi.connectInputFrom(config.midi.in);
             const int outs = config.midi.out.empty() ? 0 : midi.connectOutputTo(config.midi.out);
             std::printf("midi: input from %d port(s) matching '%s', output to %d port(s) matching '%s', profile %s\n", ins,
@@ -285,7 +285,7 @@ int cmdRun(const std::string& path) {
         }
         if (!reportedSched && st.cycles > 0) {
             reportedSched = true;
-            std::printf("audio thread: %s, %s\n", st.realtime ? "real-time" : "NOT real-time (see stagehost doctor)",
+            std::printf("audio thread: %s, %s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
                         st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned");
         }
         if (Clock::now() >= nextStatus) {
@@ -497,7 +497,7 @@ int cmdDevices() {
     }
     AlsaMidi midi;
     std::string err;
-    if (!midi.open("Stagehost devices", &err)) {
+    if (!midi.open("Cue devices", &err)) {
         std::printf("MIDI: %s\n", err.c_str());
         return 0;
     }
@@ -533,7 +533,7 @@ int cmdScan(const std::string& path) {
 int cmdMidiMonitor(const std::string& match) {
     AlsaMidi midi;
     std::string err;
-    if (!midi.open("Stagehost monitor", &err)) {
+    if (!midi.open("Cue monitor", &err)) {
         std::fprintf(stderr, "midi: %s\n", err.c_str());
         return 1;
     }
@@ -560,7 +560,7 @@ int cmdMidiMonitor(const std::string& match) {
 int cmdFcbTest(const std::string& match, uint8_t channel) {
     AlsaMidi midi;
     std::string err;
-    if (!midi.open("Stagehost FCB test", &err)) {
+    if (!midi.open("Cue FCB test", &err)) {
         std::fprintf(stderr, "midi: %s\n", err.c_str());
         return 1;
     }
@@ -584,13 +584,13 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  stagehost run <config.ini>\n"
-                 "  stagehost bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
-                 "  stagehost doctor [--device NAME] [--priority N]\n"
-                 "  stagehost devices\n"
-                 "  stagehost scan <file.clap|bundle.vst3>\n"
-                 "  stagehost midi-monitor [port-match]\n"
-                 "  stagehost fcb-test <port-match> [--channel N]\n");
+                 "  cue run <config.ini>\n"
+                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
+                 "  cue doctor [--device NAME] [--priority N]\n"
+                 "  cue devices\n"
+                 "  cue scan <file.clap|bundle.vst3>\n"
+                 "  cue midi-monitor [port-match]\n"
+                 "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
 }
 

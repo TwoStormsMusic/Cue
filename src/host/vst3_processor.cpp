@@ -24,7 +24,7 @@
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
-namespace sh {
+namespace cue {
 
 namespace {
 
@@ -74,7 +74,7 @@ public:
     }
 };
 
-uint32_t vstTail(uint32 t) { return t == kInfiniteTail ? sh::kInfiniteTail : t; }
+uint32_t vstTail(uint32 t) { return t == kInfiniteTail ? cue::kInfiniteTail : t; }
 
 } // namespace
 
@@ -389,4 +389,4 @@ void Vst3Processor::process(const float* const* in, float* const* out, uint32_t 
     }
 }
 
-} // namespace sh
+} // namespace cue

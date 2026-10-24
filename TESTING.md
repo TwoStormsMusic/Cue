@@ -15,7 +15,7 @@ Runs the 29 unit tests (switching without clicks, idle scenes never processed, t
 ## 2. Real-time settings
 
 ```sh
-bin/stagehost doctor
+bin/cue doctor
 ```
 
 **Send** the output. `FAIL` lines must be fixed before live tests mean anything; each line says how. Expect to need real-time priority for your user and probably `threadirqs`.
@@ -23,14 +23,14 @@ bin/stagehost doctor
 ## 3. Devices and the FCB
 
 ```sh
-bin/stagehost devices
-bin/stagehost midi-monitor any
+bin/cue devices
+bin/cue midi-monitor any
 ```
 
 Press pedals 1, 2, 10, Up and Down, and move both expression pedals. You should see lines like `EurekaPROM: pedal 3 pressed`. Note the channel number and the name of the FCB's port. Then:
 
 ```sh
-bin/stagehost fcb-test "<part of the port name>" --channel <channel>
+bin/cue fcb-test "<part of the port name>" --channel <channel>
 ```
 
 The LEDs should light 1 to 10 in turn, the display count 1 to 10, and end on `OK`. **Send** what the monitor printed and whether the LEDs worked.
@@ -40,7 +40,7 @@ If the M2 is not called `hw:M2`, use the name `devices` shows in each config's `
 ## 4. Switching with built-in blocks
 
 ```sh
-bin/stagehost run configs/builtin-demo.ini
+bin/cue run configs/builtin-demo.ini
 ```
 
 Three scenes made of built-in blocks, pedals 1 to 3 (or keys 1 to 3). Play, and switch while notes ring and while the delay in scene 3 is repeating. Listen for any click at the moment you press, and about 380 ms later (one delay time). The status line should show `xruns 0`. Leave it running for 10 minutes of switching. **Send** a few status lines and anything you heard.
@@ -52,7 +52,7 @@ Edit `configs/my-rig.ini`: two or three scenes from your real chains. The `rig-i
 First offline, which also shows each scene's cost:
 
 ```sh
-bin/stagehost bench configs/my-rig.ini --seconds 60 --wav my-rig.wav
+bin/cue bench configs/my-rig.ini --seconds 60 --wav my-rig.wav
 ```
 
 **Send** the output. Listen to `my-rig.wav` (left = out 1, right = out 2): it is your chains on a synthetic bass line, switching every 2 seconds.
@@ -60,7 +60,7 @@ bin/stagehost bench configs/my-rig.ini --seconds 60 --wav my-rig.wav
 Then live:
 
 ```sh
-bin/stagehost run configs/my-rig.ini
+bin/cue run configs/my-rig.ini
 ```
 
 ## What passes

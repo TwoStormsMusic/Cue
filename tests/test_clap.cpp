@@ -13,18 +13,18 @@
 #include <memory>
 #include <vector>
 
-using namespace sh;
+using namespace cue;
 
 namespace {
 
 // The packaged test run points these at the bundled plug-ins.
-const char* kTestClap = std::getenv("STAGEHOST_TEST_CLAP") ? std::getenv("STAGEHOST_TEST_CLAP") : STAGEHOST_TEST_CLAP;
+const char* kTestClap = std::getenv("CUE_TEST_CLAP") ? std::getenv("CUE_TEST_CLAP") : CUE_TEST_CLAP;
 constexpr uint32_t kBlock = 64;
 
 long stat(const char* name) {
     static auto fn = [] {
         void* h = dlopen(kTestClap, RTLD_NOW | RTLD_NOLOAD);
-        return h ? reinterpret_cast<long (*)(const char*)>(dlsym(h, "stagehost_test_stat")) : nullptr;
+        return h ? reinterpret_cast<long (*)(const char*)>(dlsym(h, "cue_test_stat")) : nullptr;
     }();
     return fn ? fn(name) : -1;
 }
@@ -68,14 +68,14 @@ TEST(clap_file_lists_its_plugins) {
     auto list = scanClapFile(kTestClap, &err);
     CHECK_MSG(list.size() == 4, "found %zu plug-ins (%s)", list.size(), err.c_str());
     if (list.size() == 4)
-        CHECK(list[0].id == "stagehost.test.gain" && list[1].name == "Test Delay");
+        CHECK(list[0].id == "cue.test.gain" && list[1].name == "Test Delay");
 }
 
 TEST(clap_gain_runs_in_a_scene) {
     markClapAudioThread();
     Engine e(settings());
     std::vector<std::unique_ptr<Processor>> chain;
-    chain.push_back(load("stagehost.test.gain"));
+    chain.push_back(load("cue.test.gain"));
     CHECK(chain.back() != nullptr);
     e.addScene(sceneOf(std::move(chain)));
     CHECK(e.activate());
@@ -85,7 +85,7 @@ TEST(clap_gain_runs_in_a_scene) {
 
 TEST(clap_param_change_reaches_the_plugin) {
     Engine e(settings());
-    auto gain = load("stagehost.test.gain");
+    auto gain = load("cue.test.gain");
     ClapProcessor* g = gain.get();
     std::vector<std::unique_ptr<Processor>> chain;
     chain.push_back(std::move(gain));
@@ -99,8 +99,8 @@ TEST(clap_param_change_reaches_the_plugin) {
 
 TEST(clap_idle_plugin_gets_params_without_processing) {
     Engine e(settings());
-    auto gainA = load("stagehost.test.gain");
-    auto gainB = load("stagehost.test.gain");
+    auto gainA = load("cue.test.gain");
+    auto gainB = load("cue.test.gain");
     ClapProcessor* b = gainB.get();
     std::vector<std::unique_ptr<Processor>> ca, cb;
     ca.push_back(std::move(gainA));
@@ -121,8 +121,8 @@ TEST(clap_idle_plugin_gets_params_without_processing) {
 TEST(clap_delay_reports_tail_and_rings_out) {
     Engine e(settings());
     std::vector<std::unique_ptr<Processor>> ca, cb;
-    ca.push_back(load("stagehost.test.delay"));
-    cb.push_back(load("stagehost.test.gain"));
+    ca.push_back(load("cue.test.delay"));
+    cb.push_back(load("cue.test.gain"));
     const uint32_t tail = ca.back()->tailSamples();
     e.addScene(sceneOf(std::move(ca)));
     e.addScene(sceneOf(std::move(cb)));
@@ -149,7 +149,7 @@ TEST(clap_lifecycle_follows_the_rules) {
 }
 
 TEST(clap_state_round_trips) {
-    auto g = load("stagehost.test.gain");
+    auto g = load("cue.test.gain");
     CHECK(g != nullptr);
     if (!g)
         return;

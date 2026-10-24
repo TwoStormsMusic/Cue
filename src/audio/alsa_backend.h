@@ -9,7 +9,7 @@
 
 typedef struct _snd_pcm snd_pcm_t;
 
-namespace sh {
+namespace cue {
 
 struct AlsaConfig {
     std::string device = "hw:M2";
@@ -77,4 +77,4 @@ private:
 // decaying tails cannot fall into slow denormal arithmetic.
 void enableFlushToZero();
 
-} // namespace sh
+} // namespace cue

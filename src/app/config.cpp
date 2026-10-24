@@ -6,7 +6,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace sh {
+namespace cue {
 
 namespace {
 
@@ -220,4 +220,4 @@ bool loadConfig(const std::string& path, Config& config, std::string* error) {
     return true;
 }
 
-} // namespace sh
+} // namespace cue

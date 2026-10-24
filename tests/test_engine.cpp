@@ -14,7 +14,7 @@
 #include <random>
 #include <vector>
 
-using namespace sh;
+using namespace cue;
 
 namespace {
 

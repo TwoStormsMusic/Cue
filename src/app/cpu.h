@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace sh {
+namespace cue {
 
 // "0-3,8,10-11" -> {0,1,2,3,8,10,11}
 std::vector<int> parseCpuList(const std::string& text);
@@ -22,4 +22,4 @@ int pickAudioCpu();
 
 std::string readFileTrimmed(const std::string& path);
 
-} // namespace sh
+} // namespace cue

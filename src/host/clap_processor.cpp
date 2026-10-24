@@ -9,7 +9,7 @@
 #include <mutex>
 #include <thread>
 
-namespace sh {
+namespace cue {
 
 // ---------------------------------------------------------------- threads
 
@@ -198,7 +198,7 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->library_ = lib;
     p->id_ = desc->id;
     p->name_ = desc->name ? desc->name : desc->id;
-    p->host_ = {CLAP_VERSION_INIT, p.get(), "Stagehost", "TwoStorms", "", "0.1",
+    p->host_ = {CLAP_VERSION_INIT, p.get(), "Cue", "TwoStorms", "", "0.1",
                 hostGetExtension, hostRequestRestart, hostRequestProcess, hostRequestCallback};
     p->plugin_ = f->create_plugin(f, &p->host_, desc->id);
     if (!p->plugin_) {
@@ -502,4 +502,4 @@ uint32_t ClapProcessor::tailSamples() const {
     return t >= static_cast<uint32_t>(INT32_MAX) ? kInfiniteTail : t;
 }
 
-} // namespace sh
+} // namespace cue

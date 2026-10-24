@@ -7,7 +7,7 @@
 #include <set>
 #include <sstream>
 
-namespace sh {
+namespace cue {
 
 std::string readFileTrimmed(const std::string& path) {
     std::ifstream f(path);
@@ -70,4 +70,4 @@ int pickAudioCpu() {
     return cores.back();
 }
 
-} // namespace sh
+} // namespace cue

@@ -13,19 +13,19 @@
 #include <memory>
 #include <vector>
 
-using namespace sh;
+using namespace cue;
 
 namespace {
 
 // The bundle directory and the shared object inside it; the packaged test
 // run points these at the bundled plug-in.
-const char* kTestVst3 = std::getenv("STAGEHOST_TEST_VST3") ? std::getenv("STAGEHOST_TEST_VST3") : STAGEHOST_TEST_VST3;
-const char* kTestVst3So = std::getenv("STAGEHOST_TEST_VST3_SO") ? std::getenv("STAGEHOST_TEST_VST3_SO") : STAGEHOST_TEST_VST3_SO;
+const char* kTestVst3 = std::getenv("CUE_TEST_VST3") ? std::getenv("CUE_TEST_VST3") : CUE_TEST_VST3;
+const char* kTestVst3So = std::getenv("CUE_TEST_VST3_SO") ? std::getenv("CUE_TEST_VST3_SO") : CUE_TEST_VST3_SO;
 constexpr uint32_t kBlock = 64;
 
 long vstat(const char* name) {
     void* h = dlopen(kTestVst3So, RTLD_NOW | RTLD_NOLOAD);
-    auto fn = h ? reinterpret_cast<long (*)(const char*)>(dlsym(h, "stagehost_vst3_test_stat")) : nullptr;
+    auto fn = h ? reinterpret_cast<long (*)(const char*)>(dlsym(h, "cue_vst3_test_stat")) : nullptr;
     return fn ? fn(name) : -1;
 }
 
@@ -71,7 +71,7 @@ TEST(vst3_module_lists_its_effect) {
     auto list = scanVst3(kTestVst3, &err);
     CHECK_MSG(list.size() == 1, "found %zu (%s)", list.size(), err.c_str());
     if (!list.empty())
-        CHECK(list[0].name == "Stagehost Test Delay");
+        CHECK(list[0].name == "Cue Test Delay");
 }
 
 TEST(vst3_delay_runs_rings_out_and_follows_lifecycle) {
