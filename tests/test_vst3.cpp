@@ -82,10 +82,13 @@ TEST(vst3_delay_runs_rings_out_and_follows_lifecycle) {
     Engine e(settings());
     e.addChain(chainOf(std::move(p)));
     e.addChain(silentChain());
+    const long onBefore = vstat("processing_on"), offBefore = vstat("processing_off");
     CHECK(e.activate());
     CHECK(e.chain(0).slot(0).tailSamples() == 16 * 250 * 48);
+    // Processing goes on once, at activation: with yabridge each call is a
+    // round trip to Wine, so none happen on the audio thread at a switch.
+    CHECK(vstat("processing_on") == onBefore + 1);
 
-    const long onBefore = vstat("processing_on");
     e.switchTo(0);
     std::vector<float> out;
     run(e, 0.25f, 400, &out); // DC in: dry 0.25 plus echoes at mix 0.5
@@ -101,8 +104,10 @@ TEST(vst3_delay_runs_rings_out_and_follows_lifecycle) {
     CHECK_MSG(echo > 0.05f, "echo after switch %.4f", echo);
     run(e, 0.0f, 3000);
     CHECK(e.state(0) == ChainState::Idle);
-    CHECK(vstat("processing_off") >= 1);
+    CHECK(vstat("processing_off") == offBefore); // idle, but nothing called
     CHECK(vstat("process_while_off") == 0);
+    e.deactivate();
+    CHECK(vstat("processing_off") == offBefore + 1);
 }
 
 TEST(vst3_param_change_reaches_the_processor) {

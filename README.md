@@ -112,7 +112,8 @@ Idle chains are never processed. Parameter changes still reach idle CLAP plug-in
 
 ## Known limits of the prototype
 
-- **VST3 reset.** VST3 has no real reset call. The host toggles processing off and on, which the spec suggests plug-ins use to clear buffers, but not all do. If a VST3 delay replays an old tail when its chain comes back, that plug-in needs a deeper reset (deactivate and reactivate while idle), which is planned.
+- **VST3 reset.** VST3 has no real reset call. Processing stays on while a plug-in is loaded (with yabridge every call is a round trip to Wine, too slow for a switch), and an idle chain's VST3 plug-ins are reset by toggling processing off and on from the helper thread, which the spec suggests plug-ins use to clear buffers, but not all do.
+- **yabridge timing.** A bridged plug-in's block takes a round trip to its Wine process, which adds jitter. Cue keeps its other threads, and the Wine hosts it starts, off the audio core and on the performance cores. If xruns remain at 64 frames, `periods = 3` in `[audio]` gives each block an extra period of slack for 1.3 ms more latency.
 - **No isolation yet.** A plug-in crash takes the host down. Isolation is the next milestone.
 - **Plug-in GUIs** are not shown. Set sounds up in REAPER and import the project, or set parameters in the config.
 - **Tuner.** The TwoStorms Tuner only measures while its window is open, so the Tuner pedal mutes and shows TU for now. A tuner on the FCB display is planned.

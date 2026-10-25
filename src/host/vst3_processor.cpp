@@ -266,6 +266,11 @@ bool Vst3Processor::activate(double sampleRate, uint32_t maxFrames) {
         return false;
     }
     d.active = true;
+    // Processing stays on from here until deactivate(): with yabridge every
+    // setProcessing() is a round trip to the Wine process, far too slow for
+    // the audio thread at a chain switch.
+    d.processor->setProcessing(true);
+    d.processing = true;
     latency_ = d.processor->getLatencySamples();
     tail_ = vstTail(d.processor->getTailSamples());
     return true;
@@ -275,8 +280,10 @@ void Vst3Processor::deactivate() {
     Impl& d = *impl_;
     if (!d.active)
         return;
-    if (d.processing)
-        stopProcessing();
+    if (d.processing) {
+        d.processor->setProcessing(false);
+        d.processing = false;
+    }
     d.component->setActive(false);
     d.data.unprepare();
     d.active = false;
@@ -354,26 +361,15 @@ std::vector<ParamInfo> Vst3Processor::params() const {
     return out;
 }
 
-void Vst3Processor::startProcessing() {
-    Impl& d = *impl_;
-    if (d.active && !d.processing) {
-        d.processor->setProcessing(true);
-        d.processing = true;
-    }
-}
+// Processing is on for as long as the plug-in is active (see activate()), so
+// starting and stopping a chain makes no calls into it.
+void Vst3Processor::startProcessing() {}
 
-void Vst3Processor::stopProcessing() {
-    Impl& d = *impl_;
-    if (d.processing) {
-        d.processor->setProcessing(false);
-        d.processing = false;
-    }
-}
+void Vst3Processor::stopProcessing() {}
 
 void Vst3Processor::reset() {
-    // Toggling processing is the only reset VST3 offers on the audio thread.
-    // A scene coming out of idle is started right after this, which does
-    // the setProcessing(true) half.
+    // Toggling processing is the only reset VST3 offers. The engine calls
+    // this on its helper thread while the chain is idle, never at a switch.
     Impl& d = *impl_;
     if (d.processing) {
         d.processor->setProcessing(false);

@@ -143,6 +143,8 @@ bool load(const std::string& path, Config& config) {
     }
     if (config.cpuAuto)
         config.audio.cpu = pickAudioCpu();
+    // Before any plug-in loads: what it starts inherits this.
+    keepOffAudioCore(config.audio.cpu);
     return true;
 }
 
