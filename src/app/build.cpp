@@ -65,6 +65,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     es.sampleRate = config.audio.rate;
     es.maxFrames = config.audio.period;
     es.numOutputs = 2;
+    es.workers = config.workers;
+    es.workerPriority = config.audio.rtPriority;
     rig.engine = std::make_unique<Engine>(es);
     rig.clapPlugins.clear();
     rig.vst3Plugins.clear();

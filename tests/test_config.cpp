@@ -37,6 +37,7 @@ input = 1
 out1 = 1
 out2 = 2      ; power amp
 cpu = 7
+workers = 1
 
 [switching]
 preroll_ms = 40
@@ -60,6 +61,7 @@ plugin = builtin:delay 300 0.4 0.3
     std::remove(path.c_str());
     CHECK(c.audio.device == "hw:M2" && c.audio.period == 64 && c.audio.inputChannel == 0);
     CHECK(c.audio.outputChannels[1] == 1 && c.audio.cpu == 7 && !c.cpuAuto);
+    CHECK(c.workers == 1 && Config{}.workers == 2);
     CHECK(c.engine.prerollMs == 40.0f && c.warm == "none");
     CHECK(c.midi.in == "FCB" && c.midi.out == "FCB" && c.midi.channel == 2);
     CHECK(c.scenes.size() == 1);

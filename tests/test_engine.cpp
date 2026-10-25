@@ -7,7 +7,10 @@
 #include "core/builtin.h"
 #include "core/engine.h"
 
+#include <xmmintrin.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -687,4 +690,112 @@ TEST(switch_after_a_cancelled_preroll_waits_for_the_reset) {
     CHECK(b.processWhileStopped == 0);
     h.runSeconds(0.5);
     CHECK(std::fabs(h.out[0].back() - 0.5f) > 0.1f); // B's echoes on top of the input
+}
+
+namespace {
+
+// Passes its inner processor through and counts the blocks it was given on
+// a thread other than the test's: the engine's helpers.
+class ThreadSpy : public Processor {
+public:
+    ThreadSpy(std::unique_ptr<Processor> inner, std::atomic<uint64_t>& helperBlocks)
+        : inner_(std::move(inner)), helperBlocks_(helperBlocks), test_(std::this_thread::get_id()) {}
+    const std::string& name() const override { return inner_->name(); }
+    bool activate(double sr, uint32_t maxFrames) override { return inner_->activate(sr, maxFrames); }
+    void deactivate() override { inner_->deactivate(); }
+    void reset() override { inner_->reset(); }
+    void process(const float* const* in, float* const* out, uint32_t frames) override {
+        if (std::this_thread::get_id() != test_)
+            helperBlocks_++;
+        inner_->process(in, out, frames);
+    }
+    uint32_t tailSamples() const override { return inner_->tailSamples(); }
+
+private:
+    std::unique_ptr<Processor> inner_;
+    std::atomic<uint64_t>& helperBlocks_;
+    std::thread::id test_;
+};
+
+// Four chains through warm, pre-roll, release and bypass, each switch
+// spaced so no chain ever waits for the reset helper: the run is the same
+// every time.
+std::vector<float> switchingRun(int workers, std::atomic<uint64_t>& helperBlocks) {
+    EngineSettings s = settings();
+    s.workers = workers;
+    Engine e(s);
+    auto spy = [&](Processor* p) { return new ThreadSpy(std::unique_ptr<Processor>(p), helperBlocks); };
+    e.addChain(chain("A", slots(spy(new DriveProcessor(4.0f)), spy(new BurnProcessor(2000)))));
+    e.addChain(chain("B", slots(spy(new LowpassProcessor(500.0f)), spy(new DelayProcessor(120.0f, 0.5f, 0.5f)), spy(new BurnProcessor(2000)))));
+    e.addChain(chain("C", slots(spy(new DriveProcessor(2.0f)), spy(new DelayProcessor(80.0f, 0.4f, 0.5f)))));
+    e.addChain(chain("D", slots(spy(new GainProcessor(0.5f)), spy(new BurnProcessor(2000)))));
+    CHECK(e.activate());
+    CHECK(e.numWorkers() == static_cast<size_t>(workers));
+    Harness h{e, Sine{}};
+    const size_t at03 = h.blocksFor(0.3), at06 = h.blocksFor(0.6), at07 = h.blocksFor(0.7), at09 = h.blocksFor(0.9),
+                 at12 = h.blocksFor(1.2), at15 = h.blocksFor(1.5), at22 = h.blocksFor(2.2);
+    size_t mostRunning = 0;
+    h.run(h.blocksFor(3.0), [&](size_t b) {
+        if (b == 0) e.switchTo(0);
+        if (b == at03) e.setWarm(1);
+        if (b == at06) e.switchTo(2);
+        if (b == at07) e.switchTo(3);
+        if (b == at09) e.setBypass(3, 0, true);
+        if (b == at12) e.setBypass(3, 0, false);
+        if (b == at15) e.switchTo(1);
+        if (b == at22) e.switchTo(0);
+        size_t running = 0;
+        for (size_t i = 0; i < e.numChains(); ++i)
+            running += e.state(i) != ChainState::Idle;
+        mostRunning = std::max(mostRunning, running);
+    });
+    CHECK_MSG(mostRunning >= 3, "at most %zu chains played at once", mostRunning);
+    CHECK(e.activeChain() == 0);
+    std::vector<float> out = h.out[0];
+    out.insert(out.end(), h.out[1].begin(), h.out[1].end());
+    return out;
+}
+
+} // namespace
+
+TEST(helpers_process_chains_side_by_side_with_the_same_result) {
+    // The helpers flush denormals to zero, as the audio thread does live.
+    const unsigned csr = _mm_getcsr();
+    _mm_setcsr(csr | 0x8040);
+    std::atomic<uint64_t> serialHelpers{0}, parallelHelpers{0};
+    const std::vector<float> serial = switchingRun(0, serialHelpers);
+    const std::vector<float> parallel = switchingRun(3, parallelHelpers);
+    _mm_setcsr(csr);
+    CHECK(serialHelpers == 0);
+    CHECK_MSG(parallelHelpers > 0, "no block was processed on a helper");
+    CHECK(serial.size() == parallel.size());
+    size_t differ = 0;
+    for (size_t n = 0; n < std::min(serial.size(), parallel.size()); ++n)
+        differ += serial[n] != parallel[n];
+    CHECK_MSG(differ == 0, "%zu samples differ between one thread and helpers", differ);
+}
+
+TEST(block_report_names_the_chains_of_the_slowest_block) {
+    EngineSettings s = settings();
+    s.workers = 1;
+    Engine e(s);
+    e.addChain(chain("Light", slots(new GainProcessor(0.5f))));
+    e.addChain(chain("Heavy", slots(new BurnProcessor(4000))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    e.setWarm(1);
+    h.runSeconds(0.2);
+    BlockReport r;
+    e.requestBlockReport();
+    h.run(1);
+    CHECK(e.nextBlockReport(r));
+    CHECK(r.ns > 0);
+    CHECK(r.count == 2);
+    CHECK(r.chains[0].chain == 0); // the chain being heard comes first
+    CHECK(r.chains[0].state == ChainState::Active);
+    CHECK(r.chains[1].chain == 1);
+    CHECK(r.chains[1].state == ChainState::Warm);
+    CHECK(r.chains[1].ns > r.chains[0].ns);
+    CHECK(r.ns >= r.chains[1].ns || r.chains[1].helper);
 }

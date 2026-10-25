@@ -27,6 +27,7 @@
 
 #include <alsa/asoundlib.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <termios.h>
 #include <unistd.h>
@@ -103,6 +104,32 @@ std::string chainStatus(Engine& engine, const Rig& rig, std::vector<SceneSample>
         s += buf;
     }
     return s;
+}
+
+// What the slowest block since the last report was doing, for an xrun.
+std::string describeXrun(uint64_t xruns, const BlockReport& r, const Rig& rig, double periodUs) {
+    char buf[160];
+    std::string s = xruns > 1 ? "xrun x" + std::to_string(xruns) + ": " : "xrun: ";
+    if (r.ns / 1000.0 < 0.8 * periodUs) {
+        std::snprintf(buf, sizeof buf, "no block was slow (the slowest took %.2f ms of %.2f ms), so the audio thread was late: another program or a driver had the CPU",
+                      r.ns / 1e6, periodUs / 1000.0);
+        return s + buf;
+    }
+    std::snprintf(buf, sizeof buf, "the slowest block took %.2f ms (the period is %.2f ms):", r.ns / 1e6, periodUs / 1000.0);
+    s += buf;
+    for (size_t k = 0; k < r.count; ++k) {
+        const auto& c = r.chains[k];
+        std::snprintf(buf, sizeof buf, "%s %s %s %.2f ms%s", k ? "," : "", rig.chainNames[c.chain].c_str(), toString(c.state), c.ns / 1e6,
+                      c.helper ? " (helper)" : "");
+        s += buf;
+    }
+    return s;
+}
+
+// Columns of the terminal, or 0 when it is not one.
+size_t terminalWidth() {
+    winsize w{};
+    return ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 ? w.ws_col : 0;
 }
 
 // ------------------------------------------------------------ keyboard
@@ -224,6 +251,7 @@ int cmdRun(const std::string& path) {
     auto nextStatus = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
+    uint64_t reportedXruns = 0;
 
     while (!g_quit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -250,8 +278,18 @@ int cmdRun(const std::string& path) {
         }
         if (!reportedSched && st.cycles > 0) {
             reportedSched = true;
-            std::printf("audio thread: %s, %s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
-                        st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned");
+            std::printf("audio thread: %s, %s; %zu helper thread(s)%s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
+                        st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned", engine.numWorkers(),
+                        engine.numWorkers() == 0 ? "" : engine.realtimeWorkers() == static_cast<int>(engine.numWorkers()) ? ", real-time" : ", NOT real-time");
+        }
+        // Each xrun gets its own line, with the slowest block around it.
+        BlockReport report;
+        while (engine.nextBlockReport(report)) {
+            const uint64_t xruns = st.xruns.load();
+            if (xruns > reportedXruns) {
+                std::printf("%s%s\n", term.active ? "\r\033[K" : "", describeXrun(xruns - reportedXruns, report, rig, periodUs).c_str());
+                reportedXruns = xruns;
+            }
         }
         if (Clock::now() >= nextStatus) {
             nextStatus += std::chrono::milliseconds(500);
@@ -260,9 +298,17 @@ int cmdRun(const std::string& path) {
             lastCycles = cycles;
             lastNs = ns;
             const double maxUs = st.maxCycleNs.exchange(0) / 1000.0;
-            std::printf("%s%s | dsp %3.0f%% (max %3.0f%%) xruns %llu | %s\033[K%s", term.active ? "\r" : "", show.status().c_str(),
-                        100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs, static_cast<unsigned long long>(st.xruns.load()),
-                        chainStatus(engine, rig, last).c_str(), term.active ? "" : "\n");
+            engine.requestBlockReport();
+            // The numbers first, and no wider than the terminal: a line that
+            // wraps cannot be redrawn in place.
+            char head[96];
+            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) xruns %llu | ", 100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs,
+                          static_cast<unsigned long long>(st.xruns.load()));
+            std::string line = head + show.status() + " | " + chainStatus(engine, rig, last);
+            const size_t width = term.active ? terminalWidth() : 0;
+            if (width > 1 && line.size() > width - 1)
+                line.resize(width - 1);
+            std::printf("%s%s\033[K%s", term.active ? "\r" : "", line.c_str(), term.active ? "" : "\n");
             // A plug-in that took most of a period in one block gets its own
             // line, so a click can be traced to what caused it.
             for (size_t i = 0; i < engine.numChains(); ++i) {
@@ -322,10 +368,13 @@ void writeWav(const std::string& path, const std::vector<float>& a, const std::v
     }
 }
 
-int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm) {
+int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm,
+             int workers) {
     Config config;
     if (!load(path, config))
         return 2;
+    if (workers >= 0)
+        config.workers = workers;
     Rig rig;
     std::string err;
     if (!buildRig(config, rig, &err)) {
@@ -437,8 +486,8 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
                     pct(0.5), 100 * pct(0.5) / periodUs, pct(0.99), 100 * pct(0.99) / periodUs, pct(0.999), 100 * pct(0.999) / periodUs,
                     v.back(), 100 * v.back() / periodUs);
     };
-    std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s\n", frames, periodUs, realtime ? "real-time" : "not real-time",
-                pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
+    std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s, %zu helper thread(s)\n", frames, periodUs, realtime ? "real-time" : "not real-time",
+                pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned", engine.numWorkers());
     stats(aloneUs, ("chain 1 alone, " + std::to_string(engine.numChains() - 1) + " others idle:").c_str());
     std::printf("%-34s %llu blocks processed by the idle chains (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
     char what[96];
@@ -741,7 +790,7 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  cue run <config.ini>\n"
-                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
+                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
                  "  cue check <config.ini> [--no-load]\n"
@@ -769,7 +818,8 @@ int main(int argc, char** argv) {
         return cmdRun(argv[2]);
     if (cmd == "bench" && argc >= 3)
         return cmdBench(argv[2], std::stod(opt("--switch-every", "2")), std::stod(opt("--seconds", "30")), opt("--wav", ""),
-                        opt("--fast", "no") == "no", opt("--warm", ""));
+                        opt("--fast", "no") == "no", opt("--warm", ""),
+                        std::stoi(opt("--workers", "-1")));
     if (cmd == "doctor") {
         DoctorOptions o;
         o.deviceMatch = opt("--device", "M2");

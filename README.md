@@ -61,7 +61,7 @@ cue bench <config.ini> --wav out.wav   # offline: CPU per chain + a WAV of the s
 cue run <config.ini>             # live
 ```
 
-While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows the preset, mute, DSP load as a share of the period, xruns, and the cost of each chain that is running (`avg/max` microseconds per block).
+While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own with the slowest block around it and the chains that played in it.
 
 ## Config
 
@@ -113,7 +113,7 @@ Idle chains are never processed. Parameter changes still reach idle CLAP plug-in
 ## Known limits of the prototype
 
 - **VST3 reset.** VST3 has no real reset call. Processing stays on while a plug-in is loaded (with yabridge every call is a round trip to Wine, too slow for a switch), and an idle chain's VST3 plug-ins are reset by toggling processing off and on from the helper thread, which the spec suggests plug-ins use to clear buffers, but not all do.
-- **yabridge timing.** A bridged plug-in's block takes a round trip to its Wine process, which adds jitter. Cue keeps its other threads, and the Wine hosts it starts, off the audio core and on the performance cores. If xruns remain at 64 frames, `periods = 3` in `[audio]` gives each block an extra period of slack for 1.3 ms more latency.
+- **yabridge timing.** A bridged plug-in's block takes a round trip to its Wine process, which adds jitter. Cue keeps its other threads, and the Wine hosts it starts, off the audio core and on the performance cores. Chains that play at the same time (the old one ringing out, the new one, the warm one) are processed side by side on the audio thread and `workers` helper threads, as REAPER spreads its tracks over cores, so a switch costs about as much as its slowest chain. If xruns remain at 64 frames, `periods = 3` in `[audio]` gives each block an extra period of slack for 1.3 ms more latency.
 - **No isolation yet.** A plug-in crash takes the host down. Isolation is the next milestone.
 - **Plug-in GUIs** are not shown. Set sounds up in REAPER and import the project, or set parameters in the config.
 - **Tuner.** The TwoStorms Tuner only measures while its window is open, so the Tuner pedal mutes and shows TU for now. A tuner on the FCB display is planned.

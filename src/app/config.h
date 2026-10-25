@@ -129,6 +129,7 @@ struct MidiSettings {
 struct Config {
     AlsaConfig audio;
     bool cpuAuto = true;
+    int workers = 2;           // helper threads that process playing chains alongside the audio thread
     OutputMix mix = OutputMix::Sum;
     EngineSettings engine;
     std::string warm = "next"; // "none" or "next"

@@ -247,6 +247,7 @@ struct Parser {
         else if (key == "out1" && isNum && n >= 1) config.audio.outputChannels.at(0) = static_cast<unsigned>(n) - 1;
         else if (key == "out2" && isNum && n >= 1) config.audio.outputChannels.at(1) = static_cast<unsigned>(n) - 1;
         else if (key == "priority" && isNum) config.audio.rtPriority = static_cast<int>(n);
+        else if (key == "workers" && isNum && n >= 0 && n <= 8) config.workers = static_cast<int>(n);
         else if (key == "cpu") {
             if (lower(value) == "auto") config.cpuAuto = true;
             else if (lower(value) == "none") { config.cpuAuto = false; config.audio.cpu = -1; }

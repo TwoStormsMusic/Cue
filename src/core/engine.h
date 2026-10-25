@@ -30,6 +30,12 @@ struct EngineSettings {
     // before it are heard.
     bool resetTailsOnWarmSwitch = true;
     float tailResetMinMs = 50.0f; // slots with at least this tail count as delays/reverbs
+    // Helper threads that process playing chains alongside the audio thread,
+    // so a switch (the old chain ringing out, the new one, the warm one)
+    // takes about as long as its slowest chain rather than all of them in
+    // turn. 0 = every chain on the audio thread.
+    int workers = 0;
+    int workerPriority = 0; // their SCHED_FIFO priority; 0 = normal scheduling
 };
 
 enum class ChainState : uint8_t {
@@ -63,8 +69,24 @@ struct ChainStats {
     std::atomic<uint8_t> state{0};
 };
 
-// Runs all chains on the audio thread. Only chains that are not Idle are
-// processed. Switches follow: reset, pre-roll, crossfade, tail ring-out.
+// The slowest block over a stretch of time, with the chains that played in
+// it: what an xrun can be traced to.
+struct BlockReport {
+    static constexpr size_t kMaxChains = 8;
+    struct Entry {
+        int chain = -1;
+        ChainState state = ChainState::Idle;
+        bool helper = false; // processed on a helper thread
+        uint32_t ns = 0;
+    };
+    uint32_t ns = 0;    // the whole block, on the audio thread
+    size_t count = 0;   // chains listed
+    Entry chains[kMaxChains];
+};
+
+// Runs all chains for the audio thread. Only chains that are not Idle are
+// processed, on the audio thread and helper threads at once. Switches
+// follow: reset, pre-roll, crossfade, tail ring-out.
 class Engine {
 public:
     explicit Engine(EngineSettings settings);
@@ -98,6 +120,13 @@ public:
     // One reader thread drains events.
     bool nextEvent(EngineEvent& ev);
     ChainStats& stats(size_t i) { return *chains_[i].stats; }
+    // Any thread: asks for the slowest block since the last report, which
+    // the audio thread hands over within a block; one reader takes it.
+    void requestBlockReport() { reportWanted_.store(true, std::memory_order_relaxed); }
+    bool nextBlockReport(BlockReport& report);
+    size_t numWorkers() const { return workers_.size(); }
+    // Helper threads that got real-time priority.
+    int realtimeWorkers() const { return realtimeWorkers_.load(); }
 
     // Audio thread. in: one mono input. outs: settings.numOutputs buffers.
     void process(const float* in, float* const* outs, uint32_t frames);
@@ -125,6 +154,14 @@ private:
         uint64_t releaseFrames = 0;
         uint64_t quietFrames = 0;
         bool quietEnd = false; // its tail died away rather than being capped
+        // Its own buffers, so chains can be processed on several threads at once.
+        std::vector<float> buffers;
+        float* in = nullptr;
+        float* gain = nullptr;
+        std::vector<float*> outs;
+        bool ran = false;    // processed in this block
+        bool helper = false; // ...on a helper thread
+        uint32_t blockNs = 0;
     };
 
     uint32_t ms(float milliseconds) const;
@@ -139,6 +176,11 @@ private:
     void setState(int index, ChainState state);
     void emit(EngineEvent::Type type, int chain);
     void advance(int index, uint32_t frames, float peak);
+    void runChains(const float* in, uint32_t frames, size_t count, bool flushIdle);
+    void takeJobs(uint32_t generation);
+    void runChain(int index, bool helper);
+    void workerLoop();
+    void stopWorkers();
 
     EngineSettings settings_;
     std::vector<Slot> chains_;
@@ -153,14 +195,29 @@ private:
     std::thread resetter_;
     std::atomic<bool> stopResetter_{false};
 
+    // This block's chains, the one being heard first. Helpers claim them
+    // through ticket_: generation << 32 | count << 16 | next.
+    std::vector<int> jobs_;
+    const float* jobIn_ = nullptr;
+    uint32_t jobFrames_ = 0;
+    uint32_t generation_ = 0;
+    std::vector<std::thread> workers_;
+    std::atomic<bool> stopWorkers_{false};
+    std::atomic<int> realtimeWorkers_{0};
+    alignas(64) std::atomic<uint64_t> ticket_{0};
+    alignas(64) std::atomic<uint32_t> jobsDone_{0};
+    alignas(64) std::atomic<uint32_t> wake_{0}; // a futex: bumped for each block helpers share
+    std::atomic<uint32_t> sleepers_{0};
+
+    BlockReport slowest_;
+    std::atomic<bool> reportWanted_{false};
+    CommandQueue<BlockReport, 8> reports_;
+
     CommandQueue<EngineCommand, 256> commands_;
     CommandQueue<EngineEvent, 1024> events_;
 
-    // Scratch buffers, sized in activate().
-    std::vector<float> inScratch_;
+    // Scratch buffer, sized in activate().
     std::vector<float> gainScratch_;
-    std::vector<float> chainOutStorage_;
-    std::vector<float*> chainOuts_;
     uint32_t idleFlushCounter_ = 0;
     bool muted_ = false;
     Ramp outputGain_{1.0f};
