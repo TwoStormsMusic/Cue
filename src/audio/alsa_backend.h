@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -30,6 +31,12 @@ struct AlsaStats {
     std::atomic<uint64_t> startupXruns{0};
     std::atomic<bool> lastXrunPlayback{false}; // the latest one: playback ran dry, else capture overflowed
     std::atomic<uint64_t> lastXrunCycle{0};
+    std::atomic<uint32_t> lastXrunMs{0};        // ...that long after the stream started
+    std::atomic<uint32_t> lastXrunBlockNs{0};   // the block before it took this long
+    std::atomic<uint32_t> lastXrunLateFrames{0}; // ...and started this many frames after its period was ready
+    // Margin: the least audio still queued for playback when a block was
+    // written (reset by reader). At zero, playback runs dry: an xrun.
+    std::atomic<int32_t> minQueuedFrames{INT32_MAX};
     std::atomic<uint32_t> maxCycleNs{0}; // worst processing time of one period (reset by reader)
     std::atomic<uint64_t> totalCycleNs{0};
     std::atomic<bool> realtime{false};   // got SCHED_FIFO
@@ -66,6 +73,9 @@ private:
     snd_pcm_t* capture_ = nullptr;
     snd_pcm_t* playback_ = nullptr;
     unsigned captureChannels_ = 0, playbackChannels_ = 0;
+    unsigned long playbackBuffer_ = 0; // snd_pcm_uframes_t
+    uint32_t lastBlockNs_ = 0, lastLateFrames_ = 0;
+    std::chrono::steady_clock::time_point started_;
     int captureFormat_ = 0, playbackFormat_ = 0;
     std::vector<uint8_t> captureRaw_, playbackRaw_;
     std::vector<float> in_;

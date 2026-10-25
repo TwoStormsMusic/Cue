@@ -106,16 +106,17 @@ std::string chainStatus(Engine& engine, const Rig& rig, std::vector<SceneSample>
     return s;
 }
 
-// What the slowest block since the last report was doing, for an xrun.
-std::string describeXrun(uint64_t xruns, const BlockReport& r, const Rig& rig, double periodUs) {
-    char buf[160];
-    std::string s = xruns > 1 ? "xrun x" + std::to_string(xruns) + ": " : "xrun: ";
-    if (r.ns / 1000.0 < 0.8 * periodUs) {
-        std::snprintf(buf, sizeof buf, "no block was slow (the slowest took %.2f ms of %.2f ms), so the audio thread was late: another program or a driver had the CPU",
-                      r.ns / 1e6, periodUs / 1000.0);
-        return s + buf;
-    }
-    std::snprintf(buf, sizeof buf, "the slowest block took %.2f ms (the period is %.2f ms):", r.ns / 1e6, periodUs / 1000.0);
+// Where an xrun came from: when, how late and slow the block before it
+// was, and what the slowest block around it was doing.
+std::string describeXrun(uint64_t xruns, const AlsaStats& st, const BlockReport& r, const Rig& rig, double periodUs, unsigned rate) {
+    char buf[200];
+    const uint32_t ms = st.lastXrunMs.load();
+    std::snprintf(buf, sizeof buf, "xrun%s at %u:%04.1f, %s: the block before took %.2f ms and started %.2f ms late (the period is %.2f ms)",
+                  xruns > 1 ? (" x" + std::to_string(xruns)).c_str() : "", ms / 60000, (ms % 60000) / 1000.0,
+                  st.lastXrunPlayback ? "playback ran dry" : "capture overflowed", st.lastXrunBlockNs.load() / 1e6,
+                  1000.0 * st.lastXrunLateFrames.load() / rate, periodUs / 1000.0);
+    std::string s = buf;
+    std::snprintf(buf, sizeof buf, "; the slowest block around it took %.2f ms:", r.ns / 1e6);
     s += buf;
     for (size_t k = 0; k < r.count; ++k) {
         const auto& c = r.chains[k];
@@ -293,7 +294,8 @@ int cmdRun(const std::string& path) {
         while (engine.nextBlockReport(report)) {
             const uint64_t xruns = st.xruns.load();
             if (xruns > reportedXruns) {
-                std::printf("%s%s\n", term.active ? "\r\033[K" : "", describeXrun(xruns - reportedXruns, report, rig, periodUs).c_str());
+                std::printf("%s%s\n", term.active ? "\r\033[K" : "",
+                            describeXrun(xruns - reportedXruns, st, report, rig, periodUs, config.audio.rate).c_str());
                 reportedXruns = xruns;
             }
         }
@@ -307,9 +309,14 @@ int cmdRun(const std::string& path) {
             engine.requestBlockReport();
             // The numbers first, and no wider than the terminal: a line that
             // wraps cannot be redrawn in place.
-            char head[96];
-            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) xruns %llu | ", 100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs,
-                          static_cast<unsigned long long>(st.xruns.load()));
+            // Margin: the least audio left to play when a block was written.
+            const int32_t queued = st.minQueuedFrames.exchange(INT32_MAX);
+            char margin[32] = "-";
+            if (queued != INT32_MAX)
+                std::snprintf(margin, sizeof margin, "%.2f ms", 1000.0 * std::max(0, queued) / config.audio.rate);
+            char head[128];
+            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) margin %s xruns %llu | ", 100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs,
+                          margin, static_cast<unsigned long long>(st.xruns.load()));
             std::string line = head + show.status() + " | " + chainStatus(engine, rig, last);
             const size_t width = term.active ? terminalWidth() : 0;
             if (width > 1 && line.size() > width - 1)

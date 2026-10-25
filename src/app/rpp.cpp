@@ -926,6 +926,7 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
         << "device = hw:M2\n"
         << "rate = " << (rate > 0 ? static_cast<int>(rate) : 48000) << "\n"
         << "period = 64\n"
+        << "periods = 3         ; as REAPER on the M2: a block may run a period late without an xrun\n"
         << "input = " << input << "\n"
         << "out1 = 1\n"
         << "out2 = 2\n"

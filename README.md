@@ -61,7 +61,7 @@ cue bench <config.ini> --wav out.wav   # offline: CPU per chain + a WAV of the s
 cue run <config.ini>             # live
 ```
 
-While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own with the slowest block around it and the chains that played in it.
+While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, the margin (the least audio still queued for playback when a block was written; at zero the sound card runs dry), xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own: when it happened, how long the block before it took and how late it started, and the slowest block around it with the chains that played in it.
 
 ## Config
 

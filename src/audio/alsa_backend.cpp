@@ -161,6 +161,11 @@ bool AlsaBackend::configure(snd_pcm_t* pcm, bool capture, unsigned& channels, in
         *error = alsaError("hw_params", err);
         return false;
     }
+    if (!capture) {
+        snd_pcm_uframes_t size = 0;
+        snd_pcm_hw_params_get_buffer_size(hw, &size);
+        playbackBuffer_ = size;
+    }
 
     snd_pcm_sw_params_t* sw;
     snd_pcm_sw_params_alloca(&sw);
@@ -236,6 +241,10 @@ bool AlsaBackend::recover(int err, bool playback) {
         stats_.xruns++;
     stats_.lastXrunPlayback = playback;
     stats_.lastXrunCycle = cycle;
+    stats_.lastXrunMs = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_).count());
+    stats_.lastXrunBlockNs = lastBlockNs_;
+    stats_.lastXrunLateFrames = lastLateFrames_;
     snd_pcm_drop(capture_);
     if (snd_pcm_prepare(capture_) < 0)
         return false;
@@ -268,6 +277,7 @@ void AlsaBackend::run() {
     }
 
     prefill();
+    started_ = std::chrono::steady_clock::now();
     snd_pcm_start(capture_);
 
     const size_t capStride = captureChannels_ * bytesPerSample(captureFormat_);
@@ -288,6 +298,9 @@ void AlsaBackend::run() {
             continue;
         }
         const auto t0 = std::chrono::steady_clock::now();
+        // Frames already captured beyond this period: how late this block starts.
+        const snd_pcm_sframes_t waiting = snd_pcm_avail_update(capture_);
+        lastLateFrames_ = waiting > 0 ? static_cast<uint32_t>(waiting) : 0;
 
         for (uint32_t i = 0; i < frames; ++i)
             in_[i] = readSample(captureRaw_.data() + i * capStride + capOffset, captureFormat_);
@@ -303,8 +316,15 @@ void AlsaBackend::run() {
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
         stats_.cycles++;
         stats_.totalCycleNs += ns;
+        lastBlockNs_ = static_cast<uint32_t>(std::min<uint64_t>(ns, UINT32_MAX));
         if (ns > stats_.maxCycleNs.load(std::memory_order_relaxed))
-            stats_.maxCycleNs.store(static_cast<uint32_t>(std::min<uint64_t>(ns, UINT32_MAX)), std::memory_order_relaxed);
+            stats_.maxCycleNs.store(lastBlockNs_, std::memory_order_relaxed);
+        const snd_pcm_sframes_t space = snd_pcm_avail_update(playback_);
+        if (space >= 0 && playbackBuffer_ > 0) {
+            const int32_t queued = static_cast<int32_t>(playbackBuffer_) - static_cast<int32_t>(space);
+            if (queued < stats_.minQueuedFrames.load(std::memory_order_relaxed))
+                stats_.minQueuedFrames.store(queued, std::memory_order_relaxed);
+        }
 
         snd_pcm_sframes_t w = snd_pcm_writei(playback_, playbackRaw_.data(), frames);
         if (w < 0 && !recover(static_cast<int>(w), true))
