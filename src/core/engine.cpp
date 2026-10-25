@@ -78,9 +78,19 @@ void Engine::prime(float milliseconds) {
     std::thread([&] {
         markAudioThread();
         const uint32_t frames = settings_.maxFrames;
-        std::vector<float> buffers(4 * static_cast<size_t>(frames), 0.0f);
+        std::vector<float> buffers(6 * static_cast<size_t>(frames), 0.0f);
         const float* silence[kChainChannels] = {buffers.data(), buffers.data() + frames};
         float* scratch[kChainChannels] = {buffers.data() + 2 * frames, buffers.data() + 3 * frames};
+        // Quiet noise (-40 dBFS), never heard: some plug-ins skip their DSP
+        // on digital silence and only set up on the first real signal, which
+        // would then land in the first audio block that hears them.
+        float* noiseStore = buffers.data() + 4 * frames;
+        uint32_t seed = 12345;
+        for (size_t n = 0; n < 2 * static_cast<size_t>(frames); ++n) {
+            seed = seed * 1664525u + 1013904223u;
+            noiseStore[n] = 0.01f * (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f);
+        }
+        const float* noise[kChainChannels] = {noiseStore, noiseStore + frames};
         const size_t blocks = std::max<uint32_t>(1, ms(milliseconds) / frames);
         // Every plug-in, bypassed ones too: they may be switched on mid-song.
         for (auto& s : chains_) {
@@ -89,6 +99,13 @@ void Engine::prime(float milliseconds) {
             for (size_t i = 0; i < s.chain->numSlots(); ++i) {
                 Processor& p = s.chain->slot(i);
                 p.startProcessing();
+                for (size_t b = 0; b < blocks; ++b)
+                    p.process(silence, scratch, frames);
+                for (size_t b = 0; b < blocks; ++b)
+                    p.process(noise, scratch, frames);
+                // Clear what the noise left, then let anything a reset
+                // misses die away on silence.
+                p.reset();
                 for (size_t b = 0; b < blocks; ++b)
                     p.process(silence, scratch, frames);
                 p.stopProcessing();

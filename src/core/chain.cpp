@@ -1,6 +1,7 @@
 #include "chain.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <utility>
@@ -332,9 +333,25 @@ void Chain::process(const float* in, float* const* outs, uint32_t frames) {
                     writeTap(t, cur, outs[t], frames);
             if (k == line.count)
                 break;
+            const auto t0 = std::chrono::steady_clock::now();
             processSlot(slots_[line.first + k], cur, next, frames);
+            const auto ns = static_cast<uint32_t>(std::min<int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), UINT32_MAX));
+            if (ns > slowNs_.load(std::memory_order_relaxed)) {
+                slowNs_.store(ns, std::memory_order_relaxed);
+                slowSlot_.store(static_cast<int>(line.first + k), std::memory_order_relaxed);
+            }
         }
     }
+}
+
+bool Chain::takeSlowest(size_t& slot, uint32_t& ns) {
+    const int s = slowSlot_.exchange(-1);
+    ns = slowNs_.exchange(0);
+    if (s < 0)
+        return false;
+    slot = static_cast<size_t>(s);
+    return true;
 }
 
 } // namespace cue

@@ -118,4 +118,4 @@ The import reads each IR file named in the project and stores its samples in the
 | Headroom | bench: the 99.9% block time stays under about 70% of the period |
 | Pedals | LEDs and display match the table above |
 
-If you hear a pop, tell me which preset you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.
+If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. If you hear a pop, send those lines and tell me which preset you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

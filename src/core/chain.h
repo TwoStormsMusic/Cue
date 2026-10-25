@@ -3,6 +3,7 @@
 #include "processor.h"
 #include "ramp.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -104,6 +105,9 @@ public:
     void flushIdle();
     // in: frames mono samples. outs: numOutputs() buffers, each overwritten.
     void process(const float* in, float* const* outs, uint32_t frames);
+    // Any thread: the slot that took longest in one block since the last
+    // call, and how long. False if nothing was processed.
+    bool takeSlowest(size_t& slot, uint32_t& ns);
 
 private:
     struct LineState {
@@ -143,6 +147,8 @@ private:
     float quietLevel_ = 3.2e-5f; // -90 dB
     uint32_t drainHold_ = 14400, drainCap_ = 480000;
     bool holdTails_ = false;
+    std::atomic<int> slowSlot_{-1};
+    std::atomic<uint32_t> slowNs_{0};
     uint32_t tailMin_ = 0;
 };
 

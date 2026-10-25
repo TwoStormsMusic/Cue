@@ -263,6 +263,15 @@ int cmdRun(const std::string& path) {
             std::printf("%s%s | dsp %3.0f%% (max %3.0f%%) xruns %llu | %s\033[K%s", term.active ? "\r" : "", show.status().c_str(),
                         100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs, static_cast<unsigned long long>(st.xruns.load()),
                         chainStatus(engine, rig, last).c_str(), term.active ? "" : "\n");
+            // A plug-in that took most of a period in one block gets its own
+            // line, so a click can be traced to what caused it.
+            for (size_t i = 0; i < engine.numChains(); ++i) {
+                size_t slot = 0;
+                uint32_t slotNs = 0;
+                if (engine.chain(i).takeSlowest(slot, slotNs) && slotNs / 1000.0 > 0.8 * periodUs)
+                    std::printf("%sslow block: %s / %s took %.1f ms (the period is %.2f ms)\n", term.active ? "\n" : "",
+                                rig.chainNames[i].c_str(), engine.chain(i).slot(slot).name().c_str(), slotNs / 1e6, periodUs / 1000.0);
+            }
             std::fflush(stdout);
         }
     }
@@ -436,12 +445,17 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     std::snprintf(what, sizeof what, "switching every %.1f s, warm %s:", switchSeconds, config.warm.c_str());
     stats(blockUs, what);
     const uint64_t totalBlocks = aloneUs.size() + blockUs.size();
-    std::printf("\n%-24s %10s %12s %12s %10s\n", "chain", "blocks", "avg us/blk", "worst us", "share");
+    std::printf("\n%-24s %10s %12s %12s %10s  %s\n", "chain", "blocks", "avg us/blk", "worst us", "share", "slowest plug-in in one block");
     for (size_t i = 0; i < engine.numChains(); ++i) {
         ChainStats& st = engine.stats(i);
         const uint64_t blocks = st.processBlocks.load();
-        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%\n", rig.chainNames[i].c_str(), static_cast<unsigned long long>(blocks),
-                    blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks);
+        size_t slot = 0;
+        uint32_t slotNs = 0;
+        char slowest[96] = "";
+        if (engine.chain(i).takeSlowest(slot, slotNs))
+            std::snprintf(slowest, sizeof slowest, "%s %.0f us", engine.chain(i).slot(slot).name().c_str(), slotNs / 1000.0);
+        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%  %s\n", rig.chainNames[i].c_str(), static_cast<unsigned long long>(blocks),
+                    blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks, slowest);
     }
     std::printf("\n'share' is the fraction of blocks in which the chain was processed at all. Idle chains cost nothing.\n");
     if (worstUs > periodUs)
