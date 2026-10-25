@@ -479,14 +479,39 @@ struct Parser {
         return true;
     }
 
-    bool fcbLine(const std::string& key, const std::string& value) {
+    // "4" (pedal 4), "18" or "value 1": EurekaPROM's LED numbers past the
+    // pedals, or their names. 0 if none.
+    static int fcbLed(const std::string& text) {
+        static const char* names[] = {"expr a", "expr b", "sw1", "sw2", "bank", "select", "number",
+                                      "value 1", "value 2", "dir sel", "midi fn", "midi ch", "config"};
         double n = 0;
-        if (key.rfind("led", 0) == 0 && parseNumber(trim(key.substr(3)), n) && n >= 1 && n <= 10)
-            config.fcb.leds.push_back({static_cast<int>(n), {value, where}});
-        else if (key == "display")
+        if (parseNumber(text, n))
+            return n >= 1 && n <= 23 && n == static_cast<int>(n) ? static_cast<int>(n) : 0;
+        std::string t;
+        for (char c : lower(text))
+            if (c != ' ' && c != '-' && c != '_')
+                t += c;
+        for (int i = 0; i < 13; ++i) {
+            std::string name;
+            for (const char* c = names[i]; *c; ++c)
+                if (*c != ' ')
+                    name += *c;
+            if (t == name)
+                return 11 + i;
+        }
+        return 0;
+    }
+
+    bool fcbLine(const std::string& key, const std::string& value) {
+        if (key.rfind("led", 0) == 0) {
+            const int led = fcbLed(trim(key.substr(3)));
+            if (!led)
+                return fail("unknown LED '" + trim(key.substr(3)) + "' (a pedal 1-10, 11-23, or expr a, expr b, sw1, sw2, bank, select, number, value 1, value 2, dir sel, midi fn, midi ch, config)");
+            config.fcb.leds.push_back({led, {value, where}});
+        } else if (key == "display")
             config.fcb.displays.push_back({value, where});
         else
-            return fail("unknown fcb setting '" + key + "' (led 1 .. led 10, display)");
+            return fail("unknown fcb setting '" + key + "' (led 1 .. led 10, led value 1, display)");
         return true;
     }
 

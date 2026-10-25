@@ -271,7 +271,7 @@ struct Show::Impl {
     bool manualMute = false;
     std::vector<int> bypassed; // per plug-in: 1 bypassed, 0 running, -1 not yet sent
     int sentMute = -1;
-    int sentLeds[13];
+    int sentLeds[eurekaprom::kLastLed + 1];
     std::string sentDisplay = "\x01"; // nothing sent yet
     int runDepth = 0;
 
@@ -937,11 +937,14 @@ struct Show::Impl {
         if (config.midi.profile != "eurekaprom")
             return;
         const uint8_t ch = config.midi.channel;
-        for (int pedal = 1; pedal <= 10; ++pedal) {
-            const int on = ledFor(pedal) ? 1 : 0;
-            if (sentLeds[pedal] != on) {
-                sentLeds[pedal] = on;
-                out.sendMidi(eurekaprom::led(ch, pedal, on));
+        // The pedals' LEDs always; the others only when a rule drives them.
+        for (int led = 1; led <= eurekaprom::kLastLed; ++led) {
+            if (led > 10 && !hasLedRule(led))
+                continue;
+            const int on = ledFor(led) ? 1 : 0;
+            if (sentLeds[led] != on) {
+                sentLeds[led] = on;
+                out.sendMidi(eurekaprom::led(ch, led, on));
             }
         }
         const std::string text = displayFor();
@@ -965,10 +968,19 @@ struct Show::Impl {
         return false;
     }
 
+    bool hasLedRule(int led) const {
+        for (const auto& rule : ledRules)
+            if (rule.first == led)
+                return true;
+        return false;
+    }
+
     bool ledFor(int pedal) const {
         for (const auto& [p, cond] : ledRules)
             if (p == pedal)
                 return eval(cond);
+        if (pedal > 10)
+            return false;
         bool on = false;
         for (const Control& k : controls)
             if (k.pedal == pedal && std::fabs(k.value - k.min) > 1e-9)

@@ -409,15 +409,19 @@ TEST(show_template_mapping_does_what_reaLearn_did) {
     CHECK(show.valueText("Effect 1") == "on" && out.ledLit(1) && out.ledLit(6));
     show.onMidi(press(9));
     CHECK(show.presetName(show.preset()) == "Motown" && out.switches.back() == 3 && show.display() == "MO");
+    CHECK(!out.ledLit(4) && !out.ledLit(18) && !out.ledLit(19)); // LEDs 18-19 start off, as the wah does
     show.onMidi(press(4)); // auto wah: the first wah, in every chain
     CHECK(show.valueText("Wah") == "Auto");
+    CHECK(out.ledLit(4) && out.ledLit(18) && !out.ledLit(19)); // as ReaLearn: Value 1 for either wah
     for (int chain = 0; chain < 5; ++chain)
         CHECK(out.by(chain, 1) == 0 && out.by(chain, 2) == -1);
     show.onMidi(press(4)); // pedal wah: the second
     CHECK(show.valueText("Wah") == "Pedal" && out.by(3, 1) == 1 && out.by(3, 2) == 0);
+    CHECK(out.ledLit(4) && out.ledLit(18) && out.ledLit(19)); // ...and Value 2 for the pedal wah
     show.onMidi(press(5));
     CHECK(show.muted() && show.display() == "TU");
     show.onMidi(press(5));
     show.onMidi(press(8)); // 2000s: the wah resets
     CHECK(show.valueText("Wah") == "Off" && out.by(3, 2) == 1 && show.display() == "OO" && !show.muted());
+    CHECK(!out.ledLit(4) && !out.ledLit(18) && !out.ledLit(19));
 }

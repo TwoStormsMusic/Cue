@@ -238,8 +238,11 @@ The `[fcb]` section overrides them:
 ```ini
 [fcb]
 led 4 = Wah is not Off        ; LED 4 follows this condition instead
+led value 2 = Wah is Pedal    ; EurekaPROM's other LEDs, by name or number (value 2 = 19)
 display = TU when Tuner       ; the first display line whose condition holds wins
 ```
+
+The LEDs past the pedals are numbered as EurekaPROM numbers them: 11 `expr a`, 12 `expr b`, 13 `sw1`, 14 `sw2`, 15 `bank`, 16 `select`, 17 `number`, 18 `value 1`, 19 `value 2`, 20 `dir sel`, 21 `midi fn`, 22 `midi ch`, 23 `config`. Cue drives one of them only when an `[fcb]` line names it.
 
 ## Importing from REAPER
 

@@ -190,6 +190,8 @@ do = Wah = Off
 
 [fcb]
 led 4 = Wah is not Off
+led Value 1 = Wah is Auto
+led 19 = Wah is Pedal
 display = TU when Tuner
 )",
                           c, err);
@@ -209,7 +211,8 @@ display = TU when Tuner
     const TriggerSpec& t = c.triggers[0];
     CHECK(t.inputs.size() == 2 && t.actions.size() == 2 && t.when.text == "not Tuner");
     CHECK(c.groups[0].name == "Reset effects" && c.groups[0].actions.size() == 2);
-    CHECK(c.fcb.leds.size() == 1 && c.fcb.leds[0].first == 4 && c.fcb.displays.size() == 1);
+    CHECK(c.fcb.leds.size() == 3 && c.fcb.leds[0].first == 4 && c.fcb.displays.size() == 1);
+    CHECK(c.fcb.leds.size() == 3 && c.fcb.leds[1].first == 18 && c.fcb.leds[2].first == 19); // EurekaPROM's Value 1 and 2 LEDs
     // A scene of its own for chains outside any [scene], with a preset per chain.
     CHECK(c.scenes.size() == 1 && c.scenes[0].presets.size() == 1 && c.scenes[0].presets[0].chain == "Main");
 }

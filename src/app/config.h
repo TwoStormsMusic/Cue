@@ -113,7 +113,9 @@ struct GroupSpec {
 
 // What the FCB's LEDs and display show (EurekaPROM profile).
 struct FcbSpec {
-    std::vector<std::pair<int, ConfigText>> leds; // pedal, condition
+    // LED, condition. LEDs 1-10 are the pedals'; 11-23 are EurekaPROM's
+    // other LEDs by their own numbers (Expr A 11 ... Value 1 18, Value 2 19 ... Config 23).
+    std::vector<std::pair<int, ConfigText>> leds;
     std::vector<ConfigText> displays;             // text [when condition], first match wins
 };
 

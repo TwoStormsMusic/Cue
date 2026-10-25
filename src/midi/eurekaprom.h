@@ -37,6 +37,11 @@ inline int pedalFromValue(uint8_t v) {
     return 0;
 }
 
+// LEDs 1-10 are the pedals' (pedal 10 is value 0); 11-23 are EurekaPROM's
+// others, by their own values: Expr A 11, Expr B 12, Sw1 13, Sw2 14, Bank 15,
+// Select 16, Number 17, Value 1 18, Value 2 19, Dir Sel 20, MIDI Fn 21,
+// MIDI Ch 22, Config 23.
+constexpr int kLastLed = 23;
 inline uint8_t ledValueForPedal(int pedal) { return pedal == 10 ? 0 : static_cast<uint8_t>(pedal); }
 
 inline Input decode(const MidiMessage& m) {
@@ -55,9 +60,9 @@ inline Input decode(const MidiMessage& m) {
     return in;
 }
 
-// LEDs exist for pedals 1-10 only; Up and Down have none.
-inline MidiMessage led(uint8_t channel, int pedal, bool on) {
-    return MidiMessage::cc(channel, on ? kLedOnCC : kLedOffCC, ledValueForPedal(pedal));
+// led: 1-10 for the pedals (Up and Down have none), 11-23 for the others.
+inline MidiMessage led(uint8_t channel, int led, bool on) {
+    return MidiMessage::cc(channel, on ? kLedOnCC : kLedOffCC, ledValueForPedal(led));
 }
 
 inline MidiMessage displayNumber(uint8_t channel, int number) {
