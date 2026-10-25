@@ -120,7 +120,7 @@ std::string describeXrun(uint64_t xruns, const BlockReport& r, const Rig& rig, d
     for (size_t k = 0; k < r.count; ++k) {
         const auto& c = r.chains[k];
         std::snprintf(buf, sizeof buf, "%s %s %s %.2f ms%s", k ? "," : "", rig.chainNames[c.chain].c_str(), toString(c.state), c.ns / 1e6,
-                      c.helper ? " (helper)" : "");
+                      c.background ? " (background)" : c.helper ? " (helper)" : "");
         s += buf;
     }
     return s;
@@ -251,7 +251,7 @@ int cmdRun(const std::string& path) {
     auto nextStatus = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
-    uint64_t reportedXruns = 0;
+    uint64_t reportedXruns = 0, reportedStartup = 0;
 
     while (!g_quit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -281,6 +281,12 @@ int cmdRun(const std::string& path) {
             std::printf("audio thread: %s, %s; %zu helper thread(s)%s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
                         st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned", engine.numWorkers(),
                         engine.numWorkers() == 0 ? "" : engine.realtimeWorkers() == static_cast<int>(engine.numWorkers()) ? ", real-time" : ", NOT real-time");
+        }
+        if (st.startupXruns.load() > reportedStartup) {
+            reportedStartup = st.startupXruns.load();
+            std::printf("%sstart-up: the sound card stalled as it started (%s at block %llu), before anything was heard; not counted as an xrun\n",
+                        term.active ? "\r\033[K" : "", st.lastXrunPlayback ? "playback ran dry" : "capture overflowed",
+                        static_cast<unsigned long long>(st.lastXrunCycle.load()));
         }
         // Each xrun gets its own line, with the slowest block around it.
         BlockReport report;

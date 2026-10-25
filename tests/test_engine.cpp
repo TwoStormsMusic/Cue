@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -796,6 +797,58 @@ TEST(block_report_names_the_chains_of_the_slowest_block) {
     CHECK(r.chains[0].state == ChainState::Active);
     CHECK(r.chains[1].chain == 1);
     CHECK(r.chains[1].state == ChainState::Warm);
+    CHECK(r.chains[1].background); // warm: not heard, the block did not wait for it
     CHECK(r.chains[1].ns > r.chains[0].ns);
-    CHECK(r.ns >= r.chains[1].ns || r.chains[1].helper);
+}
+
+namespace {
+
+// Takes a fixed time per block, whatever the CPU.
+class SlowProcessor : public Processor {
+public:
+    explicit SlowProcessor(double ms) : ms_(ms) {}
+    const std::string& name() const override { return name_; }
+    bool activate(double, uint32_t) override { return true; }
+    void deactivate() override {}
+    void reset() override {}
+    void process(const float* const* in, float* const* out, uint32_t frames) override {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(ms_);
+        while (std::chrono::steady_clock::now() < until) {
+        }
+        for (int c = 0; c < kChainChannels; ++c)
+            std::copy(in[c], in[c] + frames, out[c]);
+    }
+
+private:
+    std::string name_ = "Slow";
+    double ms_;
+};
+
+} // namespace
+
+TEST(background_chain_does_not_hold_up_the_block) {
+    // The warm chain takes 2 ms a block, longer than a 64-frame period;
+    // the chain being heard takes almost nothing. Blocks come every 3 ms.
+    EngineSettings s = settings();
+    s.workers = 1;
+    Engine e(s);
+    e.addChain(chain("Light", slots(new GainProcessor(0.5f))));
+    e.addChain(chain("Slow", slots(new SlowProcessor(2.0))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    e.setWarm(1);
+    std::vector<double> blockMs;
+    std::vector<float> in(kBlock, 0.1f), o1(kBlock), o2(kBlock);
+    float* outs[2] = {o1.data(), o2.data()};
+    for (int b = 0; b < 60; ++b) {
+        const auto t0 = std::chrono::steady_clock::now();
+        e.process(in.data(), outs, kBlock);
+        blockMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(e.state(1) == ChainState::Warm);
+    std::sort(blockMs.begin(), blockMs.end());
+    const double median = blockMs[blockMs.size() / 2];
+    CHECK_MSG(median < 1.0, "median block %.2f ms: the block waited for the warm chain", median);
 }

@@ -25,6 +25,11 @@ struct AlsaConfig {
 struct AlsaStats {
     std::atomic<uint64_t> cycles{0};
     std::atomic<uint64_t> xruns{0};
+    // Xruns in the stream's first quarter second, before anything is heard:
+    // a USB sound card can take a moment to get its streams going.
+    std::atomic<uint64_t> startupXruns{0};
+    std::atomic<bool> lastXrunPlayback{false}; // the latest one: playback ran dry, else capture overflowed
+    std::atomic<uint64_t> lastXrunCycle{0};
     std::atomic<uint32_t> maxCycleNs{0}; // worst processing time of one period (reset by reader)
     std::atomic<uint64_t> totalCycleNs{0};
     std::atomic<bool> realtime{false};   // got SCHED_FIFO
@@ -54,7 +59,7 @@ private:
     struct Format;
     bool configure(snd_pcm_t* pcm, bool capture, unsigned& channels, int& format, std::string* error);
     void run();
-    bool recover(int err);
+    bool recover(int err, bool playback);
     void prefill();
 
     AlsaConfig config_;

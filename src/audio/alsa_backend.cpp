@@ -228,8 +228,14 @@ void AlsaBackend::prefill() {
         snd_pcm_writei(playback_, playbackRaw_.data(), config_.period);
 }
 
-bool AlsaBackend::recover(int err) {
-    stats_.xruns++;
+bool AlsaBackend::recover(int err, bool playback) {
+    const uint64_t cycle = stats_.cycles.load();
+    if (cycle < config_.rate / 4 / std::max(1u, config_.period))
+        stats_.startupXruns++;
+    else
+        stats_.xruns++;
+    stats_.lastXrunPlayback = playback;
+    stats_.lastXrunCycle = cycle;
     snd_pcm_drop(capture_);
     if (snd_pcm_prepare(capture_) < 0)
         return false;
@@ -273,12 +279,12 @@ void AlsaBackend::run() {
     while (running_) {
         snd_pcm_sframes_t n = snd_pcm_readi(capture_, captureRaw_.data(), frames);
         if (n < 0) {
-            if (!recover(static_cast<int>(n)))
+            if (!recover(static_cast<int>(n), false))
                 break;
             continue;
         }
         if (static_cast<uint32_t>(n) != frames) {
-            recover(-EPIPE);
+            recover(-EPIPE, false);
             continue;
         }
         const auto t0 = std::chrono::steady_clock::now();
@@ -301,7 +307,7 @@ void AlsaBackend::run() {
             stats_.maxCycleNs.store(static_cast<uint32_t>(std::min<uint64_t>(ns, UINT32_MAX)), std::memory_order_relaxed);
 
         snd_pcm_sframes_t w = snd_pcm_writei(playback_, playbackRaw_.data(), frames);
-        if (w < 0 && !recover(static_cast<int>(w)))
+        if (w < 0 && !recover(static_cast<int>(w), true))
             break;
     }
     if (running_)

@@ -34,7 +34,7 @@ out1 = 1            ; FOH
 out2 = 2            ; amp
 cpu = auto          ; auto (last performance core), none, or a CPU number
 priority = 80       ; real-time priority of the audio thread (and its helpers)
-workers = 2         ; helper threads: chains playing at once (a switch, the warm chain) are processed side by side. 0 = all on the audio thread
+workers = 2         ; helper threads: chains playing at once (a switch, the warm chain) are processed side by side, and the warm chain never holds up the one heard. 0 = all on the audio thread
 mix = sum           ; how a chain's stereo becomes each mono output: left, right or sum
 
 [switching]

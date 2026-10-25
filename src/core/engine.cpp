@@ -81,6 +81,9 @@ bool Engine::activate() {
             s.outs[o] = s.gain + (1 + o) * static_cast<size_t>(maxFrames);
     }
     jobs_.assign(chains_.size(), -1);
+    jobIn_.assign(maxFrames, 0.0f);
+    heardJobs_ = backgroundJobs_ = 0;
+    shared_ = false;
     activated_ = true;
     stopResetter_ = false;
     resetter_ = std::thread([this] { resetLoop(); });
@@ -117,13 +120,17 @@ void Engine::workerLoop() {
             continue;
         }
         seen = generation;
-        takeJobs(generation);
+        takeJobs(generation, UINT32_MAX);
     }
 }
 
 void Engine::stopWorkers() {
     if (workers_.empty())
         return;
+    // No more claims; a background chain a helper is still processing
+    // finishes before the helper stops.
+    ticket_.store(static_cast<uint64_t>(++generation_) << 32);
+    backgroundJobs_ = 0;
     stopWorkers_ = true;
     wake_.fetch_add(1);
     futexWake(wake_, INT_MAX);
@@ -132,18 +139,19 @@ void Engine::stopWorkers() {
     workers_.clear();
 }
 
-// Claims this block's chains one at a time, until none is left. A claim
-// only succeeds while the block is still the one in progress.
-void Engine::takeJobs(uint32_t generation) {
+// Claims this block's chains one at a time, until none is left below limit.
+// A claim only succeeds while the block is still the one in progress, and
+// the block's lists stay as they are until every chain claimed is done.
+void Engine::takeJobs(uint32_t generation, uint32_t limit) {
     uint64_t t = ticket_.load(std::memory_order_acquire);
     for (;;) {
         const uint32_t next = t & 0xffff, count = (t >> 16) & 0xffff;
-        if (static_cast<uint32_t>(t >> 32) != generation || next >= count)
+        if (static_cast<uint32_t>(t >> 32) != generation || next >= std::min(count, limit))
             return;
         if (!ticket_.compare_exchange_weak(t, t + 1, std::memory_order_acq_rel, std::memory_order_acquire))
             continue;
         runChain(jobs_[next], t_helper);
-        jobsDone_.fetch_add(1, std::memory_order_release);
+        (next < heardJobs_ ? heardDone_ : backgroundDone_).fetch_add(1, std::memory_order_release);
         t = ticket_.load(std::memory_order_acquire);
     }
 }
@@ -452,6 +460,8 @@ void Engine::advance(int index, uint32_t frames, float peak) {
 void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     const auto blockStart = std::chrono::steady_clock::now();
     frames = std::min(frames, settings_.maxFrames);
+    // The last block's background chains, before anything can touch them.
+    finishBackground();
     while (auto cmd = commands_.pop())
         handle(*cmd);
     // Starts that waited for a chain's reset.
@@ -471,29 +481,51 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     if (flushIdle)
         idleFlushCounter_ = 0;
 
-    // The chains that play in this block, the one being heard first: the
-    // audio thread starts on it while helpers take the others.
-    size_t count = 0;
-    if (active_ >= 0)
-        jobs_[count++] = active_;
-    for (size_t i = 0; i < chains_.size(); ++i) {
-        chains_[i].ran = false;
-        if (chains_[i].state != ChainState::Idle && static_cast<int>(i) != active_)
-            jobs_[count++] = static_cast<int>(i);
+    // The chains that play in this block. Heard ones first, the one being
+    // played first of all: the audio thread starts on it while helpers take
+    // the others. Then the ones nobody hears yet (warm, pre-roll): their
+    // output is not used, so the block does not wait for them.
+    auto background = [](const Slot& s) {
+        return (s.state == ChainState::PreRoll || s.state == ChainState::Warm) && s.outGain.done() && s.outGain.value() == 0.0f;
+    };
+    for (auto& s : chains_)
+        s.ran = s.background = false;
+    size_t heard = 0, unheard = 0;
+    if (active_ >= 0) {
+        jobs_[heard++] = active_;
+        chains_[active_].ran = true;
     }
-    BlockReport block;
-    block.count = std::min(count, BlockReport::kMaxChains);
-    for (size_t k = 0; k < block.count; ++k) {
-        block.chains[k].chain = jobs_[k];
-        block.chains[k].state = chains_[jobs_[k]].state;
-    }
-    runChains(in, frames, count, flushIdle);
-
-    // Mixed and moved on in chain order, whichever thread processed them,
-    // so the result is the same as processing them one by one.
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
-        if (!s.ran)
+        if (s.state != ChainState::Idle && static_cast<int>(i) != active_ && !background(s)) {
+            jobs_[heard++] = static_cast<int>(i);
+            s.ran = true;
+        }
+    }
+    for (size_t i = 0; i < chains_.size(); ++i) {
+        Slot& s = chains_[i];
+        if (s.state != ChainState::Idle && !s.ran) {
+            jobs_[heard + unheard++] = static_cast<int>(i);
+            s.ran = s.background = true;
+        }
+    }
+    BlockReport block;
+    block.count = std::min(heard + unheard, BlockReport::kMaxChains);
+    for (size_t k = 0; k < block.count; ++k) {
+        const Slot& s = chains_[jobs_[k]];
+        block.chains[k].chain = jobs_[k];
+        block.chains[k].state = s.state;
+        block.chains[k].background = s.background;
+        block.chains[k].ns = s.backgroundNs;
+    }
+    runChains(in, frames, heard, unheard, flushIdle);
+
+    // Mixed and moved on in chain order, whichever thread processed them,
+    // so the result is the same as processing them one by one. Background
+    // chains move on at the start of the next block, once they are done.
+    for (size_t i = 0; i < chains_.size(); ++i) {
+        Slot& s = chains_[i];
+        if (!s.ran || s.background)
             continue;
         // Output: muted chains (pre-roll, warm) are processed but not heard.
         float peak = 0.0f;
@@ -514,12 +546,7 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
             }
         }
 
-        ChainStats& st = *s.stats;
-        st.processNs.fetch_add(s.blockNs, std::memory_order_relaxed);
-        st.processBlocks.fetch_add(1, std::memory_order_relaxed);
-        if (s.blockNs > st.maxBlockNs.load(std::memory_order_relaxed))
-            st.maxBlockNs.store(s.blockNs, std::memory_order_relaxed);
-
+        recordStats(s);
         advance(static_cast<int>(i), frames, peak);
     }
 
@@ -534,6 +561,8 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     if (block.ns > slowest_.ns) {
         for (size_t k = 0; k < block.count; ++k) {
             const Slot& s = chains_[block.chains[k].chain];
+            if (s.background)
+                continue; // a helper may still be on it
             block.chains[k].helper = s.helper;
             block.chains[k].ns = s.blockNs;
         }
@@ -545,21 +574,28 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     }
 }
 
-void Engine::runChains(const float* in, uint32_t frames, size_t count, bool flushIdle) {
-    jobIn_ = in;
+void Engine::runChains(const float* in, uint32_t frames, size_t heard, size_t background, bool flushIdle) {
+    // A copy of the input: background chains may read it after process()
+    // has returned and the caller has reused its buffer.
+    std::memcpy(jobIn_.data(), in, frames * sizeof(float));
     jobFrames_ = frames;
-    const bool parallel = !workers_.empty() && count > 1;
-    if (parallel) {
-        jobsDone_.store(0, std::memory_order_relaxed);
+    heardJobs_ = heard;
+    backgroundJobs_ = background;
+    shared_ = !workers_.empty() && heard + background > 1;
+    if (shared_) {
+        heardDone_.store(0, std::memory_order_relaxed);
+        backgroundDone_.store(0, std::memory_order_relaxed);
         const uint32_t generation = ++generation_;
-        ticket_.store(static_cast<uint64_t>(generation) << 32 | static_cast<uint64_t>(count) << 16, std::memory_order_release);
+        ticket_.store(static_cast<uint64_t>(generation) << 32 | static_cast<uint64_t>(heard + background) << 16, std::memory_order_release);
         wake_.store(generation);
+        const size_t wanted = heard + background - (heard > 0 ? 1 : 0);
         const uint32_t sleeping = sleepers_.load();
-        if (sleeping > 0)
-            futexWake(wake_, static_cast<int>(std::min<size_t>(sleeping, count - 1)));
-        takeJobs(generation);
+        if (sleeping > 0 && wanted > 0)
+            futexWake(wake_, static_cast<int>(std::min<size_t>(sleeping, wanted)));
+        // The audio thread takes heard chains only.
+        takeJobs(generation, static_cast<uint32_t>(heard));
     } else {
-        for (size_t k = 0; k < count; ++k)
+        for (size_t k = 0; k < heard + background; ++k)
             runChain(jobs_[k], false);
     }
 
@@ -573,10 +609,37 @@ void Engine::runChains(const float* in, uint32_t frames, size_t count, bool flus
         }
     }
 
-    if (parallel) {
-        while (jobsDone_.load(std::memory_order_acquire) < count)
+    if (shared_) {
+        while (heardDone_.load(std::memory_order_acquire) < heard)
             _mm_pause();
     }
+}
+
+// Waits for the last block's background chains, processing any no helper
+// got to, then moves them on.
+void Engine::finishBackground() {
+    if (backgroundJobs_ == 0)
+        return;
+    if (shared_) {
+        takeJobs(generation_, UINT32_MAX);
+        while (backgroundDone_.load(std::memory_order_acquire) < backgroundJobs_)
+            _mm_pause();
+    }
+    for (size_t k = heardJobs_; k < heardJobs_ + backgroundJobs_; ++k) {
+        Slot& s = chains_[jobs_[k]];
+        s.backgroundNs = s.blockNs;
+        recordStats(s);
+        advance(jobs_[k], jobFrames_, 0.0f); // pre-roll and warm need no peak
+    }
+    backgroundJobs_ = 0;
+}
+
+void Engine::recordStats(Slot& s) {
+    ChainStats& st = *s.stats;
+    st.processNs.fetch_add(s.blockNs, std::memory_order_relaxed);
+    st.processBlocks.fetch_add(1, std::memory_order_relaxed);
+    if (s.blockNs > st.maxBlockNs.load(std::memory_order_relaxed))
+        st.maxBlockNs.store(s.blockNs, std::memory_order_relaxed);
 }
 
 void Engine::runChain(int index, bool helper) {
@@ -585,14 +648,13 @@ void Engine::runChain(int index, bool helper) {
     const uint32_t frames = jobFrames_;
     // Input, with the chain's input gain.
     if (s.inGain.done() && s.inGain.value() == 1.0f) {
-        std::memcpy(s.in, jobIn_, frames * sizeof(float));
+        std::memcpy(s.in, jobIn_.data(), frames * sizeof(float));
     } else {
         s.inGain.render(s.gain, frames);
         for (uint32_t n = 0; n < frames; ++n)
             s.in[n] = jobIn_[n] * s.gain[n];
     }
     s.chain->process(s.in, s.outs.data(), frames);
-    s.ran = true;
     s.helper = helper;
     s.blockNs = nsSince(t0);
 }

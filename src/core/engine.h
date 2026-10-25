@@ -33,7 +33,9 @@ struct EngineSettings {
     // Helper threads that process playing chains alongside the audio thread,
     // so a switch (the old chain ringing out, the new one, the warm one)
     // takes about as long as its slowest chain rather than all of them in
-    // turn. 0 = every chain on the audio thread.
+    // turn. Chains that are not heard (warm, pre-roll) may also finish
+    // while the next block starts, so a heavy or cold-starting one never
+    // holds up the chain being played. 0 = every chain on the audio thread.
     int workers = 0;
     int workerPriority = 0; // their SCHED_FIFO priority; 0 = normal scheduling
 };
@@ -76,8 +78,9 @@ struct BlockReport {
     struct Entry {
         int chain = -1;
         ChainState state = ChainState::Idle;
-        bool helper = false; // processed on a helper thread
-        uint32_t ns = 0;
+        bool helper = false;     // processed on a helper thread
+        bool background = false; // not heard (warm, pre-roll): did not hold up the block
+        uint32_t ns = 0;         // for a background chain, its previous block
     };
     uint32_t ns = 0;    // the whole block, on the audio thread
     size_t count = 0;   // chains listed
@@ -159,9 +162,11 @@ private:
         float* in = nullptr;
         float* gain = nullptr;
         std::vector<float*> outs;
-        bool ran = false;    // processed in this block
-        bool helper = false; // ...on a helper thread
+        bool ran = false;        // processed in this block
+        bool background = false; // ...without being heard, so the block does not wait for it
+        bool helper = false;     // ...on a helper thread
         uint32_t blockNs = 0;
+        uint32_t backgroundNs = 0; // blockNs of its last background block, once finished
     };
 
     uint32_t ms(float milliseconds) const;
@@ -176,9 +181,11 @@ private:
     void setState(int index, ChainState state);
     void emit(EngineEvent::Type type, int chain);
     void advance(int index, uint32_t frames, float peak);
-    void runChains(const float* in, uint32_t frames, size_t count, bool flushIdle);
-    void takeJobs(uint32_t generation);
+    void runChains(const float* in, uint32_t frames, size_t heard, size_t background, bool flushIdle);
+    void finishBackground();
+    void takeJobs(uint32_t generation, uint32_t limit);
     void runChain(int index, bool helper);
+    void recordStats(Slot& s);
     void workerLoop();
     void stopWorkers();
 
@@ -195,17 +202,22 @@ private:
     std::thread resetter_;
     std::atomic<bool> stopResetter_{false};
 
-    // This block's chains, the one being heard first. Helpers claim them
-    // through ticket_: generation << 32 | count << 16 | next.
+    // This block's chains: the heard ones, the one being played first, then
+    // the background ones. Helpers claim them through ticket_:
+    // generation << 32 | count << 16 | next. Background chains may still be
+    // running when process() returns; the next block waits for them first.
     std::vector<int> jobs_;
-    const float* jobIn_ = nullptr;
+    std::vector<float> jobIn_; // the input, kept for background chains
     uint32_t jobFrames_ = 0;
     uint32_t generation_ = 0;
+    size_t heardJobs_ = 0, backgroundJobs_ = 0;
+    bool shared_ = false; // this block's chains were shared with the helpers
     std::vector<std::thread> workers_;
     std::atomic<bool> stopWorkers_{false};
     std::atomic<int> realtimeWorkers_{0};
     alignas(64) std::atomic<uint64_t> ticket_{0};
-    alignas(64) std::atomic<uint32_t> jobsDone_{0};
+    alignas(64) std::atomic<uint32_t> heardDone_{0};
+    alignas(64) std::atomic<uint32_t> backgroundDone_{0};
     alignas(64) std::atomic<uint32_t> wake_{0}; // a futex: bumped for each block helpers share
     std::atomic<uint32_t> sleepers_{0};
 
