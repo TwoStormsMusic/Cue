@@ -37,10 +37,22 @@ std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* erro
 }
 
 Processor* Rig::at(int chain, size_t slot) const {
-    for (const auto& p : plugins)
-        if (p.chain == chain && p.slot == slot)
-            return p.processor;
-    return nullptr;
+    const int i = find(chain, slot);
+    return i < 0 ? nullptr : plugins[i].processor;
+}
+
+int Rig::find(int chain, size_t slot) const {
+    for (size_t i = 0; i < plugins.size(); ++i)
+        if (plugins[i].chain == chain && plugins[i].slot == slot)
+            return static_cast<int>(i);
+    return -1;
+}
+
+void RigOutput::setBypass(int chain, size_t slot, bool bypassed) {
+    rig_.engine->setBypass(chain, slot, bypassed);
+    const int i = rig_.find(chain, slot);
+    if (i >= 0 && rig_.bypassedNow)
+        rig_.bypassedNow[i].store(bypassed, std::memory_order_relaxed);
 }
 
 std::vector<ShowPlugin> Rig::showPlugins() const {
@@ -180,6 +192,10 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             rig.chainNames.push_back(cs.name);
         }
     }
+
+    rig.bypassedNow.reset(new std::atomic<bool>[rig.plugins.size()]);
+    for (size_t i = 0; i < rig.plugins.size(); ++i)
+        rig.bypassedNow[i].store(rig.plugins[i].bypassed, std::memory_order_relaxed);
 
     const auto t0 = std::chrono::steady_clock::now();
     if (!rig.engine->activate()) {

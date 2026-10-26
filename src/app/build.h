@@ -6,6 +6,7 @@
 #include "host/clap_processor.h"
 #include "host/vst3_processor.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -32,8 +33,13 @@ struct Rig {
     std::vector<Vst3Processor*> vst3Plugins;
     std::vector<RigPlugin> plugins;
     std::vector<std::string> chainNames;
+    // Whether each of plugins is bypassed now, as the show or the app last
+    // switched it. Any thread.
+    std::unique_ptr<std::atomic<bool>[]> bypassedNow;
 
     Processor* at(int chain, size_t slot) const;
+    // Where a plug-in is in plugins, or -1.
+    int find(int chain, size_t slot) const;
     std::vector<ShowPlugin> showPlugins() const;
 
     // Main thread, every few milliseconds: plug-in callbacks and controller updates.
@@ -58,7 +64,7 @@ public:
     RigOutput(Rig& rig, std::function<void(const MidiMessage&)> midiOut) : rig_(rig), midiOut_(std::move(midiOut)) {}
     void switchTo(int chain) override { rig_.engine->switchTo(chain); }
     void setWarm(int chain) override { rig_.engine->setWarm(chain); }
-    void setBypass(int chain, size_t slot, bool bypassed) override { rig_.engine->setBypass(chain, slot, bypassed); }
+    void setBypass(int chain, size_t slot, bool bypassed) override;
     void setParam(int chain, size_t slot, uint32_t id, double value) override;
     void setMute(bool muted) override { rig_.engine->setMute(muted); }
     void sendMidi(const MidiMessage& m) override {

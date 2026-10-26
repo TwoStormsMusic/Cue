@@ -45,6 +45,8 @@ public:
     // Any non-real-time thread. value is normalised 0..1, as VST3 parameters are.
     bool setParam(uint32_t id, double normalized) override;
     std::vector<ParamInfo> params() const override;
+    bool paramValue(uint32_t id, double& normalized) const override;
+    std::string paramText(uint32_t id, double normalized) const override;
 
     // Audio thread.
     void startProcessing() override;

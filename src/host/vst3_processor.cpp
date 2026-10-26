@@ -361,6 +361,20 @@ std::vector<ParamInfo> Vst3Processor::params() const {
     return out;
 }
 
+bool Vst3Processor::paramValue(uint32_t id, double& normalized) const {
+    if (!impl_->controller)
+        return false;
+    normalized = impl_->controller->getParamNormalized(id);
+    return true;
+}
+
+std::string Vst3Processor::paramText(uint32_t id, double normalized) const {
+    String128 text{};
+    if (!impl_->controller || impl_->controller->getParamStringByValue(id, normalized, text) != kResultOk)
+        return {};
+    return Steinberg::Vst::StringConvert::convert(text);
+}
+
 // Processing is on for as long as the plug-in is active (see activate()), so
 // starting and stopping a chain makes no calls into it.
 void Vst3Processor::startProcessing() {}

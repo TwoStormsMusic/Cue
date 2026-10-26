@@ -384,6 +384,16 @@ std::vector<ParamInfo> ClapProcessor::params() const {
     return out;
 }
 
+bool ClapProcessor::paramValue(uint32_t id, double& value) const { return paramsExt_ && paramsExt_->get_value(plugin_, id, &value); }
+
+std::string ClapProcessor::paramText(uint32_t id, double value) const {
+    char buf[256] = {};
+    if (!paramsExt_ || !paramsExt_->value_to_text(plugin_, id, value, buf, sizeof buf))
+        return {};
+    buf[sizeof buf - 1] = 0;
+    return buf;
+}
+
 bool ClapProcessor::saveState(std::vector<uint8_t>& out) const {
     if (!state_)
         return false;

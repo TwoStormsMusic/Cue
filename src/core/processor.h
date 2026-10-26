@@ -75,6 +75,10 @@ public:
     virtual bool setParam(uint32_t /*id*/, double /*value*/) { return false; }
     // Main thread.
     virtual std::vector<ParamInfo> params() const { return {}; }
+    // Main thread: a parameter's value now, as setParam takes it, and how the
+    // plug-in writes a value ("-3.0 dB"). False or empty when it cannot say.
+    virtual bool paramValue(uint32_t /*id*/, double& /*value*/) const { return false; }
+    virtual std::string paramText(uint32_t /*id*/, double /*value*/) const { return {}; }
 
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.

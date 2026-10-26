@@ -41,6 +41,8 @@ public:
     bool activate(double sampleRate, uint32_t maxFrames) override;
     void deactivate() override;
     std::vector<ParamInfo> params() const override;
+    bool paramValue(uint32_t id, double& value) const override;
+    std::string paramText(uint32_t id, double value) const override;
     bool saveState(std::vector<uint8_t>& out) const;
     bool loadState(const std::vector<uint8_t>& data);
     // Handles callbacks the plug-in asked for (request_callback, rescans).

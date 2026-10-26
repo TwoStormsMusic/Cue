@@ -153,6 +153,43 @@ private:
     std::vector<std::pair<uint64_t, uint64_t>> last_;
 };
 
+// The peak of each input and output since the main thread last took it, for
+// the app's meters. The audio thread only raises a peak; the main thread
+// takes it and leaves zero.
+class Meters {
+public:
+    Meters(size_t inputs, size_t outputs) : inputs_(inputs), outputs_(outputs), peaks_(new std::atomic<float>[inputs + outputs]) {
+        for (size_t c = 0; c < inputs + outputs; ++c)
+            peaks_[c].store(0.0f, std::memory_order_relaxed);
+    }
+    // Audio thread.
+    void measure(const float* const* ins, const float* const* outs, uint32_t frames) {
+        for (size_t c = 0; c < inputs_ + outputs_; ++c) {
+            const float* x = c < inputs_ ? ins[c] : outs[c - inputs_];
+            float peak = 0.0f;
+            for (uint32_t i = 0; i < frames; ++i)
+                peak = std::max(peak, std::fabs(x[i]));
+            if (peak > peaks_[c].load(std::memory_order_relaxed))
+                peaks_[c].store(peak, std::memory_order_relaxed);
+        }
+    }
+    // Main thread: {"inputs": [{"name", "peak_db"}], "outputs": [...]}, -120 for silence.
+    Json take(const Config& config) {
+        Json j = {{"inputs", Json::array()}, {"outputs", Json::array()}};
+        for (size_t c = 0; c < inputs_ + outputs_; ++c) {
+            const float peak = peaks_[c].exchange(0.0f, std::memory_order_relaxed);
+            const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
+            const bool in = c < inputs_;
+            j[in ? "inputs" : "outputs"].push_back({{"name", in ? config.inputs[c] : config.outputs[c - inputs_]}, {"peak_db", std::round(db * 10) / 10}});
+        }
+        return j;
+    }
+
+private:
+    const size_t inputs_, outputs_;
+    std::unique_ptr<std::atomic<float>[]> peaks_;
+};
+
 // The chains that are running, with their cost over the window.
 std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
     std::string s;
@@ -214,8 +251,56 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
         chains.push_back({{"name", rig.chainNames[i]},
                           {"state", toString(static_cast<ChainState>(engine.stats(i).state.load()))},
                           {"avg_us", w.chainAvgUs(i)},
-                          {"max_us", w.chainMaxNs[i] / 1000.0}});
+                          {"max_us", w.chainMaxNs[i] / 1000.0},
+                          {"bypassed", Json::array()}});
+    for (size_t k = 0; k < rig.plugins.size(); ++k)
+        if (rig.bypassedNow[k].load(std::memory_order_relaxed))
+            chains[rig.plugins[k].chain]["bypassed"].push_back(rig.plugins[k].slot);
     j["chains"] = chains;
+    return j;
+}
+
+// The config's plug-in at an engine chain and slot: chains are numbered scene
+// by scene, slots line by line.
+PluginSpec* specAt(Config& config, int chain, size_t slot) {
+    int c = 0;
+    for (auto& scene : config.scenes)
+        for (auto& cs : scene.chains) {
+            if (c++ != chain)
+                continue;
+            size_t k = 0;
+            for (auto& line : cs.lines)
+                for (auto& ps : line.plugins)
+                    if (k++ == slot)
+                        return &ps;
+            return nullptr;
+        }
+    return nullptr;
+}
+
+// A plug-in for the app: what it is, whether it is bypassed, and its
+// parameters with their values now.
+Json pluginJson(const Rig& rig, int k, const PluginSpec& ps) {
+    const RigPlugin& rp = rig.plugins[k];
+    Processor* p = rp.processor;
+    Json j;
+    j["chain"] = rp.chain;
+    j["slot"] = rp.slot;
+    j["label"] = rp.label;
+    j["name"] = p->name();
+    j["format"] = ps.kind;
+    j["bypassed"] = rig.bypassedNow[k].load(std::memory_order_relaxed);
+    Json params = Json::array();
+    for (const ParamInfo& info : p->params()) {
+        Json q = {{"id", info.id}, {"name", info.name}, {"module", info.module}, {"min", info.min}, {"max", info.max},
+                  {"default", info.def}, {"steps", info.steps}};
+        double value = info.def;
+        const bool known = p->paramValue(info.id, value);
+        q["value"] = known ? Json(value) : Json(nullptr);
+        q["text"] = known ? p->paramText(info.id, value) : "";
+        params.push_back(q);
+    }
+    j["params"] = params;
     return j;
 }
 
@@ -395,6 +480,9 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     tuner.setSettings(config.tuner.settings);
     const size_t tunerInput = config.tuner.inputIndex;
 
+    Meters meters(config.inputs.size(), config.outputs.size());
+    Json levels = meters.take(config);
+
     std::atomic<bool> marked{false};
     audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
         if (!marked.load(std::memory_order_relaxed)) {
@@ -403,6 +491,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
         tuner.write(ins[tunerInput], frames);
         engine.process(ins, outs, frames);
+        meters.measure(ins, outs, frames);
     }, &err);
 
     std::signal(SIGINT, onSignal);
@@ -415,6 +504,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     auto status = [&] {
         Json j = statusJson(lastSample, engine, rig, show, config);
         j["xruns"] = audio->stats().xruns.load();
+        j["levels"] = levels;
         return j;
     };
     std::string savePath = isCueFile(path) ? path : "";
@@ -493,10 +583,37 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             config.tuner.settings = t;
             tuner.setSettings(t);
             reply["tuner"] = tunerJson(tuner.reading(), t, config.inputs.at(tunerInput));
+        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param") {
+            const int chain = req.at("chain").get<int>();
+            const size_t slot = req.at("slot").get<size_t>();
+            const int k = rig.find(chain, slot);
+            PluginSpec* ps = specAt(config, chain, slot);
+            if (k < 0 || !ps)
+                return refuse("there is no plug-in " + std::to_string(slot + 1) + " in chain number " + std::to_string(chain + 1));
+            Processor* p = rig.plugins[k].processor;
+            if (cmd == "bypass") {
+                // Saved with the performance, like a change made in the file.
+                const bool bypassed = req.at("bypassed").get<bool>();
+                output.setBypass(chain, slot, bypassed);
+                ps->bypassed = bypassed;
+            } else if (cmd == "param") {
+                const uint32_t id = req.at("id").get<uint32_t>();
+                const double value = req.at("value").get<double>();
+                if (!p->setParam(id, value))
+                    return refuse(p->name() + " did not take the change (too many at once)");
+                // The plug-in's state keeps it; a param line in the file
+                // would set it back when the performance loads, so it follows.
+                for (auto& [pid, v] : ps->params)
+                    if (pid == id)
+                        v = value;
+                reply["text"] = p->paramText(id, value);
+                return;
+            }
+            reply["plugin"] = pluginJson(rig, k, *ps);
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
-            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, quit, subscribe, unsubscribe)");
+            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {
@@ -574,6 +691,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 nextSample = now + std::chrono::milliseconds(33);
             lastSample = sampler.take(st, engine);
             window.add(lastSample);
+            levels = meters.take(config);
             if (service.subscribed("status"))
                 service.publish("status", status());
             // The tuner listens while someone looks at it.
@@ -1104,7 +1222,8 @@ int cmdCtl(int argc, char** argv) {
     }
     if (args.empty()) {
         std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | tuner | select <chain|number|next|previous> |\n"
-                             "        do \"<action>\" | save [file.cue] | performance | quit\n");
+                             "        do \"<action>\" | save [file.cue] | performance | plugin <chain> <n> | bypass <chain> <n> on|off |\n"
+                             "        param <chain> <n> <id> <value> | quit\n");
         return 2;
     }
     ServiceClient client;
@@ -1215,8 +1334,18 @@ int cmdCtl(int argc, char** argv) {
             request["path"] = std::filesystem::absolute(args[1]).string();
     } else if (what == "performance" || what == "quit" || what == "hello") {
         request = {{"cmd", what}};
+    } else if ((what == "plugin" && args.size() >= 3) || (what == "bypass" && args.size() >= 4) || (what == "param" && args.size() >= 5)) {
+        // Chains and plug-ins by number from 1, as cue check lists them.
+        request = {{"cmd", what}, {"chain", std::atoi(args[1].c_str()) - 1}, {"slot", std::atoi(args[2].c_str()) - 1}};
+        if (what == "bypass")
+            request["bypassed"] = args[3] == "on" || args[3] == "yes";
+        if (what == "param") {
+            request["id"] = std::strtoul(args[3].c_str(), nullptr, 10);
+            request["value"] = std::atof(args[4].c_str());
+        }
     } else {
-        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, quit)\n", what.c_str());
+        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, plugin, bypass, param, quit)\n",
+                     what.c_str());
         return 2;
     }
     if (!ask(request, reply))
@@ -1227,6 +1356,17 @@ int cmdCtl(int argc, char** argv) {
         std::printf("%s\n", reply.at("performance").dump(2).c_str());
     else if (what == "select")
         std::printf("playing %s\n", reply.at("selected").value("name", "").c_str());
+    else if (what == "param")
+        std::printf("%s\n", reply.value("text", "").c_str());
+    else if (what == "plugin" || what == "bypass") {
+        const Json& p = reply.at("plugin");
+        std::printf("%s (%s, %s)%s\n", p.value("label", "").c_str(), p.value("name", "").c_str(), p.value("format", "").c_str(),
+                    p.value("bypassed", false) ? "  bypassed" : "");
+        for (const auto& q : p.at("params"))
+            std::printf("  %6u  %-28s %s\n", q.value("id", 0u), q.value("name", "").c_str(),
+                        q.value("text", "").empty() && q.at("value").is_number() ? std::to_string(q.at("value").get<double>()).c_str()
+                                                                                    : q.value("text", "").c_str());
+    }
     else if (what == "save") {
         std::printf("saved %s\n", reply.value("path", "").c_str());
         for (const auto& w : reply.value("warnings", Json::array()))

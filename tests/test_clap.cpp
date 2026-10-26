@@ -96,6 +96,12 @@ TEST(clap_param_change_reaches_the_plugin) {
     runConstant(e, 0.5f, 100);
     CHECK(g->setParam(0, 0.5));
     CHECK(std::fabs(runConstant(e, 0.5f, 2) - 0.25f) < 1e-6f);
+    // What the app shows beside the slider.
+    double value = 0;
+    CHECK(g->paramValue(0, value));
+    CHECK(std::fabs(value - 0.5) < 1e-9);
+    CHECK(g->paramText(0, value) == "0.500");
+    CHECK(!g->paramValue(7, value));
 }
 
 TEST(clap_idle_plugin_gets_params_without_processing) {
