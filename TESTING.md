@@ -166,6 +166,21 @@ bin/cue run "$HOME/cue/Cue Template 2S/Cue Template 2S.cue" --audio none
 
 It loads every plug-in and runs them on a timer, hearing silence; `cue ctl` works as above. This is how the app will edit a performance on a laptop. **Send** the lines it printed at start.
 
+## 8. Cue Converter
+
+Needs REAPER with ReaLearn (Helgobox) on the rig, and Qt 6 (as for the Cue app).
+
+1. `bin/cue-convert` opens a black window with an orange "Cue". Drop `Cue Template 2S.RPP` on it: it writes `Cue Template 2S.cue` beside it and lists what it left out (VST2 plug-ins, ReaLearn mappings it could not read).
+2. Drop a `.cue` with pedals on it (for example one made with `cue import-rpp "Cue Template 2S.RPP" --mapping configs/cue-template-mapping.ini` then `cue convert`): it writes `<name>.RPP`, or `<name> (2).RPP` if that exists.
+3. Open that project in REAPER. Check:
+   - every chain is a track; only the first is unmuted; Darkglass Ultra and Parallax load with their settings (if REAPER says it cannot find one, tell me its name);
+   - FOH and the amp get what they get in Cue (IR and Saturator only on FOH);
+   - the **Cue pedals** track holds ReaLearn. If your FCB is not REAPER's MIDI device 1, pick it as ReaLearn's input and output.
+4. Press pedals 6-10: each unmutes its track and mutes the others, its LED lights, the display shows PU, SL, OO, MO, DJ.
+5. Pedal 4 steps the wah (off, auto, pedal) and switches the two TwoStorms Wahs; pedals 1-3 light and put out their LEDs; the Value 1 / Value 2 LEDs follow the wah.
+6. Drop the `.RPP` back on the converter: the `.cue` it writes plays as the original (same pedals, same chains).
+7. Tell me anything REAPER or ReaLearn did differently. I could not run either here, so the ReaLearn part is written from its source code and untested.
+
 ## What passes
 
 | Check | Pass when |

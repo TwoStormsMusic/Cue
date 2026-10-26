@@ -19,6 +19,10 @@ cp "$root"/configs/*.ini "$stage/configs/"
 cp "$root/scripts/run-tests.sh" "$root/scripts/rig-info.sh" "$stage/"
 cp "$root/README.md" "$root/TESTING.md" "$stage/"
 cp "$root"/docs/*.md "$stage/docs/"
+if [ -f "$build/cue-convert" ]; then
+  cp "$build/cue-convert" "$stage/bin/"
+  strip "$stage/bin/cue-convert"
+fi
 strip "$stage/bin/cue" "$stage/bin/cue_tests"
 tar -C "$root/dist" -czf "$root/dist/$name.tar.gz" "$name"
 echo "$root/dist/$name.tar.gz"
