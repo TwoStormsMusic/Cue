@@ -16,7 +16,7 @@ They come back at the next login, or with `systemctl --user start pipewire.socke
 ./run-tests.sh
 ```
 
-Runs the 79 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs) and two benches. Every test should say `OK`. **Send** the last 30 lines if anything fails.
+Runs the 82 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs, the built-in tuner), the app's 11 tests (every view at six screen sizes, taps, and the app against a running engine that is stopped and started again) and two benches. Every test should say `OK` or `PASS`. **Send** the last 30 lines if anything fails.
 
 ## 2. Real-time settings
 
@@ -166,6 +166,55 @@ bin/cue run "$HOME/cue/Cue Template 2S/Cue Template 2S.cue" --audio none
 
 It loads every plug-in and runs them on a timer, hearing silence; `cue ctl` works as above. This is how the app will edit a performance on a laptop. **Send** the lines it printed at start.
 
+## 8. The app (0.5.0)
+
+0.5.0 adds `bin/cue-app`, the app for the touchscreen ([docs/app.md](docs/app.md)). It shows and plays what `cue run` is doing over its control socket, so the sound never depends on it. The engine is the same as 0.4.0 plus level meters and the built-in tuner, so the sound should not change. Use a copy of the .cue from step 7, because the app's **Save** writes to the file it plays:
+
+```sh
+cp "$HOME/cue/Cue Template 2S/Cue Template 2S.cue" "$HOME/cue/app-test.cue"
+bin/cue-app --version
+```
+
+If that says a `libQt6` library is missing: `sudo apt install qt6-qpa-plugins libqt6widgets6t64 libqt6network6t64` (or without `t64` if apt cannot find those names). **Send** what it printed.
+
+**Start both with one command**, on the touchscreen's desktop:
+
+```sh
+bin/cue-app --start "$HOME/cue/app-test.cue" --fullscreen
+```
+
+It starts `cue run` in the background (its lines go to `~/.local/state/cue/engine.log`) and shows "Waiting for Cue" until the plug-ins are loaded, then the stage view. F11 leaves full screen; Settings > Size makes everything bigger or smaller.
+
+**Stage view, in step with the FCB.** Play, and check:
+
+- The chain name, the FCB DISPLAY box and the LEDs say the same thing.
+- The levels move with your playing: Bass (the input), then FOH and Amp.
+- Tap a chain button: it switches exactly like its pedal, and the FCB's display and LEDs follow. Press the pedals: the screen follows at once.
+- Tap Effect 1-3 and the Wah's Off / Auto / Pedal: the sound and the LEDs follow. Press their pedals: the buttons follow.
+- The dashed **warm** tag sits on the chain after the one playing.
+
+**Tuner.** Tune a string or two on the strip, then tap it for the tuner view. The note should settle quickly and hold steady, green within 2 cents. Press the tuner pedal: the outputs mute and the tuner view comes up by itself; press it again and it goes back. Compare with a tuner you trust if you have one at hand.
+
+**Chains.** Tap **Chains**: the chain playing is drawn as blocks and wires, as on the routing mockup. Tap a plug-in: **Bypass** switches it (the block goes grey, the sound changes), and its parameters move with the sliders (try the Gain Stage). Tap **Save**, then:
+
+```sh
+bin/cue check "$HOME/cue/app-test.cue"
+```
+
+`check` should show the plug-in you bypassed as bypassed. **Send** what it printed.
+
+**The app is not the sound.** Mid-song, close the app from ssh or a terminal, the hard way:
+
+```sh
+pkill -9 cue-app
+```
+
+The sound carries on, and the pedals still switch, light and show. Start it again (`bin/cue-app --fullscreen` on the touchscreen, or `DISPLAY=:0 bin/cue-app --fullscreen` from ssh): within a second it shows the chain playing. **Send** whether anything at all was heard.
+
+**Costs nothing.** Leave the app on the stage view for 30 minutes while you play and switch, then look at the Xruns pill (or `bin/cue ctl status` over ssh). It should still say 0. **Send** the number and, if you have it, `top` showing `cue-app`'s CPU.
+
+When done, `bin/cue ctl quit` stops the engine (closing the app does not).
+
 ## What passes
 
 | Check | Pass when |
@@ -180,5 +229,9 @@ It loads every plug-in and runs them on a timer, hearing silence; `cue ctl` work
 | Same sound | `cmp` says `same`, or the .cue sounds the same as the INI |
 | Remote control | `cue ctl` switches as cleanly as the pedals, and `watch` adds no xruns |
 | Save | Saving while playing makes no click; the saved file checks and plays |
+| App in step | Taps and pedals switch the same way, and the screen and the FCB always agree |
+| Tuner | The note settles fast and holds steady; the tuner pedal brings the tuner view up and back |
+| App closed | `pkill -9 cue-app` mid-song makes no sound at all; the app comes back within a second |
+| App costs nothing | 30 minutes with the app on the stage view: still `xruns 0` |
 
-If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which preset you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.
+If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which chain you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

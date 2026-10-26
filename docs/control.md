@@ -1,7 +1,7 @@
 # Talking to a running Cue
 
 `cue run` answers on a control socket, so another program can see what it is
-doing and tell it what to do: the desktop app, and `cue ctl` from a terminal
+doing and tell it what to do: the app ([app.md](app.md)), and `cue ctl` from a terminal
 (on the same machine, or over ssh from another).
 
 ```sh
@@ -13,6 +13,9 @@ cue ctl do "Wah = Auto"        # any action of the mapping language (docs/config
 cue ctl save                   # save what is playing, plug-in states included, to its .cue file
 cue ctl save ~/shows/fri.cue   # ...or to another one (later saves go there too)
 cue ctl performance            # the performance as JSON, without the states
+cue ctl plugin 2 1             # chain 2's first plug-in: whether it is bypassed, its parameters and values
+cue ctl bypass 2 1 on          # ...bypass it (off: back on); kept when the performance is saved
+cue ctl param 2 1 54 0.5       # ...set its parameter 54
 cue ctl quit                   # stop cue run
 ```
 
@@ -43,13 +46,16 @@ reply repeats:
 
 | cmd | with | answers |
 | --- | --- | --- |
-| `hello` | | `cue` (version), `protocol` (1), `performance`, `file`, `audio` |
+| `hello` | | `cue` (version), `protocol` (1), `performance`, `file`, `audio` (a description), `audio_settings` (`device`, `rate`, `period`, `periods`), `midi` (`enabled`, `in`, `profile`, `ports` connected) |
 | `status` | | `status`: as the status event below |
 | `performance` | | `performance`: the .cue's performance.json, without states |
 | `select` | `chain` (a name), `index` (from 0) or `step` (+1, -1) | `selected`: `index`, `name` |
 | `do` | `action` | |
 | `save` | `path` (optional: else the .cue it was loaded from) | `path`, `warnings` |
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
+| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text` |
+| `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
+| `param` | `chain`, `slot`, `id`, `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
 | `quit` | | |
 | `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
 
@@ -58,9 +64,11 @@ Events have an `event` field instead of an `id`:
 - `status`, about 30 times a second: `dsp` (`avg`, `max`: % of a block's time),
   `margin_ms` (null until measured; never with `--audio none`), `xruns`,
   `period_ms`, `buffer_ms`, `scene` and `selected` (`index`, `name`), `muted`,
-  `display`, `leds` (pedals 1-10), `controls` (`name`, `value`, `text`), and
+  `display`, `leds` (pedals 1-10), `controls` (`name`, `value`, `text`),
   `chains` (`name`, `state`: idle, pre-roll, warm, active, tail (ringing out) or
-  stopping; `avg_us`, `max_us` per block since the last event).
+  stopping; `avg_us`, `max_us` per block since the last event; `bypassed`: the
+  slots bypassed now), and `levels`: `inputs` and `outputs`, each `name` and
+  `peak_db`, the highest peak since the event before (-120 for silence).
 - `log`: `level` (info, warning, error) and `text`, for each xrun, slow block
   and start-up stall line `cue run` prints.
 - `tuner`, about 30 times a second: the built-in tuner (the TwoStorms Tuner's

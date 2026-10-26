@@ -28,6 +28,12 @@ using namespace cue::gui;
 
 namespace {
 
+// Built-in paths, or where an unpacked package keeps them (scripts/run-tests.sh).
+QString fromEnv(const char* name, const char* built) {
+    const QByteArray v = qgetenv(name);
+    return v.isEmpty() ? QString(built) : QString::fromLocal8Bit(v);
+}
+
 QJsonObject parse(const char* json) { return QJsonDocument::fromJson(json).object(); }
 
 // Shaped like configs/app-demo.ini: a branch to FOH, five chains, a wah, a tuner pedal.
@@ -405,10 +411,10 @@ private slots:
     // and finds the engine again after it was stopped and started.
     void with_the_engine() {
         QTemporaryDir dir;
-        QFile demo(CUE_SOURCE_DIR "/configs/app-demo.ini");
+        QFile demo(fromEnv("CUE_CONFIGS", CUE_SOURCE_DIR "/configs") + "/app-demo.ini");
         QVERIFY(demo.open(QIODevice::ReadOnly));
         QByteArray text = demo.readAll();
-        text.replace("../plugins/Cue Test Plugins.clap", CUE_TEST_CLAP);
+        text.replace("../plugins/Cue Test Plugins.clap", fromEnv("CUE_TEST_CLAP", CUE_TEST_CLAP).toLocal8Bit());
         QFile ini(dir.filePath("demo.ini"));
         QVERIFY(ini.open(QIODevice::WriteOnly));
         ini.write(text);
@@ -416,7 +422,7 @@ private slots:
         const QString socket = dir.filePath("engine.sock");
         auto startEngine = [&](QProcess& engine) {
             engine.setProcessChannelMode(QProcess::MergedChannels);
-            engine.start(CUE_BIN, {"run", ini.fileName(), "--audio", "none", "--socket", socket});
+            engine.start(fromEnv("CUE_BIN", CUE_BIN), {"run", ini.fileName(), "--audio", "none", "--socket", socket});
             QVERIFY(engine.waitForStarted());
         };
         QProcess engine;

@@ -17,6 +17,8 @@
 #include <QTimer>
 
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 using namespace cue::gui;
 
@@ -91,6 +93,24 @@ bool startEngine(const QString& file, const QString& socket, bool noAudio, AppSt
 } // namespace
 
 int main(int argc, char** argv) {
+    // Before Qt starts, so these work without a display (over ssh, say).
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--version") {
+            std::printf("cue-app %s (Qt %s)\n", CUE_VERSION, qVersion());
+            return 0;
+        }
+        if (a == "--help" || a == "-h") {
+            usage();
+            return 0;
+        }
+    }
+    if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY") && !std::getenv("QT_QPA_PLATFORM")) {
+        std::fprintf(stderr, "cue-app: there is no screen to show it on (DISPLAY is not set). Start it on the\n"
+                             "computer's desktop, or from its autostart (see docs/app.md).\n");
+        return 1;
+    }
+
     QApplication app(argc, argv);
     app.setApplicationName("Cue");
     app.setOrganizationName("TwoStorms");
@@ -124,13 +144,7 @@ int main(int argc, char** argv) {
             full = true;
         else if (a == "--windowed")
             windowed = true;
-        else if (a == "--version") {
-            std::printf("cue-app %s\n", CUE_VERSION);
-            return 0;
-        } else if (a == "--help" || a == "-h") {
-            usage();
-            return 0;
-        } else {
+        else {
             std::fprintf(stderr, "cue-app: unknown option %s\n\n", qPrintable(a));
             usage();
             return 2;

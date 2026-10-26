@@ -12,6 +12,12 @@ status=0
 echo "== unit tests"
 "$here/bin/cue_tests" || status=1
 
+if [ -x "$here/bin/cue_app_tests" ]; then
+    echo
+    echo "== app tests (drawn offscreen, against bin/cue run --audio none)"
+    CUE_BIN="$here/bin/cue" QT_QPA_PLATFORM=offscreen "$here/bin/cue_app_tests" || status=1
+fi
+
 echo
 echo "== bench: built-in blocks, 15 s"
 "$here/bin/cue" bench "$here/configs/builtin-demo.ini" --seconds 15 || status=1
