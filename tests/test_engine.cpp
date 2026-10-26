@@ -852,3 +852,52 @@ TEST(background_chain_does_not_hold_up_the_block) {
     const double median = blockMs[blockMs.size() / 2];
     CHECK_MSG(median < 1.0, "median block %.2f ms: the block waited for the warm chain", median);
 }
+
+TEST(chains_hear_their_own_input_and_feed_every_output) {
+    // Two inputs, three outputs: A plays input 1, B input 2. Outputs 1 and
+    // 3 come from the end of each chain, output 2 from its start (dry).
+    EngineSettings s = settings();
+    s.numInputs = 2;
+    s.numOutputs = 3;
+    Engine e(s);
+    auto make = [](const char* name, float gain, size_t input) {
+        std::vector<OutputTap> taps{{0, 1, OutputMix::Sum}, {0, 0, OutputMix::Sum}, {0, 1, OutputMix::Sum}};
+        auto c = std::make_unique<Chain>(name, slots(new GainProcessor(gain)), std::move(taps));
+        c->setInput(input);
+        return c;
+    };
+    e.addChain(make("A", 0.5f, 0));
+    e.addChain(make("B", 0.25f, 1));
+    CHECK(e.activate());
+
+    std::vector<float> in1(kBlock, 0.4f), in2(kBlock, 0.6f), o1(kBlock), o2(kBlock), o3(kBlock);
+    const float* ins[2] = {in1.data(), in2.data()};
+    float* outs[3] = {o1.data(), o2.data(), o3.data()};
+    auto run = [&](double seconds) {
+        for (size_t b = 0; b < static_cast<size_t>(seconds * kRate / kBlock); ++b)
+            e.process(ins, outs, kBlock);
+    };
+    e.switchTo(0);
+    run(0.25);
+    CHECK_MSG(std::fabs(o1.back() - 0.2f) < 1e-5f && std::fabs(o2.back() - 0.4f) < 1e-5f && std::fabs(o3.back() - 0.2f) < 1e-5f,
+              "A plays %.4f %.4f %.4f, expected 0.2 0.4 0.2", o1.back(), o2.back(), o3.back());
+    e.switchTo(1);
+    run(0.25);
+    CHECK_MSG(std::fabs(o1.back() - 0.15f) < 1e-5f && std::fabs(o2.back() - 0.6f) < 1e-5f && std::fabs(o3.back() - 0.15f) < 1e-5f,
+              "B plays %.4f %.4f %.4f, expected 0.15 0.6 0.15", o1.back(), o2.back(), o3.back());
+
+    // With one input given, the others hear silence.
+    for (int b = 0; b < 40; ++b)
+        e.process(in1.data(), outs, kBlock);
+    CHECK(o1.back() == 0.0f && o2.back() == 0.0f && o3.back() == 0.0f);
+}
+
+TEST(engine_refuses_a_chain_on_an_input_it_does_not_have) {
+    EngineSettings s = settings();
+    s.numInputs = 1;
+    Engine e(s);
+    auto c = chain("A", slots(new GainProcessor(1.0f)));
+    c->setInput(1);
+    e.addChain(std::move(c));
+    CHECK(!e.activate());
+}

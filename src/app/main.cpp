@@ -1,6 +1,9 @@
 // cue: the live plug-in host prototype.
 //
-//   cue run <config>             play live: ALSA audio, FCB1010 switching
+//   cue run <config|file.cue>    play live: ALSA audio, FCB1010 switching
+//                                (a .cue takes this machine's settings from its rig profile, or --rig FILE)
+//   cue convert <config> [out]   save a config as a .cue performance (--rig FILE: and its audio and MIDI settings)
+//   cue ctl <command>            talk to a running cue: status, watch, select, do, save, performance, quit
 //   cue bench <config> [opts]    offline: measure CPU per chain and render a WAV
 //   cue doctor [--device M2]     check real-time settings
 //   cue devices                  list sound cards and MIDI ports
@@ -15,6 +18,8 @@
 #include "app/build.h"
 #include "app/config.h"
 #include "app/cpu.h"
+#include "app/cuefile.h"
+#include "app/service.h"
 #include "app/doctor.h"
 #include "app/rpp.h"
 #include "control/show.h"
@@ -35,12 +40,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -54,6 +61,12 @@ namespace {
 
 std::atomic<bool> g_quit{false};
 void onSignal(int) { g_quit = true; }
+
+std::string lower(std::string s) {
+    for (auto& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
 
 // ------------------------------------------------------------ MIDI out
 
@@ -82,28 +95,140 @@ private:
 
 // ------------------------------------------------------------ status
 
-struct SceneSample {
-    uint64_t ns = 0, blocks = 0;
+// The engine's and the sound card's numbers over a stretch of time: one
+// sample (about 30 a second, what status events carry), or the samples
+// since the terminal's last status line.
+struct Window {
+    uint64_t cycles = 0, ns = 0;
+    uint32_t maxNs = 0;
+    int32_t minQueued = INT32_MAX; // the least audio queued for playback when a block was written
+    std::vector<uint64_t> chainNs, chainBlocks;
+    std::vector<uint32_t> chainMaxNs;
+
+    explicit Window(size_t chains = 0) : chainNs(chains), chainBlocks(chains), chainMaxNs(chains) {}
+    void add(const Window& w) {
+        cycles += w.cycles;
+        ns += w.ns;
+        maxNs = std::max(maxNs, w.maxNs);
+        minQueued = std::min(minQueued, w.minQueued);
+        for (size_t i = 0; i < chainNs.size() && i < w.chainNs.size(); ++i) {
+            chainNs[i] += w.chainNs[i];
+            chainBlocks[i] += w.chainBlocks[i];
+            chainMaxNs[i] = std::max(chainMaxNs[i], w.chainMaxNs[i]);
+        }
+    }
+    double avgUs() const { return cycles ? ns / 1000.0 / cycles : 0.0; }
+    double chainAvgUs(size_t i) const { return chainBlocks[i] ? chainNs[i] / 1000.0 / chainBlocks[i] : 0.0; }
 };
 
-// The chains that are running, with their CPU use since the last call.
-std::string chainStatus(Engine& engine, const Rig& rig, std::vector<SceneSample>& last) {
+// Takes a sample: the counters' growth since the last one, and the peaks
+// since then (which reading resets).
+class Sampler {
+public:
+    Window take(const AlsaStats& stats, Engine& engine) {
+        auto& st = const_cast<AlsaStats&>(stats);
+        Window w(engine.numChains());
+        last_.resize(engine.numChains());
+        const uint64_t cycles = st.cycles.load(), ns = st.totalCycleNs.load();
+        w.cycles = cycles - cycles_;
+        w.ns = ns - ns_;
+        cycles_ = cycles;
+        ns_ = ns;
+        w.maxNs = st.maxCycleNs.exchange(0);
+        w.minQueued = st.minQueuedFrames.exchange(INT32_MAX);
+        for (size_t i = 0; i < engine.numChains(); ++i) {
+            ChainStats& cs = engine.stats(i);
+            const uint64_t cns = cs.processNs.load(), blocks = cs.processBlocks.load();
+            w.chainNs[i] = cns - last_[i].first;
+            w.chainBlocks[i] = blocks - last_[i].second;
+            last_[i] = {cns, blocks};
+            w.chainMaxNs[i] = cs.maxBlockNs.exchange(0);
+        }
+        return w;
+    }
+
+private:
+    uint64_t cycles_ = 0, ns_ = 0;
+    std::vector<std::pair<uint64_t, uint64_t>> last_;
+};
+
+// The chains that are running, with their cost over the window.
+std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
     std::string s;
     char buf[160];
     for (size_t i = 0; i < engine.numChains(); ++i) {
-        ChainStats& st = engine.stats(i);
-        const uint64_t ns = st.processNs.load(), blocks = st.processBlocks.load();
-        const uint64_t dNs = ns - last[i].ns, dBlocks = blocks - last[i].blocks;
-        last[i] = {ns, blocks};
-        const double avgUs = dBlocks ? dNs / 1000.0 / dBlocks : 0.0;
-        const double maxUs = st.maxBlockNs.exchange(0) / 1000.0;
-        const auto state = static_cast<ChainState>(st.state.load());
+        const auto state = static_cast<ChainState>(engine.stats(i).state.load());
         if (state == ChainState::Idle)
             continue;
-        std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), avgUs, maxUs);
+        std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), w.chainAvgUs(i),
+                      w.chainMaxNs[i] / 1000.0);
         s += buf;
     }
     return s;
+}
+
+// What a status event says: the numbers of one sample and what the show is doing.
+Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& show, const Config& config) {
+    const double periodNs = 1e9 * config.audio.period / config.audio.rate;
+    Json j;
+    j["dsp"] = {{"avg", 100.0 * w.avgUs() * 1000.0 / periodNs}, {"max", 100.0 * w.maxNs / periodNs}};
+    j["margin_ms"] = w.minQueued == INT32_MAX ? Json(nullptr) : Json(1000.0 * std::max(0, w.minQueued) / config.audio.rate);
+    j["period_ms"] = periodNs / 1e6;
+    j["buffer_ms"] = periodNs / 1e6 * config.audio.periods;
+    const int preset = show.preset(), scene = show.scene();
+    j["scene"] = {{"index", scene}, {"name", show.sceneName(scene)}};
+    j["selected"] = {{"index", preset}, {"name", show.presetName(preset)}};
+    j["muted"] = show.muted();
+    j["display"] = show.display();
+    Json leds = Json::array();
+    for (int pedal = 1; pedal <= 10; ++pedal)
+        leds.push_back(show.led(pedal));
+    j["leds"] = leds;
+    Json controls = Json::array();
+    for (const auto& name : show.controlNames())
+        controls.push_back({{"name", name}, {"value", show.value(name)}, {"text", show.valueText(name)}});
+    j["controls"] = controls;
+    Json chains = Json::array();
+    for (size_t i = 0; i < engine.numChains(); ++i)
+        chains.push_back({{"name", rig.chainNames[i]},
+                          {"state", toString(static_cast<ChainState>(engine.stats(i).state.load()))},
+                          {"avg_us", w.chainAvgUs(i)},
+                          {"max_us", w.chainMaxNs[i] / 1000.0}});
+    j["chains"] = chains;
+    return j;
+}
+
+// Each plug-in's state as it is now, for saving what is playing. On the main thread.
+void captureStates(const Rig& rig, Config& config) {
+    size_t k = 0;
+    for (auto& scene : config.scenes)
+        for (auto& chain : scene.chains)
+            for (auto& line : chain.lines)
+                for (auto& ps : line.plugins) {
+                    Processor* p = rig.plugins.at(k++).processor;
+                    bool ok = true;
+                    if (ps.kind == "clap") {
+                        std::vector<uint8_t> state;
+                        ok = static_cast<ClapProcessor*>(p)->saveState(state);
+                        if (ok) {
+                            ps.state = std::move(state);
+                            ps.controllerState.clear();
+                        }
+                    } else if (ps.kind == "vst3") {
+                        std::vector<uint8_t> state, controller;
+                        ok = static_cast<Vst3Processor*>(p)->saveState(state, controller);
+                        if (ok) {
+                            ps.state = std::move(state);
+                            ps.controllerState = std::move(controller);
+                        }
+                    } else {
+                        continue;
+                    }
+                    if (ok)
+                        ps.embeddedState = true;
+                    else
+                        std::fprintf(stderr, "warning: %s did not give its state; saving the one it was loaded with\n", p->name().c_str());
+                }
 }
 
 // Where an xrun came from: when, how late and slow the block before it
@@ -163,9 +288,11 @@ struct RawTerminal {
 
 // ------------------------------------------------------------ commands
 
+std::string rigPath; // --rig: the rig profile a .cue plays with
+
 bool load(const std::string& path, Config& config) {
     std::string err;
-    if (!loadConfig(path, config, &err)) {
+    if (!loadPerformance(path, rigPath, config, &err)) {
         std::fprintf(stderr, "config: %s\n", err.c_str());
         return false;
     }
@@ -176,7 +303,13 @@ bool load(const std::string& path, Config& config) {
     return true;
 }
 
-int cmdRun(const std::string& path) {
+struct RunOptions {
+    bool noAudio = false;   // --audio none: no sound card, the engine on a timer
+    std::string socket;     // --socket PATH; empty: the default
+    bool noSocket = false;  // --socket none
+};
+
+int cmdRun(const std::string& path, const RunOptions& opts) {
     Config config;
     if (!load(path, config))
         return 2;
@@ -191,12 +324,16 @@ int cmdRun(const std::string& path) {
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         std::fprintf(stderr, "warning: could not lock memory (see cue doctor)\n");
 
-    AlsaBackend audio;
-    if (!audio.open(config.audio, &err)) {
+    std::unique_ptr<AudioBackend> audio;
+    if (opts.noAudio)
+        audio = std::make_unique<NullBackend>();
+    else
+        audio = std::make_unique<AlsaBackend>();
+    if (!audio->open(config.audio, &err)) {
         std::fprintf(stderr, "audio: %s\n", err.c_str());
         return 1;
     }
-    std::printf("audio: %s\n", audio.describe().c_str());
+    std::printf("audio: %s\n", audio->describe().c_str());
 
     MidiOutQueue midiOut;
     RigOutput output(rig, [&](const MidiMessage& m) { midiOut.push(m); });
@@ -233,29 +370,113 @@ int cmdRun(const std::string& path) {
     }
 
     std::atomic<bool> marked{false};
-    audio.start([&](const float* in, float* const* outs, uint32_t frames) {
+    audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
         if (!marked.load(std::memory_order_relaxed)) {
             markClapAudioThread();
             marked.store(true, std::memory_order_relaxed);
         }
-        engine.process(in, outs, frames);
+        engine.process(ins, outs, frames);
     }, &err);
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
     show.start();
+
+    // The control socket: the app and cue ctl.
+    Service service;
+    Window lastSample(engine.numChains());
+    auto status = [&] {
+        Json j = statusJson(lastSample, engine, rig, show, config);
+        j["xruns"] = audio->stats().xruns.load();
+        return j;
+    };
+    std::string savePath = isCueFile(path) ? path : "";
+    auto handle = [&](const Json& req, Json& reply) {
+        const std::string cmd = req.at("cmd").get<std::string>();
+        auto refuse = [&](const std::string& why) {
+            reply["ok"] = false;
+            reply["error"] = why;
+        };
+        if (cmd == "hello") {
+            reply["cue"] = CUE_VERSION;
+            reply["protocol"] = kProtocol;
+            reply["performance"] = config.performance;
+            reply["file"] = path;
+            reply["audio"] = audio->describe();
+        } else if (cmd == "status") {
+            reply["status"] = status();
+        } else if (cmd == "performance") {
+            std::string text;
+            if (!performanceText(config, text, &err))
+                return refuse(err);
+            reply["performance"] = Json::parse(text);
+        } else if (cmd == "select") {
+            int index = -1;
+            if (req.contains("step")) {
+                show.stepPreset(req.at("step").get<int>());
+            } else if (req.contains("index")) {
+                index = req.at("index").get<int>();
+                if (index < 0 || index >= static_cast<int>(show.numPresets()))
+                    return refuse("there is no chain number " + std::to_string(index + 1));
+                show.selectPreset(index);
+            } else {
+                const std::string name = req.value("chain", "");
+                for (int i = 0; i < static_cast<int>(show.numPresets()) && index < 0; ++i)
+                    if (lower(show.presetName(i)) == lower(name))
+                        index = i;
+                if (index < 0)
+                    return refuse("no chain named '" + name + "'");
+                show.selectPreset(index);
+            }
+            reply["selected"] = {{"index", show.preset()}, {"name", show.presetName(show.preset())}};
+        } else if (cmd == "do") {
+            if (!show.run(req.at("action").get<std::string>(), &err))
+                return refuse(err);
+        } else if (cmd == "save") {
+            const std::string to = req.value("path", savePath);
+            if (to.empty())
+                return refuse("this performance came from an INI config: say where to save it as a .cue file");
+            if (!isCueFile(to))
+                return refuse("a performance is saved as a .cue file");
+            Config snapshot = config;
+            captureStates(rig, snapshot);
+            std::vector<std::string> warnings;
+            if (!saveCue(snapshot, to, &err, &warnings))
+                return refuse(err);
+            savePath = to;
+            reply["path"] = to;
+            reply["warnings"] = warnings;
+            std::printf("\nsaved %s\n", to.c_str());
+        } else if (cmd == "quit") {
+            g_quit = true;
+        } else {
+            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, quit, subscribe, unsubscribe)");
+        }
+    };
+    if (!opts.noSocket) {
+        const std::string socketPath = opts.socket.empty() ? defaultSocketPath() : opts.socket;
+        if (service.listen(socketPath, handle, &err))
+            std::printf("control: %s\n", socketPath.c_str());
+        else
+            std::fprintf(stderr, "control socket: %s (continuing without it)\n", err.c_str());
+    }
     std::printf("keys: 1-9 select preset, n/p next/previous, q quit\n");
 
     RawTerminal term;
-    std::vector<SceneSample> last(engine.numChains());
-    uint64_t lastCycles = 0, lastNs = 0;
-    auto nextStatus = Clock::now();
+    // A line for the terminal and the app's log.
+    auto log = [&](const char* level, const std::string& text) {
+        std::printf("%s%s\n", term.active ? "\r\033[K" : "", text.c_str());
+        service.publish("log", {{"level", level}, {"text", text}});
+    };
+    Sampler sampler;
+    Window window(engine.numChains());
+    auto nextSample = Clock::now(), nextStatus = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
     uint64_t reportedXruns = 0, reportedStartup = 0;
 
     while (!g_quit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        service.poll(10);
         rig.pumpMainThread();
         EngineEvent ev;
         while (engine.nextEvent(ev)) {
@@ -272,9 +493,9 @@ int cmdRun(const std::string& path) {
                 show.stepPreset(-1);
         }
 
-        auto& st = const_cast<AlsaStats&>(audio.stats());
+        const AlsaStats& st = audio->stats();
         if (st.failed) {
-            std::fprintf(stderr, "\naudio device failed and could not be recovered\n");
+            log("error", "audio device failed and could not be recovered");
             break;
         }
         if (!reportedSched && st.cycles > 0) {
@@ -285,39 +506,44 @@ int cmdRun(const std::string& path) {
         }
         if (st.startupXruns.load() > reportedStartup) {
             reportedStartup = st.startupXruns.load();
-            std::printf("%sstart-up: the sound card stalled as it started (%s at block %llu), before anything was heard; not counted as an xrun\n",
-                        term.active ? "\r\033[K" : "", st.lastXrunPlayback ? "playback ran dry" : "capture overflowed",
-                        static_cast<unsigned long long>(st.lastXrunCycle.load()));
+            char buf[200];
+            std::snprintf(buf, sizeof buf, "start-up: the sound card stalled as it started (%s at block %llu), before anything was heard; not counted as an xrun",
+                          st.lastXrunPlayback ? "playback ran dry" : "capture overflowed", static_cast<unsigned long long>(st.lastXrunCycle.load()));
+            log("info", buf);
         }
         // Each xrun gets its own line, with the slowest block around it.
         BlockReport report;
         while (engine.nextBlockReport(report)) {
             const uint64_t xruns = st.xruns.load();
             if (xruns > reportedXruns) {
-                std::printf("%s%s\n", term.active ? "\r\033[K" : "",
-                            describeXrun(xruns - reportedXruns, st, report, rig, periodUs, config.audio.rate).c_str());
+                log("warning", describeXrun(xruns - reportedXruns, st, report, rig, periodUs, config.audio.rate));
                 reportedXruns = xruns;
             }
         }
-        if (Clock::now() >= nextStatus) {
+        const auto now = Clock::now();
+        if (now >= nextSample) {
+            // About 30 times a second: a status event, and the terminal's numbers.
+            nextSample += std::chrono::milliseconds(33);
+            if (nextSample < now)
+                nextSample = now + std::chrono::milliseconds(33);
+            lastSample = sampler.take(st, engine);
+            window.add(lastSample);
+            if (service.subscribed("status"))
+                service.publish("status", status());
+        }
+        if (now >= nextStatus) {
             nextStatus += std::chrono::milliseconds(500);
-            const uint64_t cycles = st.cycles, ns = st.totalCycleNs;
-            const double avgUs = cycles > lastCycles ? (ns - lastNs) / 1000.0 / (cycles - lastCycles) : 0.0;
-            lastCycles = cycles;
-            lastNs = ns;
-            const double maxUs = st.maxCycleNs.exchange(0) / 1000.0;
             engine.requestBlockReport();
             // The numbers first, and no wider than the terminal: a line that
             // wraps cannot be redrawn in place.
-            // Margin: the least audio left to play when a block was written.
-            const int32_t queued = st.minQueuedFrames.exchange(INT32_MAX);
             char margin[32] = "-";
-            if (queued != INT32_MAX)
-                std::snprintf(margin, sizeof margin, "%.2f ms", 1000.0 * std::max(0, queued) / config.audio.rate);
+            if (window.minQueued != INT32_MAX)
+                std::snprintf(margin, sizeof margin, "%.2f ms", 1000.0 * std::max(0, window.minQueued) / config.audio.rate);
             char head[128];
-            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) margin %s xruns %llu | ", 100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs,
-                          margin, static_cast<unsigned long long>(st.xruns.load()));
-            std::string line = head + show.status() + " | " + chainStatus(engine, rig, last);
+            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) margin %s xruns %llu | ", 100.0 * window.avgUs() / periodUs,
+                          100.0 * window.maxNs / 1000.0 / periodUs, margin, static_cast<unsigned long long>(st.xruns.load()));
+            std::string line = head + show.status() + " | " + chainStatus(engine, rig, window);
+            window = Window(engine.numChains());
             const size_t width = term.active ? terminalWidth() : 0;
             if (width > 1 && line.size() > width - 1)
                 line.resize(width - 1);
@@ -327,15 +553,21 @@ int cmdRun(const std::string& path) {
             for (size_t i = 0; i < engine.numChains(); ++i) {
                 size_t slot = 0;
                 uint32_t slotNs = 0;
-                if (engine.chain(i).takeSlowest(slot, slotNs) && slotNs / 1000.0 > 0.8 * periodUs)
-                    std::printf("%sslow block: %s / %s took %.1f ms (the period is %.2f ms)\n", term.active ? "\n" : "",
-                                rig.chainNames[i].c_str(), engine.chain(i).slot(slot).name().c_str(), slotNs / 1e6, periodUs / 1000.0);
+                if (engine.chain(i).takeSlowest(slot, slotNs) && slotNs / 1000.0 > 0.8 * periodUs) {
+                    char buf[200];
+                    std::snprintf(buf, sizeof buf, "slow block: %s / %s took %.1f ms (the period is %.2f ms)", rig.chainNames[i].c_str(),
+                                  engine.chain(i).slot(slot).name().c_str(), slotNs / 1e6, periodUs / 1000.0);
+                    if (term.active)
+                        std::printf("\n");
+                    log("warning", buf);
+                }
             }
             std::fflush(stdout);
         }
     }
     std::printf("\nstopping\n");
-    audio.stop();
+    service.close();
+    audio->stop();
     midiRun = false;
     if (midiThread.joinable())
         midiThread.join();
@@ -358,27 +590,28 @@ struct BassInput {
     }
 };
 
-void writeWav(const std::string& path, const std::vector<float>& a, const std::vector<float>& b, unsigned rate) {
+// One WAV channel per output.
+void writeWav(const std::string& path, const std::vector<std::vector<float>>& channels, unsigned rate) {
     std::ofstream f(path, std::ios::binary);
     auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
     auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
-    const uint32_t frames = static_cast<uint32_t>(a.size());
+    const uint32_t frames = static_cast<uint32_t>(channels.at(0).size());
+    const uint32_t n = static_cast<uint32_t>(channels.size());
     f.write("RIFF", 4);
-    u32(36 + frames * 8);
+    u32(36 + frames * 4 * n);
     f.write("WAVEfmt ", 8);
     u32(16);
     u16(3); // IEEE float
-    u16(2);
+    u16(static_cast<uint16_t>(n));
     u32(rate);
-    u32(rate * 8);
-    u16(8);
+    u32(rate * 4 * n);
+    u16(static_cast<uint16_t>(4 * n));
     u16(32);
     f.write("data", 4);
-    u32(frames * 8);
-    for (uint32_t i = 0; i < frames; ++i) {
-        f.write(reinterpret_cast<const char*>(&a[i]), 4);
-        f.write(reinterpret_cast<const char*>(&b[i]), 4);
-    }
+    u32(frames * 4 * n);
+    for (uint32_t i = 0; i < frames; ++i)
+        for (const auto& c : channels)
+            f.write(reinterpret_cast<const char*>(&c[i]), 4);
 }
 
 int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm,
@@ -405,7 +638,7 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     double worstUs = 0;
     std::vector<double> aloneUs, blockUs;
     uint64_t othersProcessed = 0;
-    std::vector<float> wav1, wav2;
+    std::vector<std::vector<float>> wav(config.outputs.size());
     bool realtime = false, pinned = false;
     std::atomic<bool> done{false};
     std::thread worker([&] {
@@ -421,8 +654,13 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             pinned = pthread_setaffinity_np(pthread_self(), sizeof set, &set) == 0;
         }
         BassInput input{static_cast<double>(config.audio.rate)};
-        std::vector<float> in(frames), o1(frames), o2(frames);
-        float* outs[2] = {o1.data(), o2.data()};
+        // Every input hears the same bass.
+        std::vector<float> in(frames);
+        std::vector<const float*> ins(config.inputs.size(), in.data());
+        std::vector<std::vector<float>> o(config.outputs.size(), std::vector<float>(frames));
+        std::vector<float*> outs;
+        for (auto& b : o)
+            outs.push_back(b.data());
         const size_t blocksPerSwitch = std::max<size_t>(1, static_cast<size_t>(switchSeconds * config.audio.rate / frames));
         const size_t total = static_cast<size_t>(totalSeconds * config.audio.rate / frames);
         // Phase 1: chain 1 alone, nothing warm, to show what one chain costs
@@ -446,14 +684,13 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             for (auto& v : in)
                 v = input();
             const auto t0 = Clock::now();
-            engine.process(in.data(), outs, frames);
+            engine.process(ins.data(), outs.data(), frames);
             const double us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
             times.push_back(us);
             worstUs = std::max(worstUs, us);
-            if (!wavPath.empty()) {
-                wav1.insert(wav1.end(), o1.begin(), o1.end());
-                wav2.insert(wav2.end(), o2.begin(), o2.end());
-            }
+            if (!wavPath.empty())
+                for (size_t k = 0; k < o.size(); ++k)
+                    wav[k].insert(wav[k].end(), o[k].begin(), o[k].end());
         };
         engine.switchTo(0);
         for (size_t b = 0; b < aloneBlocks && !g_quit; ++b) {
@@ -523,8 +760,11 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     if (worstUs > periodUs)
         std::printf("WARNING: the worst block took longer than the period; live, that would be a dropout.\n");
     if (!wavPath.empty()) {
-        writeWav(wavPath, wav1, wav2, config.audio.rate);
-        std::printf("wrote %s (left = out 1, right = out 2)\n", wavPath.c_str());
+        writeWav(wavPath, wav, config.audio.rate);
+        std::string order;
+        for (size_t k = 0; k < config.outputs.size(); ++k)
+            order += (k ? ", " : "") + config.outputs[k];
+        std::printf("wrote %s (a channel per output: %s)\n", wavPath.c_str(), order.c_str());
     }
     return 0;
 }
@@ -618,8 +858,11 @@ int cmdCheck(const std::string& path, bool loadPlugins) {
                 const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
                 return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
             };
-            std::printf("  chain %s: %zu plug-in(s); out 1 = %s, out 2 = %s\n", c.name.c_str(), chainPlugins(c).size(), where(c.out[0]).c_str(),
-                        where(c.out[1]).c_str());
+            std::string feeds;
+            for (const TapSpec& t : c.out)
+                feeds += "; " + t.output + " = " + where(t);
+            std::printf("  chain %s: %zu plug-in(s)%s%s\n", c.name.c_str(), chainPlugins(c).size(),
+                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", feeds.c_str());
         }
         for (const auto& p : scene.presets)
             std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),
@@ -726,6 +969,190 @@ int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vect
     return result.missing ? 3 : 0;
 }
 
+int cmdConvert(const std::string& in, std::string out, std::string rigOut) {
+    namespace fs = std::filesystem;
+    Config config;
+    std::string err;
+    if (!loadConfig(in, config, &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    if (out.empty())
+        out = (fs::path(in).parent_path() / (fs::path(in).stem().string() + ".cue")).string();
+    if (config.performance.empty())
+        config.performance = fs::path(in).stem().string();
+    std::error_code ec;
+    if (fs::exists(out, ec)) {
+        fs::copy_file(out, out + ".bak", fs::copy_options::overwrite_existing, ec);
+        std::printf("kept the previous file as %s.bak\n", out.c_str());
+    }
+    std::vector<std::string> warnings;
+    if (!saveCue(config, out, &err, &warnings)) {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    size_t chains = 0, plugins = 0, states = 0;
+    for (const auto& scene : config.scenes)
+        for (const auto& c : scene.chains) {
+            ++chains;
+            for (const PluginSpec* p : chainPlugins(c)) {
+                ++plugins;
+                states += !p->stateFile.empty() + !p->controllerStateFile.empty();
+            }
+        }
+    std::printf("wrote %s\n  %zu scene(s), %zu chain(s), %zu plug-in(s), %zu state(s)\n", out.c_str(), config.scenes.size(), chains, plugins, states);
+    for (const auto& w : config.warnings)
+        std::printf("  - %s\n", w.c_str());
+    for (const auto& w : warnings)
+        std::printf("  - %s\n", w.c_str());
+    if (rigOut.empty()) {
+        std::printf("\nThe config's audio and MIDI settings are not part of a performance. To keep them as this machine's rig\n"
+                    "profile: cue convert \"%s\" \"%s\" --rig %s\n",
+                    in.c_str(), out.c_str(), defaultRigPath().c_str());
+    } else {
+        rigOut = expandPath(rigOut);
+        fs::create_directories(fs::path(rigOut).parent_path(), ec);
+        if (!saveRig(config, rigOut, &err)) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("wrote the rig profile %s\n", rigOut.c_str());
+    }
+    std::printf("\nnext: cue check \"%s\"\n", out.c_str());
+    return 0;
+}
+
+// One line about a status event.
+std::string describeStatus(const Json& s) {
+    char buf[200], margin[32] = "-";
+    if (!s.at("margin_ms").is_null())
+        std::snprintf(margin, sizeof margin, "%.2f ms", s.at("margin_ms").get<double>());
+    std::snprintf(buf, sizeof buf, "dsp %3.0f%% (max %3.0f%%) margin %s xruns %llu", s.at("dsp").at("avg").get<double>(),
+                  s.at("dsp").at("max").get<double>(), margin, static_cast<unsigned long long>(s.value("xruns", 0ull)));
+    std::string line = buf;
+    line += " | " + s.at("selected").value("name", std::string("-"));
+    if (!s.at("display").get<std::string>().empty())
+        line += " [" + s.at("display").get<std::string>() + "]";
+    if (s.at("muted").get<bool>())
+        line += " MUTED";
+    for (const auto& c : s.at("controls"))
+        line += " | " + c.at("name").get<std::string>() + " " + c.at("text").get<std::string>();
+    return line;
+}
+
+int cmdCtl(int argc, char** argv) {
+    std::string socketPath = defaultSocketPath();
+    bool asJson = false;
+    std::vector<std::string> args;
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--socket") == 0 && i + 1 < argc)
+            socketPath = argv[++i];
+        else if (std::strcmp(argv[i], "--json") == 0)
+            asJson = true;
+        else
+            args.push_back(argv[i]);
+    }
+    if (args.empty()) {
+        std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | select <chain|number|next|previous> | do \"<action>\" |\n"
+                             "        save [file.cue] | performance | quit\n");
+        return 2;
+    }
+    ServiceClient client;
+    std::string err;
+    if (!client.connect(socketPath, &err)) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    const std::string what = args[0];
+    auto ask = [&](const Json& request, Json& reply) {
+        if (!client.request(request, reply, 10000, &err)) {
+            std::fprintf(stderr, "%s\n", err.c_str());
+            return false;
+        }
+        if (!reply.value("ok", false)) {
+            std::fprintf(stderr, "%s\n", reply.value("error", std::string("refused")).c_str());
+            return false;
+        }
+        return true;
+    };
+    Json reply;
+    if (what == "status") {
+        if (!ask({{"cmd", "status"}}, reply))
+            return 1;
+        if (asJson)
+            std::printf("%s\n", reply.at("status").dump(2).c_str());
+        else
+            std::printf("%s\n", describeStatus(reply.at("status")).c_str());
+        return 0;
+    }
+    if (what == "watch") {
+        if (!ask({{"cmd", "subscribe"}, {"events", {"status", "log"}}}, reply))
+            return 1;
+        std::signal(SIGINT, onSignal);
+        auto nextLine = Clock::now();
+        while (!g_quit) {
+            Json m;
+            if (!client.next(m, 500, &err)) {
+                if (err.find("in time") != std::string::npos)
+                    continue;
+                std::fprintf(stderr, "%s\n", err.c_str());
+                return 1;
+            }
+            const std::string event = m.value("event", "");
+            if (asJson) {
+                std::printf("%s\n", m.dump().c_str());
+            } else if (event == "log") {
+                std::printf("%s\n", m.value("text", "").c_str());
+            } else if (event == "status" && Clock::now() >= nextLine) {
+                nextLine = Clock::now() + std::chrono::milliseconds(500);
+                std::printf("%s\n", describeStatus(m).c_str());
+            }
+            std::fflush(stdout);
+        }
+        return 0;
+    }
+    Json request;
+    if (what == "select" && args.size() >= 2) {
+        const std::string a = args[1];
+        char* end = nullptr;
+        const long n = std::strtol(a.c_str(), &end, 10);
+        if (a == "next" || a == "previous")
+            request = {{"cmd", "select"}, {"step", a == "next" ? 1 : -1}};
+        else if (end && *end == '\0' && !a.empty())
+            request = {{"cmd", "select"}, {"index", n - 1}};
+        else
+            request = {{"cmd", "select"}, {"chain", a}};
+    } else if (what == "do" && args.size() >= 2) {
+        std::string action;
+        for (size_t i = 1; i < args.size(); ++i)
+            action += (i > 1 ? " " : "") + args[i];
+        request = {{"cmd", "do"}, {"action", action}};
+    } else if (what == "save") {
+        request = {{"cmd", "save"}};
+        if (args.size() >= 2)
+            request["path"] = std::filesystem::absolute(args[1]).string();
+    } else if (what == "performance" || what == "quit" || what == "hello") {
+        request = {{"cmd", what}};
+    } else {
+        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, select, do, save, performance, quit)\n", what.c_str());
+        return 2;
+    }
+    if (!ask(request, reply))
+        return 1;
+    if (asJson || what == "hello")
+        std::printf("%s\n", reply.dump(2).c_str());
+    else if (what == "performance")
+        std::printf("%s\n", reply.at("performance").dump(2).c_str());
+    else if (what == "select")
+        std::printf("playing %s\n", reply.at("selected").value("name", "").c_str());
+    else if (what == "save") {
+        std::printf("saved %s\n", reply.value("path", "").c_str());
+        for (const auto& w : reply.value("warnings", Json::array()))
+            std::printf("  - %s\n", w.get<std::string>().c_str());
+    }
+    return 0;
+}
+
 int cmdScan(const std::string& path) {
     std::string err;
     if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0) {
@@ -802,11 +1229,13 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  cue run <config.ini>\n"
-                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
+                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none]\n"
+                 "  cue ctl [--socket PATH] [--json] status|watch|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
+                 "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
+                 "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
-                 "  cue check <config.ini> [--no-load]\n"
+                 "  cue check <config.ini|file.cue> [--no-load] [--rig rig.json]\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
@@ -827,8 +1256,18 @@ int main(int argc, char** argv) {
                 return argv[i + 1];
         return def;
     };
-    if (cmd == "run" && argc >= 3)
-        return cmdRun(argv[2]);
+    rigPath = opt("--rig", "");
+    if (cmd == "convert" && argc >= 3)
+        return cmdConvert(argv[2], argc >= 4 && argv[3][0] != '-' ? argv[3] : "", opt("--rig", ""));
+    if (cmd == "run" && argc >= 3) {
+        RunOptions o;
+        o.noAudio = opt("--audio", "") == "none";
+        o.socket = opt("--socket", "");
+        o.noSocket = o.socket == "none";
+        return cmdRun(argv[2], o);
+    }
+    if (cmd == "ctl")
+        return cmdCtl(argc, argv);
     if (cmd == "bench" && argc >= 3)
         return cmdBench(argv[2], std::stod(opt("--switch-every", "2")), std::stod(opt("--seconds", "30")), opt("--wav", ""),
                         opt("--fast", "no") == "no", opt("--warm", ""),

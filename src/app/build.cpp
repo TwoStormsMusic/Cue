@@ -64,7 +64,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     EngineSettings es = config.engine;
     es.sampleRate = config.audio.rate;
     es.maxFrames = config.audio.period;
-    es.numOutputs = 2;
+    es.numInputs = config.inputs.size();
+    es.numOutputs = config.outputs.size();
     es.workers = config.workers;
     es.workerPriority = config.audio.rtPriority;
     rig.engine = std::make_unique<Engine>(es);
@@ -106,7 +107,9 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     } else if (ps.kind == "vst3") {
                         auto vst = Vst3Processor::load(ps.path, ps.id, &err);
                         if (vst) {
-                            if (!ps.stateFile.empty()) {
+                            if (ps.embeddedState) {
+                                states.push_back({vst.get(), ps.state, ps.controllerState, ps.stateFile, true});
+                            } else if (!ps.stateFile.empty()) {
                                 PendingState st{vst.get(), {}, {}, ps.stateFile, true};
                                 if (!readFile(ps.stateFile, st.data, error) ||
                                     (!ps.controllerStateFile.empty() && !readFile(ps.controllerStateFile, st.controller, error)))
@@ -119,7 +122,9 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     } else {
                         auto clap = ClapProcessor::load(ps.path, ps.id, &err);
                         if (clap) {
-                            if (!ps.stateFile.empty()) {
+                            if (ps.embeddedState) {
+                                states.push_back({clap.get(), ps.state, {}, ps.stateFile, false});
+                            } else if (!ps.stateFile.empty()) {
                                 PendingState st{clap.get(), {}, {}, ps.stateFile, false};
                                 if (!readFile(ps.stateFile, st.data, error))
                                     return false;
@@ -163,6 +168,7 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             for (const TapSpec& t : cs.out)
                 taps.push_back({t.line, t.after, config.mix});
             auto chain = std::make_unique<Chain>(cs.name, std::move(lines), std::move(taps));
+            chain->setInput(cs.inputIndex);
             for (size_t i = 0; i < initialBypass.size(); ++i) {
                 if (initialBypass[i])
                     chain->setInitialBypass(i, true);

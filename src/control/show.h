@@ -63,6 +63,8 @@ public:
     int scene() const;
     size_t numPresets() const;
     std::string presetName(int index) const;
+    std::string sceneName(int index) const;
+    std::vector<std::string> controlNames() const;
     // A control's value, or NaN if there is no such control.
     double value(const std::string& control) const;
     std::string valueText(const std::string& control) const;

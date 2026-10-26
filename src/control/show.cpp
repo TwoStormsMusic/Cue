@@ -212,9 +212,11 @@ struct Show::Impl {
         std::string text, where;
     };
 
+    static constexpr int kWarmNext = -2, kWarmNone = -1;
     struct Preset {
         std::string name, display;
         int scene = 0, chain = 0, pedal = 0, program = -1;
+        int warm = kWarmNext; // kWarmNext, kWarmNone or the engine chain kept warm while it plays
         std::vector<Action> actions;
     };
     struct Scene {
@@ -526,7 +528,7 @@ struct Show::Impl {
             n.op = Node::Op::True;
             return add(c, n);
         }
-        for (const char* what : {"preset", "scene"}) {
+        for (const char* what : {"preset", "chain", "scene"}) {
             const size_t save = cur.pos;
             if (!cur.word(what))
                 continue;
@@ -535,7 +537,7 @@ struct Show::Impl {
                 cur.pos = save; // a control may be called "Preset ..."
                 break;
             }
-            const bool isPreset = std::string(what) == "preset";
+            const bool isPreset = std::string(what) != "scene"; // a chain is selected by its preset
             const int index = cur.longest(isPreset ? presetNames() : sceneNames());
             if (index < 0) {
                 *error = std::string("no ") + what + " named '" + trim(cur.s.substr(cur.pos)) + "'";
@@ -693,10 +695,10 @@ struct Show::Impl {
             a.index = findGroup(rest());
             return a.index >= 0 || bad("no group named '" + rest() + "'");
         }
-        for (const char* what : {"preset", "scene"}) {
+        for (const char* what : {"preset", "chain", "scene"}) {
             if (!cur.word(what))
                 continue;
-            const bool isPreset = std::string(what) == "preset";
+            const bool isPreset = std::string(what) != "scene"; // a chain is selected by its preset
             const std::string r = lower(rest());
             double n = 0;
             if (r == "next" || r == "previous") {
@@ -755,7 +757,7 @@ struct Show::Impl {
             return true;
         }
         return bad("did not understand '" + text +
-                   "'. Actions: <control> = <value|next|previous|toggle|default>, group <name>, preset <name|next|previous>, "
+                   "'. Actions: <control> = <value|next|previous|toggle|default>, group <name>, chain (or preset) <name|next|previous>, "
                    "scene <name|next|previous>, bypass/enable/toggle <plug-in>, param <plug-in> <id> = <value>, mute on|off|toggle, "
                    "midi <hex bytes>");
     }
@@ -884,9 +886,10 @@ struct Show::Impl {
             out.switchTo(p.chain);
         }
         runActions(p.actions);
-        if (config.warm == "next") {
+        int warm = p.warm;
+        if (warm == kWarmNext) {
             // The next preset that plays another chain.
-            int warm = -1;
+            warm = -1;
             for (size_t k = 1; k < presets.size(); ++k) {
                 const int c = presets[(index + k) % presets.size()].chain;
                 if (c != activeChain) {
@@ -894,10 +897,13 @@ struct Show::Impl {
                     break;
                 }
             }
-            if (warm != warmChain) {
-                warmChain = warm;
-                out.setWarm(warm);
-            }
+        }
+        if (warm == activeChain)
+            warm = -1;
+        // Nothing is warm until a preset first asks for a chain.
+        if (warm != (warmChain == -2 ? -1 : warmChain)) {
+            warmChain = warm;
+            out.setWarm(warm);
         }
     }
 
@@ -1063,9 +1069,14 @@ struct Show::Impl {
                 p.scene = static_cast<int>(s);
                 p.pedal = ps.pedal;
                 p.program = ps.program;
-                for (size_t c = 0; c < ss.chains.size(); ++c)
+                const std::string warm = ps.warm.empty() ? cfg.warm : ps.warm;
+                p.warm = same(warm, "none") ? kWarmNone : kWarmNext;
+                for (size_t c = 0; c < ss.chains.size(); ++c) {
                     if (same(ss.chains[c].name, ps.chain))
                         p.chain = chainBase + static_cast<int>(c);
+                    if (same(ss.chains[c].name, warm) && !same(warm, "next") && !same(warm, "none"))
+                        p.warm = chainBase + static_cast<int>(c);
+                }
                 presets.push_back(p);
             }
             scenes.push_back(sc);
@@ -1424,6 +1435,19 @@ std::string Show::valueText(const std::string& control) const {
     std::lock_guard<std::mutex> lock(d_->mutex);
     const int c = d_->findControl(control);
     return c < 0 ? "" : Impl::text(d_->controls[c]);
+}
+
+std::string Show::sceneName(int index) const {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    return index >= 0 && index < static_cast<int>(d_->scenes.size()) ? d_->scenes[index].name : "";
+}
+
+std::vector<std::string> Show::controlNames() const {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::vector<std::string> out;
+    for (const auto& c : d_->controls)
+        out.push_back(c.name);
+    return out;
 }
 
 bool Show::muted() const {

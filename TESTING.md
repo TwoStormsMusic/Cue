@@ -16,7 +16,7 @@ They come back at the next login, or with `systemctl --user start pipewire.socke
 ./run-tests.sh
 ```
 
-Runs the 64 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import) and two benches. Every test should say `OK`. **Send** the last 30 lines if anything fails.
+Runs the 79 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs) and two benches. Every test should say `OK`. **Send** the last 30 lines if anything fails.
 
 ## 2. Real-time settings
 
@@ -106,6 +106,66 @@ The import reads each IR file named in the project and stores its samples in the
 - **Out 2 (amp)** gets everything but the IR and the Saturator after it, chorus, delay and tremolo included; **out 1 (FOH)** gets all of it. The time effects run twice for that (one copy on each side of the IR), and every mapping that names them switches both.
 - A bypassed IR Loader is set to pass its input (thru) unless you add `bypass_mode = mute` under it.
 
+## 7. Performance files and remote control (0.4.0)
+
+0.4.0 saves a performance as one `.cue` file, keeps this machine's sound card settings in a rig profile, and lets another program watch and drive a running Cue (the app will, later; for now `cue ctl` does). The sound should not change at all. Use the TwoStorms template from step 6; nothing needs importing again.
+
+**Convert it**, keeping its audio and MIDI settings as this machine's rig profile:
+
+```sh
+bin/cue convert "$HOME/cue/Cue Template 2S/Cue Template 2S.ini" --rig ~/.config/cue/rig.json
+cat ~/.config/cue/rig.json
+```
+
+It writes `Cue Template 2S.cue` beside the INI, with every plug-in state inside it, so it no longer needs `states/`. The rig profile should say `hw:M2`, 64 frames, 3 periods, `In 1` on channel 1, `Out 1` on 1 and `Out 2` on 2. **Send** what both printed.
+
+**Same sound.** Check the .cue, then bench it and the INI the same way and compare the two recordings:
+
+```sh
+bin/cue check "$HOME/cue/Cue Template 2S/Cue Template 2S.cue"
+bin/cue bench "$HOME/cue/Cue Template 2S/Cue Template 2S.ini" --seconds 30 --fast yes --wav ini.wav
+bin/cue bench "$HOME/cue/Cue Template 2S/Cue Template 2S.cue" --seconds 30 --fast yes --wav cue.wav
+cmp ini.wav cue.wav && echo same
+```
+
+`same` means the .cue plays exactly the samples the INI does. If they differ, bench the INI twice and compare those: a plug-in with randomness of its own differs a little on every run, and then listening to both is the test. **Send** the output.
+
+**Live, driven from a second terminal.** Play the .cue with the pedals as in step 5:
+
+```sh
+bin/cue run "$HOME/cue/Cue Template 2S/Cue Template 2S.cue"
+```
+
+In a second terminal on the mini PC, or over ssh from another computer:
+
+```sh
+bin/cue ctl status
+bin/cue ctl watch                # the status twice a second and every xrun line, until Ctrl-C
+bin/cue ctl select Slap          # or next, previous, or a number
+bin/cue ctl do "Wah = Auto"
+bin/cue ctl do "chain Djent"
+```
+
+A switch from `cue ctl` should sound exactly like one from a pedal, and the LEDs and display should follow. Leave `watch` running for 10 minutes while you play and switch: it should add no xruns. **Send** a few `watch` lines and anything you heard.
+
+**Save from the running Cue.** While it plays, and while you play:
+
+```sh
+bin/cue ctl save "$HOME/cue/saved.cue"
+bin/cue ctl quit
+bin/cue check "$HOME/cue/saved.cue"
+```
+
+The save takes every plug-in's settings as they are at that moment. Listen while it saves: there should be no click and no xrun. `check` should list the same chains and plug-ins as before. **Send** what `save` and `check` printed, and whether you heard anything.
+
+**Without the sound card.** With REAPER or PipeWire holding the M2:
+
+```sh
+bin/cue run "$HOME/cue/Cue Template 2S/Cue Template 2S.cue" --audio none
+```
+
+It loads every plug-in and runs them on a timer, hearing silence; `cue ctl` works as above. This is how the app will edit a performance on a laptop. **Send** the lines it printed at start.
+
 ## What passes
 
 | Check | Pass when |
@@ -117,5 +177,8 @@ The import reads each IR file named in the project and stores its samples in the
 | Tails | A delay or reverb tail carries on after a switch |
 | Headroom | bench: the 99.9% block time stays under about 70% of the period |
 | Pedals | LEDs and display match the table above |
+| Same sound | `cmp` says `same`, or the .cue sounds the same as the INI |
+| Remote control | `cue ctl` switches as cleanly as the pedals, and `watch` adds no xruns |
+| Save | Saving while playing makes no click; the saved file checks and plays |
 
 If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which preset you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

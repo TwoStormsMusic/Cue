@@ -183,6 +183,44 @@ TEST(show_pedals_select_presets_and_warm_the_next_chain) {
     CHECK(show.preset() == 2);
 }
 
+TEST(show_each_preset_chooses_its_warm_chain_and_chain_names_a_preset) {
+    Recorder out;
+    Show show(out);
+    Config c;
+    std::string err;
+    const std::string text = std::string(kTemplate) + R"(
+[preset Slap]
+chain = Slap
+warm = Punk
+[preset Djent]
+chain = Djent
+warm = none
+[trigger Back]
+on = pedal 9
+do = chain Punk
+)";
+    // The later [preset] sections are new presets; drop the template's own.
+    std::string t = text;
+    for (const char* name : {"[preset Slap]\npedal = 7\ndisplay = SL\ndo = group Reset effects\n", "[preset Djent]\npedal = 10\ndo = group Reset effects\n"})
+        t.replace(t.find(name), std::string(name).size(), "");
+    CHECK_MSG(loadShow(show, t, c, err), "%s", err.c_str());
+    show.start();
+    CHECK(out.warm == 1); // Punk: the next one, Slap
+    show.selectPreset(1);
+    CHECK(out.warm == 0); // Slap keeps Punk warm
+    show.selectPreset(2);
+    CHECK(out.warm == -1); // Djent keeps nothing warm
+    show.onMidi(press(9));
+    CHECK(show.preset() == 0 && out.warm == 1);
+    std::string e2;
+    CHECK(show.run("chain Djent", &e2) && show.preset() == 2);
+    CHECK(!show.run("chain Nope", &e2) && e2.find("no chain named") != std::string::npos);
+
+    Config bad;
+    CHECK(!parseConfigText(std::string(kTemplate) + "[preset Extra]\nchain = Punk\nwarm = Nope\n", "/cfg/t.ini", bad, &err));
+    CHECK(err.find("no chain named Nope") != std::string::npos);
+}
+
 TEST(show_wah_cycles_wraps_and_switches_the_right_plugins_in_every_chain) {
     Recorder out;
     Show show(out);

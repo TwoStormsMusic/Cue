@@ -42,6 +42,9 @@ public:
 
     const std::string& name() const { return name_; }
     size_t numOutputs() const { return taps_.size(); }
+    // Before activation: which of the engine's inputs feeds the chain.
+    void setInput(size_t input) { input_ = input; }
+    size_t input() const { return input_; }
     size_t numLines() const { return lines_.size(); }
     size_t lineSize(size_t line) const { return lines_[line].count; }
     // Slots are numbered across all lines, line 0 first.
@@ -150,6 +153,7 @@ private:
     std::atomic<int> slowSlot_{-1};
     std::atomic<uint32_t> slowNs_{0};
     uint32_t tailMin_ = 0;
+    size_t input_ = 0;
 };
 
 } // namespace cue

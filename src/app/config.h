@@ -10,6 +10,9 @@
 
 namespace cue {
 
+// The most inputs, and the most outputs, a performance may have.
+constexpr size_t kMaxPorts = 64;
+
 // A value from the config with the place it came from, for error messages.
 struct ConfigText {
     std::string text;
@@ -24,6 +27,10 @@ struct PluginSpec {
     std::vector<std::pair<uint32_t, double>> params;
     std::string stateFile;           // plug-in state to load after activation
     std::string controllerStateFile; // VST3 only: the edit controller's state
+    // A .cue file carries the states themselves; stateFile then only names
+    // where they came from, for messages.
+    bool embeddedState = false;
+    std::vector<uint8_t> state, controllerState;
     std::string label;               // `name =`: what mappings call it
     bool bypassed = false;           // loaded, but not processed until a mapping enables it
     bool muteOnBypass = false;       // bypass_mode: when bypassed, pass silence (mute) instead of the input (thru)
@@ -42,16 +49,26 @@ struct LineSpec {
     std::vector<PluginSpec> plugins;
 };
 
+// Where a chain's signal is taken for one output.
 struct TapSpec {
+    std::string output;      // the output: its name, or out1, out2...
     int line = 0;
     size_t after = SIZE_MAX; // SIZE_MAX = end of the line
     bool set = false;
+    std::string where;
 };
 
 struct ChainSpec {
     std::string name;
+    // The performance input that feeds it: its name, or in1, in2...; empty
+    // = the first. finishConfig finds inputIndex.
+    std::string input;
+    size_t inputIndex = 0;
     std::vector<LineSpec> lines;
-    TapSpec out[2];
+    // As written, the outputs a tap names. finishConfig makes it one per
+    // performance output, in their order; one no tap names is taken at the
+    // end of the main line.
+    std::vector<TapSpec> out;
     std::string where;
 };
 
@@ -63,6 +80,9 @@ struct PresetSpec {
     int pedal = 0;       // FCB pedal (1-10) that selects it
     int program = -1;    // MIDI program change that selects it
     std::vector<ConfigText> actions;
+    // Which chain is kept warm while it plays: "next", "none" or a chain of
+    // its scene. Empty: [switching] warm decides.
+    std::string warm;
     std::string where;
 };
 
@@ -138,6 +158,11 @@ struct Config {
     bool muteOnBypass = false; // [switching] bypass_mode: what plug-ins without their own do
     MidiSettings midi;
     std::string performance;   // the performance's name
+    // What the performance calls its inputs and outputs. A machine's rig
+    // profile says which sound card channel each one is (audio.inputChannels
+    // and outputChannels, in the same order).
+    std::vector<std::string> inputs = {"In 1"};
+    std::vector<std::string> outputs = {"Out 1", "Out 2"};
     std::vector<SceneSpec> scenes;
     std::vector<ControlSpec> controls;
     std::vector<TriggerSpec> triggers;
@@ -150,6 +175,10 @@ struct Config {
 // Parses the INI-style config described in docs/config.md.
 bool loadConfig(const std::string& path, Config& config, std::string* error);
 bool parseConfigText(const std::string& text, const std::string& path, Config& config, std::string* error);
+// What every loaded performance goes through: a channel for each input and
+// output, presets for scenes without any, presets matched to chains, chains'
+// inputs found and outputs tapped, controls completed.
+bool finishConfig(Config& config, std::string* error);
 
 // Every plug-in of a chain, line by line: the order of the engine's slots.
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain);

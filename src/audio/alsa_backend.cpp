@@ -9,6 +9,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace cue {
@@ -127,7 +128,8 @@ bool AlsaBackend::configure(snd_pcm_t* pcm, bool capture, unsigned& channels, in
 
     unsigned needed = 1;
     if (capture)
-        needed = config_.inputChannel + 1;
+        for (unsigned c : config_.inputChannels)
+            needed = std::max(needed, c + 1);
     else
         for (unsigned c : config_.outputChannels)
             needed = std::max(needed, c + 1);
@@ -181,8 +183,26 @@ bool AlsaBackend::configure(snd_pcm_t* pcm, bool capture, unsigned& channels, in
     return true;
 }
 
+// At least one input and one output, and no two outputs on one channel.
+static bool checkChannels(const AlsaConfig& config, std::string* error) {
+    if (config.inputChannels.empty() || config.outputChannels.empty()) {
+        *error = "no input or no output channel";
+        return false;
+    }
+    for (size_t o = 0; o < config.outputChannels.size(); ++o)
+        for (size_t k = 0; k < o; ++k)
+            if (config.outputChannels[o] == config.outputChannels[k]) {
+                *error = "outputs " + std::to_string(k + 1) + " and " + std::to_string(o + 1) + " both play on channel " +
+                         std::to_string(config.outputChannels[o] + 1);
+                return false;
+            }
+    return true;
+}
+
 bool AlsaBackend::open(const AlsaConfig& config, std::string* error) {
     close();
+    if (!checkChannels(config, error))
+        return false;
     config_ = config;
     int err = snd_pcm_open(&capture_, config_.device.c_str(), SND_PCM_STREAM_CAPTURE, 0);
     if (err < 0) {
@@ -207,7 +227,10 @@ bool AlsaBackend::open(const AlsaConfig& config, std::string* error) {
 
     captureRaw_.assign(static_cast<size_t>(config_.period) * captureChannels_ * bytesPerSample(captureFormat_), 0);
     playbackRaw_.assign(static_cast<size_t>(config_.period) * playbackChannels_ * bytesPerSample(playbackFormat_), 0);
-    in_.assign(config_.period, 0.0f);
+    ins_.assign(config_.inputChannels.size(), std::vector<float>(config_.period, 0.0f));
+    inPtrs_.clear();
+    for (auto& i : ins_)
+        inPtrs_.push_back(i.data());
     outs_.assign(config_.outputChannels.size(), std::vector<float>(config_.period, 0.0f));
     outPtrs_.clear();
     for (auto& o : outs_)
@@ -281,7 +304,6 @@ void AlsaBackend::run() {
     snd_pcm_start(capture_);
 
     const size_t capStride = captureChannels_ * bytesPerSample(captureFormat_);
-    const size_t capOffset = config_.inputChannel * bytesPerSample(captureFormat_);
     const size_t playStride = playbackChannels_ * bytesPerSample(playbackFormat_);
     const size_t playBytes = bytesPerSample(playbackFormat_);
     const uint32_t frames = config_.period;
@@ -302,9 +324,12 @@ void AlsaBackend::run() {
         const snd_pcm_sframes_t waiting = snd_pcm_avail_update(capture_);
         lastLateFrames_ = waiting > 0 ? static_cast<uint32_t>(waiting) : 0;
 
-        for (uint32_t i = 0; i < frames; ++i)
-            in_[i] = readSample(captureRaw_.data() + i * capStride + capOffset, captureFormat_);
-        callback_(in_.data(), outPtrs_.data(), frames);
+        for (size_t c = 0; c < ins_.size(); ++c) {
+            const size_t offset = config_.inputChannels[c] * bytesPerSample(captureFormat_);
+            for (uint32_t i = 0; i < frames; ++i)
+                ins_[c][i] = readSample(captureRaw_.data() + i * capStride + offset, captureFormat_);
+        }
+        callback_(inPtrs_.data(), outPtrs_.data(), frames);
         std::fill(playbackRaw_.begin(), playbackRaw_.end(), 0);
         for (size_t o = 0; o < outs_.size(); ++o) {
             const size_t offset = config_.outputChannels[o] * playBytes;
@@ -353,6 +378,66 @@ void AlsaBackend::close() {
     if (playback_)
         snd_pcm_close(playback_);
     capture_ = playback_ = nullptr;
+}
+
+// ------------------------------------------------------------ no sound card
+
+NullBackend::~NullBackend() { stop(); }
+
+bool NullBackend::open(const AlsaConfig& config, std::string* error) {
+    if (config.rate == 0 || config.period == 0) {
+        *error = "rate and period must be above zero";
+        return false;
+    }
+    if (!checkChannels(config, error))
+        return false;
+    config_ = config;
+    return true;
+}
+
+bool NullBackend::start(Callback callback, std::string* error) {
+    callback_ = std::move(callback);
+    running_ = true;
+    thread_ = std::thread([this] {
+        enableFlushToZero();
+        std::vector<float> silence(config_.period, 0.0f);
+        std::vector<const float*> ins(config_.inputChannels.size(), silence.data());
+        std::vector<std::vector<float>> outs(config_.outputChannels.size(), std::vector<float>(config_.period, 0.0f));
+        std::vector<float*> ptrs;
+        for (auto& o : outs)
+            ptrs.push_back(o.data());
+        const auto period = std::chrono::nanoseconds(1000000000ull * config_.period / config_.rate);
+        auto next = std::chrono::steady_clock::now();
+        while (running_) {
+            next += period;
+            const auto t0 = std::chrono::steady_clock::now();
+            callback_(ins.data(), ptrs.data(), config_.period);
+            const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            stats_.cycles.fetch_add(1, std::memory_order_relaxed);
+            stats_.totalCycleNs.fetch_add(ns, std::memory_order_relaxed);
+            if (ns > stats_.maxCycleNs.load(std::memory_order_relaxed))
+                stats_.maxCycleNs.store(static_cast<uint32_t>(std::min<uint64_t>(ns, UINT32_MAX)), std::memory_order_relaxed);
+            std::this_thread::sleep_until(next);
+            // Fell far behind (a debugger, a suspended machine): start again from now.
+            if (std::chrono::steady_clock::now() - next > 50 * period)
+                next = std::chrono::steady_clock::now();
+        }
+    });
+    (void)error;
+    return true;
+}
+
+void NullBackend::stop() {
+    running_ = false;
+    if (thread_.joinable())
+        thread_.join();
+}
+
+std::string NullBackend::describe() const {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "no sound card: the engine runs on a timer, hearing silence (%u Hz, %u frames, %zu inputs, %zu outputs)",
+                  config_.rate, config_.period, config_.inputChannels.size(), config_.outputChannels.size());
+    return buf;
 }
 
 } // namespace cue
