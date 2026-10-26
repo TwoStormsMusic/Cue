@@ -44,6 +44,13 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    // What a press, a move and a lift do, from the mouse or one finger. A
+    // cancelled press ends its drag where it is and taps nothing (a second
+    // finger came down).
+    void pointerPress(QPointF pos);
+    void pointerMove(QPointF pos);
+    void pointerRelease(QPointF pos);
+    void pointerCancel();
 
     // The header every view has: the logo, a title and a subtitle, then
     // pills, then buttons at the right. Pills that do not fit are left out,
@@ -82,6 +89,7 @@ private:
     QVector<Hit> hits_;
     QString pressed_;
     Drag dragging_;
+    QPointF lastPos_;
     bool pressedInside_ = false;
     double headerHeight_ = 0;
 };

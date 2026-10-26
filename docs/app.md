@@ -44,7 +44,8 @@ The note with its sharp or flat and octave, chevrons on the side it is off to
 (more of them the further off), the cents and hertz under it, the needle from
 -50 to +50 cents over the in-tune zone, and the strobe, which drifts with the
 error and stands still in tune. Green is in tune; a note that has gone is
-drawn dark. The stage view's strip is the same tuner, small. The **Mute**
+drawn dark. The stage view's strip is the same tuner, small and plainer: the
+note with its chevrons and the needle, nothing else. The **Mute**
 button goes through the control that mutes (your tuner pedal, whose number it
 shows), so its LED and the screen agree; while muted the tuner is framed in
 red. Muting silences the inputs, not the outputs: what is ringing (a delay, a
@@ -56,8 +57,15 @@ and goes back when they are live again (Settings can turn this off).
 draws them: inputs and outputs are rectangles, Gain Stage a circle, Act a
 small circle, other plug-ins hexagons. Green is a plug-in that is on, or a
 wire carrying sound to an output in the chain playing; grey is bypassed or
-silent; orange is what you selected. Tap a block to switch it on or off and
-move its parameters with sliders. **Open editor** opens the plug-in's own
+silent; orange is what you selected. The wheel, two fingers or the **−**,
+**Fit** and **+** buttons zoom; dragging open space or two fingers move it; a
+double tap on open space fits the whole chain again. Tap a block to switch
+it on or off and move its parameters with sliders. It shows the parameters
+you picked, in your order (drag a row by its grip to move it), and always the
+ones a control or trigger moves, purple, with what moves them; until you
+pick, the first eight. **Show all parameters** lists every one in the
+plug-in's order, checked if shown: check the ones to show. Long lists fold by
+the plug-in's sections and have a search box. **Open editor** opens the plug-in's own
 window, the one it has in a DAW: Neural DSP through yabridge, the TwoStorms
 plug-ins, anything with an editor. It opens on the screen of the computer
 running the engine, which on stage is the one in front of you, and what you
@@ -76,7 +84,9 @@ tuner's range, reference, tolerance and note names, saved with it.
 
 Everything is a tap: it acts when the finger lifts inside the button, so a
 finger that slides off cancels. Sliders follow the finger from the first
-touch. Lists scroll by dragging or with the mouse wheel. The layout fits any
+touch. Lists scroll by dragging or with the mouse wheel. The chain view's
+canvas zooms with the wheel or two fingers and moves when you drag open
+space. The layout fits any
 screen, landscape or portrait; Settings > Size makes everything bigger or
 smaller on top.
 

@@ -74,6 +74,15 @@ public:
     // One line for the status display.
     std::string status() const;
 
+    // What moves a plug-in's parameters from outside: a control's drive
+    // (with what it follows and its pedal) or a trigger's param action.
+    struct ParamTie {
+        uint32_t param = 0;
+        std::string control, follows, trigger;
+        int pedal = 0;
+    };
+    std::vector<ParamTie> ties(int chain, size_t slot) const;
+
     struct Impl;
 
 private:

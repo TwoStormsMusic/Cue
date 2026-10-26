@@ -233,7 +233,7 @@ bin/cue-app --start "$HOME/cue/app-test.cue" --fullscreen
 
 **Sliders stay where you leave them.** Tap **Chains**, tap the Gain Stage, and move a slider: it stays where you let go and the sound follows. Do the same on a Neural DSP plug-in. Tap **Save**, then `bin/cue check "$HOME/cue/app-test.cue"`. **Send** what it printed.
 
-Drawing wires, adding plug-ins and zooming are not in 0.5 yet: they come with the routing editor.
+Drawing wires and adding plug-ins are not in 0.5 yet: they come with the routing editor.
 
 ## 10. Plug-in editors (0.6.0)
 
@@ -264,6 +264,28 @@ Load the file again (`bin/cue-app --start "$HOME/cue/app-test.cue"`) and open th
 From ssh you can also drive it: `bin/cue ctl editor 2 1` opens chain 2's first plug-in, `bin/cue ctl editor 2 1 close` shuts it. Over ssh the window still opens on the mini PC's screen (or it says there is no screen to open it on, if you started the engine over ssh without one).
 
 Note: `./run-tests.sh` now opens and closes a few small test windows when it is run on a desktop. That is the editor test, and it is quick.
+
+## 11. Zoom, picked parameters, the stage strip (0.6.1)
+
+Same start as step 8 (`bin/cue-app --version` should say 0.6.1; it has the plug-in editors of step 10 too). Try each on the touchscreen and with a mouse.
+
+**The chain zooms and moves.** Tap **Chains**.
+
+- The mouse wheel zooms in and out where the pointer is. On the touchscreen, pinch with two fingers; the two fingers also move it. The **−**, **Fit** and **+** buttons at the bottom right of the canvas do the same, and the number beside them says how big it is.
+- Drag open space (not a block) to move the chain around. A double tap on open space fits the whole chain again.
+- A tap on a block still selects it, zoomed or not.
+
+**Pick the parameters a block shows.** Tap a Neural DSP plug-in.
+
+- Before you pick anything it shows its first eight parameters. A parameter a control drives (`drive =`) or a trigger sets (`param`) always shows, its slider purple, with what moves it under its name.
+- Tap **Show all parameters**: every parameter in the plug-in's order, a checkmark on the ones shown, **Collapse all parameters** at the top. Long lists have a search box, and the plug-in's own sections fold (tap a section's name).
+- Check and uncheck a few, then **Collapse all parameters**: only the checked ones show, newly checked ones at the end.
+- Drag a row by its grip (the three lines at its left) up or down to put it in its place.
+- Tap **Save**, quit the app and the engine, start them again: the same parameters show in the same order.
+
+**The stage strip is only the note and the needle.** On the stage view, the tuner strip shows the note with its chevrons and the needle, no strobe, cents or hertz. The tuner view is unchanged.
+
+**Send** what feels wrong, with a photo if it is about the look.
 
 ## What passes
 

@@ -163,15 +163,15 @@ struct NoteGeom {
     double ly = 0; // the numbers' baseline
 };
 
-NoteGeom noteGeom(const QRectF& na, double u) {
+NoteGeom noteGeom(const QRectF& na, double u, bool numbers) {
     NoteGeom g;
     const double capR = capRatio();
-    const double C = std::max(20 * u, std::min(na.height() * 0.92 / 1.36, na.width() * 0.94 / 3.4));
+    const double C = std::max(20 * u, std::min(na.height() * 0.92 / (numbers ? 1.36 : 1.0), na.width() * 0.94 / 3.4));
     g.fs = std::max(8.0, std::round(C / capR)); // whole pixels, as the font takes them
     g.C = g.fs * capR;
     g.R1 = std::clamp(g.C * 0.24, 15 * u, 76 * u);
     const double rcap = capR * g.R1;
-    const double blockH = g.C + g.C * 0.17 + rcap;
+    const double blockH = numbers ? g.C + g.C * 0.17 + rcap : g.C;
     g.yb = na.top() + (na.height() - blockH) / 2 + g.C;
     g.cx = na.center().x();
     g.ly = g.yb + g.C * 0.17 + rcap;
@@ -222,9 +222,9 @@ void pane(QPainter& p, const QRectF& r, bool muted, double u) {
     p.restore();
 }
 
-void note(QPainter& p, const QRectF& na, const TunerReading& t, double u) {
+void note(QPainter& p, const QRectF& na, const TunerReading& t, double u, bool numbers) {
     p.save();
-    const NoteGeom g = noteGeom(na, u);
+    const NoteGeom g = noteGeom(na, u, numbers);
     const double C = g.C;
     // What is wrong, if anything.
     QString msg;
@@ -288,6 +288,10 @@ void note(QPainter& p, const QRectF& na, const TunerReading& t, double u) {
         p.drawText(QRectF(na.left(), na.top() + 4 * u, na.width(), 18 * u), Qt::AlignCenter, msg);
     }
 
+    if (!numbers) {
+        p.restore();
+        return;
+    }
     // The numbers: the cents, big and coloured, and the frequency.
     const QString cents = centsText(t), hz = QString("%1 Hz").arg(t.hz, 0, 'f', t.hz < 1000 ? 2 : 1);
     const QFont cf = typeface(Face::Text, g.R1, QFont::Bold), hf = typeface(Face::Text, g.R1 * 0.6, QFont::Medium);

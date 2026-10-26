@@ -12,7 +12,10 @@
 #include "gui/theme.h"
 #include "gui/tunerview.h"
 
+#include <QApplication>
 #include <QFile>
+#include <QLineF>
+#include <QWheelEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLocalServer>
@@ -478,6 +481,143 @@ private slots:
         QCOMPARE(link.last("editor").value("open").toBool(), false);
     }
 
+    void chain_view_zooms_and_pans() {
+        FakeLink link;
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        v->grab();
+        const QRectF canvas = v->hitRect("canvas");
+        QVERIFY(!canvas.isEmpty());
+        const QRectF before = v->hitRect("block 0");
+        // The wheel zooms in where it points: what is there stays there.
+        const QPointF at = before.center();
+        QWheelEvent wheel(at, v->mapToGlobal(at), {}, QPoint(0, 240), Qt::NoButton, {}, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(v, &wheel);
+        QVERIFY(v->zoom() > 1.3);
+        v->grab();
+        const QRectF after = v->hitRect("block 0");
+        QVERIFY(after.width() > before.width() * 1.2);
+        QVERIFY(QLineF(after.center(), before.center()).length() < 3);
+        shot(v, "chains-zoomed");
+        // A drag on open space pans.
+        const QPoint from = (canvas.topLeft() + QPointF(30, 30)).toPoint();
+        QTest::mousePress(v, Qt::LeftButton, {}, from);
+        QTest::mouseMove(v, from + QPoint(80, 40));
+        QTest::mouseRelease(v, Qt::LeftButton, {}, from + QPoint(80, 40));
+        QVERIFY(QLineF(v->pan(), QPointF()).length() > 10);
+        v->grab();
+        QVERIFY(v->hitRect("block 0").center().x() > after.center().x() + 40);
+        // A double tap there fits it again; so does Fit.
+        QTest::mouseClick(v, Qt::LeftButton, {}, from);
+        QTest::mouseClick(v, Qt::LeftButton, {}, from);
+        QCOMPARE(v->zoom(), 1.0);
+        QCOMPARE(v->pan(), QPointF());
+        v->grab();
+        click(v, v->hitRect("zoom in"));
+        QVERIFY(v->zoom() > 1.2);
+        v->grab();
+        click(v, v->hitRect("fit"));
+        QCOMPARE(v->zoom(), 1.0);
+        // Two fingers pinch it bigger.
+        v->grab();
+        const QPointF c = canvas.center();
+        QPointingDevice* screen = QTest::createTouchDevice();
+        QTest::touchEvent(v, screen).press(0, (c - QPointF(40, 0)).toPoint()).press(1, (c + QPointF(40, 0)).toPoint());
+        QTest::touchEvent(v, screen).move(0, (c - QPointF(80, 0)).toPoint()).move(1, (c + QPointF(80, 0)).toPoint());
+        QTest::touchEvent(v, screen).release(0, (c - QPointF(80, 0)).toPoint()).release(1, (c + QPointF(80, 0)).toPoint());
+        QVERIFY2(v->zoom() > 1.8 && v->zoom() < 2.2, qPrintable(QString::number(v->zoom())));
+        // One finger on a block still taps it.
+        v->grab();
+        const QPoint b = v->hitRect("block 1").center().toPoint();
+        QTest::touchEvent(v, screen).press(0, b);
+        QTest::touchEvent(v, screen).release(0, b);
+        QCOMPARE(v->selectedSlot(), 1);
+    }
+
+    void chain_view_shows_the_picked_parameters() {
+        // A plug-in with sections and more parameters than fit, one moved by a pedal.
+        QJsonArray params;
+        for (int i = 0; i < 20; ++i) {
+            QJsonObject q{{"id", 100 + i}, {"name", QString("Knob %1").arg(i)}, {"module", i < 10 ? "Amp" : "Cab"}, {"min", 0}, {"max", 1},
+                          {"default", 0.5}, {"steps", 0}, {"value", 0.5}, {"text", "50%"}};
+            if (i == 15)
+                q["tied"] = QJsonArray{QJsonObject{{"control", "Grunt"}, {"follows", "expression 1"}, {"pedal", 0}}};
+            params.append(q);
+        }
+        QJsonValue shown; // as the engine keeps it
+        FakeLink link;
+        link.answer = [&](const QJsonObject& r) -> QJsonObject {
+            if (r.value("cmd") == "shown")
+                shown = r.value("params");
+            if (r.value("cmd") == "plugin" || r.value("cmd") == "shown") {
+                QJsonObject plugin{{"chain", 1}, {"slot", 1}, {"label", "Darkglass Ultra"}, {"name", "Darkglass Ultra"}, {"format", "vst3"},
+                                   {"bypassed", false}, {"editor", true}, {"params", params}};
+                if (shown.isArray())
+                    plugin["shown"] = shown;
+                return {{"ok", true}, {"plugin", plugin}};
+            }
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        v->grab();
+        click(v, v->hitRect("block 1"));
+        v->grab();
+        // Nothing picked yet: the first eight, and the one the pedal moves.
+        QCOMPARE(v->shownParams(), (QVector<int>{100, 101, 102, 103, 104, 105, 106, 107, 115}));
+        QVERIFY(!v->hitRect("param 100").isEmpty());
+        QVERIFY(v->hitRect("param 110").isEmpty());
+        shot(v, "chains-params");
+        // All of them: uncheck one, check another; the pedal's stays.
+        click(v, v->hitRect("show all"));
+        QVERIFY(v->showingAll());
+        v->grab();
+        QVERIFY(!v->hitRect("collapse").isEmpty());
+        QVERIFY(!v->hitRect("section Amp").isEmpty());
+        click(v, v->hitRect("pick 101"));
+        v->grab();
+        QCOMPARE(link.last("shown").value("params").toArray().size(), 8);
+        QCOMPARE(v->shownParams().contains(101), false);
+        // Fold the first section, so the second's come up.
+        click(v, v->hitRect("section Amp"));
+        v->grab();
+        QVERIFY(v->hitRect("pick 100").isEmpty());
+        click(v, v->hitRect("pick 112"));
+        v->grab();
+        QCOMPARE(v->shownParams().last(), 112);
+        click(v, v->hitRect("pick 115"));
+        QVERIFY(v->shownParams().contains(115));
+        shot(v, "chains-all-params");
+        click(v, v->hitRect("collapse"));
+        QVERIFY(!v->showingAll());
+        // The third moved to the top by its grip.
+        v->grab();
+        const QRectF grip = v->hitRect("move 102");
+        const QRectF first = v->hitRect("move 100");
+        QVERIFY(!grip.isEmpty() && !first.isEmpty());
+        QTest::mousePress(v, Qt::LeftButton, {}, grip.center().toPoint());
+        QTest::mouseMove(v, QPoint(grip.center().x(), first.top() + 4));
+        v->grab();
+        shot(v, "chains-moving-param");
+        QTest::mouseRelease(v, Qt::LeftButton, {}, QPoint(grip.center().x(), first.top() + 4));
+        QCOMPARE(v->shownParams().first(), 102);
+        QCOMPARE(link.last("shown").value("params").toArray().first().toInt(), 102);
+        QCOMPARE(v->shownParams().last(), 112);
+        QCOMPARE(link.last("shown").value("slot").toInt(), 1);
+    }
+
     void settings_are_kept() {
         FakeLink link;
         AppState s(link);
@@ -562,6 +702,11 @@ private slots:
             }
             QCOMPARE(now, 0.5);
         }
+        // The picked parameters are kept, and come back with the plug-in.
+        QJsonObject picked;
+        link.request({{"cmd", "shown"}, {"chain", 1}, {"slot", 0}, {"params", QJsonArray{0}}}, [&](const QJsonObject& r) { picked = r; });
+        QTRY_VERIFY_WITH_TIMEOUT(!picked.isEmpty(), 3000);
+        QCOMPARE(picked.value("plugin").toObject().value("shown").toArray(), QJsonArray{0});
         link.request({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"bypassed", true}});
         QTRY_VERIFY_WITH_TIMEOUT(s.status.bypassed(1, 2), 3000);
 

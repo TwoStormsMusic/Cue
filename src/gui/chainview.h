@@ -1,16 +1,23 @@
 #pragma once
 
 // The chain view: a chain's plug-ins as blocks and wires, as the routing
-// mockup draws them, laid out from the performance. Tapping a block shows its
-// parameters as sliders and switches it on or off; Save keeps it all in the
-// .cue file. Moving and wiring blocks comes with the routing editor.
+// mockup draws them, laid out from the performance. The canvas zooms (wheel,
+// pinch, the buttons in its corner) and pans (drag open space, two fingers);
+// a double tap on open space fits the chain again. Tapping a block shows its
+// picked parameters as sliders, in the order picked, and switches it on or
+// off; "Show all parameters" lists every one to pick from. Save keeps it all
+// in the .cue file. Moving and wiring blocks comes with the routing editor.
 
 #include "gui/surface.h"
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include <QTimer>
+
+class QLineEdit;
 
 namespace cue::gui {
 
@@ -26,11 +33,27 @@ public:
     void showChain(int chain);
     void selectSlot(int slot);
 
+    // The canvas: 1 fits the chain; more is closer. pan is in pixels from
+    // where fitting puts it.
+    double zoom() const { return zoom_; }
+    QPointF pan() const { return pan_; }
+    void zoomAt(QPointF pos, double factor);
+    void fit();
+
+    // The selected plug-in's parameters as the panel shows them: the picked
+    // ones in their order, then any a pedal or MIDI moves; and whether the
+    // panel lists them all.
+    QVector<int> shownParams() const;
+    bool showingAll() const { return showAll_; }
+    void setShowAll(bool all);
+    void setShown(const QVector<int>& ids);
+
 protected:
     void paint(QPainter& p) override;
     void showEvent(QShowEvent* e) override;
     void hideEvent(QHideEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    bool event(QEvent* e) override;
 
 private:
     void sidebar(QPainter& p, const QRectF& r);
@@ -39,6 +62,15 @@ private:
     void panel(QPainter& p, const QRectF& r, const ChainInfo& c);
     void requestPlugin();
     void setParam(const QJsonObject& param, double value, bool done);
+    void paramRow(QPainter& p, const QRectF& row, const QRectF& list, const QJsonObject& q, const QString& format, bool all);
+    void allParams(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
+    void shownList(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
+    void scrollable(const QRectF& list, double contentH);
+    bool tied(int id) const;
+    // Where the chain sits: its size in layout units, and the canvas.
+    QPointF origin(double k) const;
+    double scaleNow() const { return fitK_ * zoom_; }
+    void clampPan();
 
     int chain_ = -1, slot_ = -1;
     bool followPlaying_ = true;
@@ -52,6 +84,30 @@ private:
     QElapsedTimer clock_;
     qint64 lastSend_ = 0;
     double scrollFrom_ = 0, scrollStartY_ = -1;
+
+    // The canvas, as last drawn, and how it is zoomed and panned.
+    QRectF canvasRect_;
+    QSizeF layoutSize_;
+    double fitK_ = 1, zoom_ = 1;
+    QPointF pan_;
+    // A drag on open space: where it started; a tap there, for a double tap.
+    QPointF panStart_, panFrom_;
+    bool panning_ = false, panMoved_ = false;
+    qint64 lastTapAt_ = -1000;
+    QPointF lastTapPos_;
+    // Two fingers: the zoom and where the point between them was at the start.
+    bool pinching_ = false, touchDone_ = false;
+    double pinchDist_ = 0, pinchZoom_ = 1;
+    QPointF pinchAt_; // in layout units
+
+    // The parameters panel.
+    bool showAll_ = false;
+    QJsonArray pendingShown_; // the picks last sent
+    int shownPending_ = 0; // picks sent, not yet answered
+    int dragRow_ = -1; // being moved by its grip, as an index into shownParams()
+    double dragY_ = 0, dragGrab_ = 0;
+    QSet<QString> closed_, opened_; // sections folded or unfolded by hand
+    QLineEdit* search_ = nullptr;
 };
 
 } // namespace cue::gui

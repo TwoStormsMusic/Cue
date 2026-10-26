@@ -17,8 +17,9 @@ QString centsText(const TunerReading& t);
 void pane(QPainter& p, const QRectF& r, bool muted, double u);
 // The note as big as the area allows: the letter, its sharp or flat, the
 // octave, the chevrons either side (more of them the further off) and the
-// cents and hertz under it. Without a note, what the tuner is waiting for.
-void note(QPainter& p, const QRectF& area, const TunerReading& t, double u);
+// cents and hertz under it (unless numbers is false). Without a note, what
+// the tuner is waiting for.
+void note(QPainter& p, const QRectF& area, const TunerReading& t, double u, bool numbers = true);
 // The needle from -50 to +50 cents over the in-tune zone, with a tick every
 // five cents; labels puts the numbers over them.
 void meter(QPainter& p, const QRectF& r, const TunerReading& t, double u, bool labels);

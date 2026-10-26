@@ -93,9 +93,19 @@ void Surface::offline(QPainter& p) {
 }
 
 void Surface::mousePressEvent(QMouseEvent* e) {
-    if (e->button() != Qt::LeftButton)
-        return;
-    const QPointF pos = e->position();
+    if (e->button() == Qt::LeftButton)
+        pointerPress(e->position());
+}
+
+void Surface::mouseMoveEvent(QMouseEvent* e) { pointerMove(e->position()); }
+
+void Surface::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton)
+        pointerRelease(e->position());
+}
+
+void Surface::pointerPress(QPointF pos) {
+    lastPos_ = pos;
     // The last drawn is on top.
     for (int i = hits_.size() - 1; i >= 0; --i) {
         if (!hits_[i].r.contains(pos))
@@ -110,29 +120,30 @@ void Surface::mousePressEvent(QMouseEvent* e) {
     }
 }
 
-void Surface::mouseMoveEvent(QMouseEvent* e) {
+void Surface::pointerMove(QPointF pos) {
     if (pressed_.isEmpty())
         return;
+    lastPos_ = pos;
     if (dragging_) {
-        dragging_(e->position(), false);
+        dragging_(pos, false);
         return;
     }
     // A finger that slides off a button lets it go.
-    const bool inside = hitRect(pressed_).adjusted(-8, -8, 8, 8).contains(e->position());
+    const bool inside = hitRect(pressed_).adjusted(-8, -8, 8, 8).contains(pos);
     if (inside != pressedInside_) {
         pressedInside_ = inside;
         update();
     }
 }
 
-void Surface::mouseReleaseEvent(QMouseEvent* e) {
-    if (e->button() != Qt::LeftButton || pressed_.isEmpty())
+void Surface::pointerRelease(QPointF pos) {
+    if (pressed_.isEmpty())
         return;
     const QString id = std::exchange(pressed_, {});
     const Drag drag = std::exchange(dragging_, {});
     if (drag) {
-        drag(e->position(), true);
-    } else if (hitRect(id).adjusted(-8, -8, 8, 8).contains(e->position())) {
+        drag(pos, true);
+    } else if (hitRect(id).adjusted(-8, -8, 8, 8).contains(pos)) {
         for (const Hit& h : hits_)
             if (h.id == id && h.tap) {
                 const auto tap = h.tap; // the tap may repaint, which clears the hits
@@ -140,6 +151,15 @@ void Surface::mouseReleaseEvent(QMouseEvent* e) {
                 break;
             }
     }
+    update();
+}
+
+void Surface::pointerCancel() {
+    if (pressed_.isEmpty())
+        return;
+    pressed_.clear();
+    if (const Drag drag = std::exchange(dragging_, {}))
+        drag(lastPos_, true);
     update();
 }
 

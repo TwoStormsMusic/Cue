@@ -38,6 +38,10 @@ struct PluginSpec {
     bool bypassModeSet = false;      // false: [switching] bypass_mode decides
     std::string sidechain;           // `sidechain =`: the earlier plug-in whose output feeds its side-chain input
     bool midi = true;                // receives MIDI, if it has a MIDI input
+    // The parameters the app shows for it, by id in the app's order; unset
+    // until they are picked there.
+    std::vector<uint32_t> shown;
+    bool shownSet = false;
     std::string text, where;         // as written, for messages
 };
 

@@ -161,6 +161,8 @@ struct Writer {
                 params[std::to_string(id)] = v;
             j["params"] = params;
         }
+        if (p.shownSet)
+            j["shown"] = p.shown;
         std::string name;
         if (!state(p, false, stateName, name))
             return false;
@@ -397,6 +399,10 @@ struct Reader {
                     throw std::runtime_error("parameter ids are whole numbers, like \"54\": 1");
                 p.params.push_back({static_cast<uint32_t>(n), v.get<double>()});
             }
+        if (j.contains("shown")) {
+            p.shown = j.at("shown").get<std::vector<uint32_t>>();
+            p.shownSet = true;
+        }
         for (const char* key : {"state", "controller_state"}) {
             if (!j.contains(key))
                 continue;

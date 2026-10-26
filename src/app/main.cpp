@@ -281,7 +281,7 @@ PluginSpec* specAt(Config& config, int chain, size_t slot) {
 
 // A plug-in for the app: what it is, whether it is bypassed, and its
 // parameters with their values now.
-Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const EditorHost* editors = nullptr) {
+Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const std::vector<Show::ParamTie>& ties, const EditorHost* editors = nullptr) {
     const RigPlugin& rp = rig.plugins[k];
     Processor* p = rp.processor;
     Json j;
@@ -301,9 +301,24 @@ Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const EditorHost* e
         const bool known = p->paramValue(info.id, value);
         q["value"] = known ? Json(value) : Json(nullptr);
         q["text"] = known ? p->paramText(info.id, value) : "";
+        // What moves it from the pedals or MIDI: the app always shows these.
+        Json tied = Json::array();
+        for (const Show::ParamTie& t : ties)
+            if (t.param == info.id) {
+                Json tj;
+                if (!t.control.empty())
+                    tj = {{"control", t.control}, {"follows", t.follows}, {"pedal", t.pedal}};
+                else
+                    tj = {{"trigger", t.trigger}};
+                tied.push_back(tj);
+            }
+        if (!tied.empty())
+            q["tied"] = tied;
         params.push_back(q);
     }
     j["params"] = params;
+    if (ps.shownSet)
+        j["shown"] = ps.shown;
     return j;
 }
 
@@ -604,7 +619,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             config.tuner.settings = t;
             tuner.setSettings(t);
             reply["tuner"] = tunerJson(tuner.reading(), t, config.inputs.at(tunerInput));
-        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param" || cmd == "editor") {
+        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param" || cmd == "editor" || cmd == "shown") {
             const int chain = req.at("chain").get<int>();
             const size_t slot = req.at("slot").get<size_t>();
             const int k = rig.find(chain, slot);
@@ -642,12 +657,16 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     if (!editors.open(*p, title, &why))
                         return refuse(why);
                 }
+            } else if (cmd == "shown") {
+                // The parameters the app shows for it, in its order: kept for the next save.
+                ps->shown = req.at("params").get<std::vector<uint32_t>>();
+                ps->shownSet = true;
             }
-            reply["plugin"] = pluginJson(rig, k, *ps, &editors);
+            reply["plugin"] = pluginJson(rig, k, *ps, show.ties(chain, slot), &editors);
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
-            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, quit, subscribe, unsubscribe)");
+            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {

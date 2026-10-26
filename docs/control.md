@@ -54,10 +54,11 @@ reply repeats:
 | `do` | `action` | |
 | `save` | `path` (optional: else the .cue it was loaded from) | `path`, `warnings` |
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
-| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text` |
+| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text`, and `tied` when a control's `drive` (`control`, what it `follows`, its `pedal`) or a trigger's `param` action (`trigger`) moves it; `shown` once the app has picked parameters |
 | `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
 | `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
 | `editor` | `chain`, `slot`, `open` (true to open, false to close; true by default) | `plugin` as above. The window opens on the screen of the computer running the engine, not the app's, so it is the stage computer that shows it |
+| `shown` | `chain`, `slot`, `params` (parameter ids, in the order the app shows them) | `plugin` as above; kept as the plug-in's `shown` when the performance is saved |
 | `quit` | | |
 | `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
 

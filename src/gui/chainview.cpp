@@ -2,9 +2,14 @@
 
 #include <QFontMetricsF>
 #include <QJsonArray>
+#include <QLineEdit>
+#include <QLineF>
+#include <QNativeGestureEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointingDevice>
 #include <QRegularExpression>
+#include <QTouchEvent>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -70,6 +75,8 @@ struct Layout {
 } // namespace
 
 ChainView::ChainView(AppState& state, QWidget* parent) : Surface(state, parent) {
+    // Touch comes as touches here, not as a mouse, so two fingers can zoom.
+    setAttribute(Qt::WA_AcceptTouchEvents);
     clock_.start();
     refresh_.setInterval(700);
     connect(&refresh_, &QTimer::timeout, this, &ChainView::requestPlugin);
@@ -99,9 +106,8 @@ void ChainView::hideEvent(QHideEvent*) { refresh_.stop(); }
 void ChainView::showChain(int chain) {
     if (chain != chain_) {
         chain_ = chain;
-        slot_ = -1;
-        plugin_ = {};
-        scroll_ = 0;
+        selectSlot(-1);
+        fit();
     }
     update();
 }
@@ -112,6 +118,9 @@ void ChainView::selectSlot(int slot) {
         plugin_ = {};
         scroll_ = 0;
         draggingParam_ = -1;
+        dragRow_ = -1;
+        shownPending_ = 0;
+        setShowAll(false);
     }
     requestPlugin();
     update();
@@ -173,7 +182,124 @@ void ChainView::wheelEvent(QWheelEvent* e) {
     if (listRect_.contains(e->position())) {
         scroll_ = std::clamp(scroll_ - e->angleDelta().y() / 120.0 * 60 * u, 0.0, scrollMax_);
         update();
+    } else if (canvasRect_.contains(e->position())) {
+        // A wheel zooms where it points; two fingers on a touchpad pan,
+        // and zoom with Ctrl.
+        const bool pad = e->device() && e->device()->type() == QInputDevice::DeviceType::TouchPad && !e->pixelDelta().isNull();
+        if (pad && !(e->modifiers() & Qt::ControlModifier)) {
+            pan_ += e->pixelDelta();
+            clampPan();
+            update();
+        } else {
+            const double steps = (pad ? e->pixelDelta().y() / 50.0 : e->angleDelta().y() / 120.0);
+            zoomAt(e->position(), std::pow(1.2, steps));
+        }
     }
+}
+
+QPointF ChainView::origin(double k) const {
+    return QPointF(canvasRect_.center().x() - layoutSize_.width() * k / 2, canvasRect_.center().y() - layoutSize_.height() * k / 2) + pan_;
+}
+
+// At least a corner of the chain stays in the canvas.
+void ChainView::clampPan() {
+    if (layoutSize_.isEmpty() || canvasRect_.isEmpty())
+        return;
+    const double k = scaleNow(), w = layoutSize_.width() * k, h = layoutSize_.height() * k;
+    const double keepX = std::min(90 * u, w), keepY = std::min(90 * u, h);
+    const QPointF o = origin(k);
+    const double x = std::clamp(o.x(), canvasRect_.left() + keepX - w, canvasRect_.right() - keepX);
+    const double y = std::clamp(o.y(), canvasRect_.top() + keepY - h, canvasRect_.bottom() - keepY);
+    pan_ += QPointF(x, y) - o;
+}
+
+void ChainView::zoomAt(QPointF pos, double factor) {
+    if (layoutSize_.isEmpty())
+        return;
+    const double k0 = scaleNow();
+    const QPointF at = (pos - origin(k0)) / k0; // stays under pos
+    const double most = std::max(4.0, 3 * u / fitK_);
+    zoom_ = std::clamp(zoom_ * factor, 0.5, most);
+    const double k = scaleNow();
+    pan_ += pos - at * k - origin(k);
+    clampPan();
+    update();
+}
+
+void ChainView::fit() {
+    zoom_ = 1;
+    pan_ = {};
+    update();
+}
+
+bool ChainView::event(QEvent* e) {
+    switch (e->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TouchCancel: {
+        auto* te = static_cast<QTouchEvent*>(e);
+        if (e->type() == QEvent::TouchBegin)
+            pinching_ = touchDone_ = false;
+        if (e->type() == QEvent::TouchCancel) {
+            pointerCancel();
+            pinching_ = false;
+            return true;
+        }
+        QVector<QPointF> down;
+        for (const QEventPoint& pt : te->points())
+            if (pt.state() != QEventPoint::Released)
+                down << pt.position();
+        if (down.size() >= 2) {
+            const QPointF mid = (down[0] + down[1]) / 2;
+            const double dist = std::max(1.0, QLineF(down[0], down[1]).length());
+            if (!pinching_ && canvasRect_.contains(mid)) {
+                // A second finger: whatever the first was doing stops, and the two zoom and pan.
+                pinching_ = touchDone_ = true;
+                pointerCancel();
+                panning_ = false;
+                pinchDist_ = dist;
+                pinchZoom_ = zoom_;
+                pinchAt_ = (mid - origin(scaleNow())) / scaleNow();
+            } else if (pinching_) {
+                zoom_ = std::clamp(pinchZoom_ * dist / pinchDist_, 0.5, std::max(4.0, 3 * u / fitK_));
+                const double k = scaleNow();
+                pan_ += mid - pinchAt_ * k - origin(k);
+                clampPan();
+                update();
+            }
+            return true;
+        }
+        if (touchDone_) {
+            // After two fingers, nothing until all are lifted.
+            if (e->type() == QEvent::TouchEnd)
+                pinching_ = false;
+            return true;
+        }
+        if (te->points().isEmpty())
+            return true;
+        const QPointF pos = te->points().first().position();
+        if (e->type() == QEvent::TouchBegin)
+            pointerPress(pos);
+        else if (e->type() == QEvent::TouchUpdate)
+            pointerMove(pos);
+        else
+            pointerRelease(pos);
+        return true;
+    }
+    case QEvent::NativeGesture: {
+        // A touchpad's pinch.
+        auto* ge = static_cast<QNativeGestureEvent*>(e);
+        if (ge->gestureType() == Qt::ZoomNativeGesture && canvasRect_.contains(ge->position())) {
+            zoomAt(ge->position(), 1 + ge->value());
+            return true;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return Surface::event(e);
 }
 
 void ChainView::paint(QPainter& p) {
@@ -281,22 +407,62 @@ void ChainView::sidebar(QPainter& p, const QRectF& r) {
 
 void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
     draw::card(p, r, 14 * u, color::panel, color::line);
-    // A dot grid, as the routing board has.
+    const Layout L(c);
+    // Fitted, the chain fills the canvas but is never larger than the
+    // design; the zoom and pan go on top.
+    canvasRect_ = r;
+    layoutSize_ = QSizeF(L.width(), L.height());
+    fitK_ = std::min({u, (r.width() - 8) / L.width(), (r.height() - 8) / L.height()});
+    clampPan();
+    const double k = scaleNow();
+    const QPointF origin = this->origin(k);
+    auto at = [&](QPointF pt) { return origin + pt * k; };
+
+    // A dot grid, as the routing board has, moving with the chain.
     p.save();
     p.setClipRect(r.adjusted(2, 2, -2, -2));
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(0x22, 0x22, 0x26));
-    const double step = 22 * u;
-    for (double y = r.top() + step / 2; y < r.bottom(); y += step)
-        for (double x = r.left() + step / 2; x < r.right(); x += step)
+    double step = 22 * k;
+    while (step < 11 * u)
+        step *= 2;
+    const double x0 = r.left() + std::fmod(std::fmod(origin.x() - r.left(), step) + step, step);
+    const double y0 = r.top() + std::fmod(std::fmod(origin.y() - r.top(), step) + step, step);
+    for (double y = y0; y < r.bottom(); y += step)
+        for (double x = x0; x < r.right(); x += step)
             p.drawEllipse(QPointF(x, y), 0.9 * u, 0.9 * u);
     p.restore();
 
-    const Layout L(c);
-    // Fit the chain into the canvas, never larger than the design.
-    const double k = std::min({u, (r.width() - 8) / L.width(), (r.height() - 8) / L.height()});
-    const QPointF origin(r.center().x() - L.width() * k / 2, r.center().y() - L.height() * k / 2);
-    auto at = [&](QPointF pt) { return origin + pt * k; };
+    // Open space: a drag pans, a double tap fits the chain again.
+    hit("canvas", r, {}, [this](QPointF pos, bool done) {
+        if (!panning_) {
+            panning_ = true;
+            panMoved_ = false;
+            panStart_ = pos;
+            panFrom_ = pan_;
+            return;
+        }
+        if (!done) {
+            if (!panMoved_ && QLineF(pos, panStart_).length() < 6 * u)
+                return;
+            panMoved_ = true;
+            pan_ = panFrom_ + (pos - panStart_);
+            clampPan();
+            update();
+            return;
+        }
+        panning_ = false;
+        if (panMoved_ || pinching_)
+            return;
+        const qint64 now = clock_.elapsed();
+        if (now - lastTapAt_ < 400 && QLineF(pos, lastTapPos_).length() < 30 * u) {
+            fit();
+            lastTapAt_ = -1000;
+        } else {
+            lastTapAt_ = now;
+            lastTapPos_ = pos;
+        }
+    });
 
     const bool playing = c.index == s.playing() && s.status.valid;
     const bool live = playing && !s.status.muted;
@@ -357,6 +523,7 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
     };
 
     p.save();
+    p.setClipRect(r.adjusted(1, 1, -1, -1));
     // Wires first, under the blocks.
     // A wire: straight along a row; an S-curve to a row below or above; by
     // the lane between rows when blocks are in the way (viaLane) or when it
@@ -479,9 +646,25 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
                     p.drawText(box, Qt::AlignCenter, "Act");
                 }
             }
-            hit(id, box.adjusted(-4, -4, 4, 4), [this, slot = pi.slot] { selectSlot(slot == slot_ ? -1 : slot); });
+            const QRectF tap = box.adjusted(-4, -4, 4, 4).intersected(r);
+            if (!tap.isEmpty())
+                hit(id, tap, [this, slot = pi.slot] { selectSlot(slot == slot_ ? -1 : slot); });
         }
     p.restore();
+
+    // Zoom out, fit, zoom in, at the bottom right; how big it is beside them.
+    const double bh = 38 * u, bw = 44 * u, gap = 6 * u, fitW = 56 * u;
+    double x = r.right() - 10 * u - bw;
+    const double y = r.bottom() - 10 * u - bh;
+    button(p, "zoom in", QRectF(x, y, bw, bh), "+", [this] { zoomAt(canvasRect_.center(), 1.25); }, color::text, color::border2, color::panel2, 20 * u);
+    x -= gap + fitW;
+    button(p, "fit", QRectF(x, y, fitW, bh), "Fit", [this] { fit(); }, color::text, color::border2, color::panel2, 14 * u);
+    x -= gap + bw;
+    button(p, "zoom out", QRectF(x, y, bw, bh), "−", [this] { zoomAt(canvasRect_.center(), 1 / 1.25); }, color::text, color::border2, color::panel2,
+           20 * u);
+    p.setPen(color::muted);
+    p.setFont(typeface(Face::Mono, 12 * u));
+    p.drawText(QRectF(x - 70 * u, y, 62 * u, bh), Qt::AlignRight | Qt::AlignVCenter, QString("%1%").arg(std::lround(k / u * 100)));
 }
 
 void ChainView::legend(QPainter& p, const QRectF& r) {
@@ -601,23 +784,125 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
 
     p.setFont(label);
     p.setPen(color::muted);
-    p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "PARAMETERS");
+    p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, showAll_ ? "ALL PARAMETERS" : "PARAMETERS");
     y += 28 * u;
 
     const QJsonArray params = plugin_.value("params").toArray();
-    const QRectF list(r.left(), y, r.width(), r.bottom() - y - 10 * u);
-    listRect_ = list;
+    if (search_ && !showAll_)
+        search_->hide();
     if (plugin_.isEmpty() || params.isEmpty()) {
         p.setPen(color::muted);
         p.setFont(typeface(Face::Text, 14 * u));
-        p.drawText(list.adjusted(pad, 0, -pad, 0), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+        p.drawText(QRectF(r.left() + pad, y, w, r.bottom() - y), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
                    plugin_.isEmpty() ? "Asking the plug-in…" : "This plug-in shows no parameters.");
         return;
     }
-    const double rowH = 50 * u;
-    scrollMax_ = std::max(0.0, params.size() * rowH - list.height());
+    const QRectF area(r.left(), y, r.width(), r.bottom() - y - 14 * u);
+    if (showAll_)
+        allParams(p, area, params, pi->format);
+    else
+        shownList(p, area, params, pi->format);
+}
+
+namespace {
+
+QHash<int, QJsonObject> byId(const QJsonArray& params) {
+    QHash<int, QJsonObject> out;
+    for (const QJsonValue& v : params)
+        out.insert(v.toObject().value("id").toInt(), v.toObject());
+    return out;
+}
+
+// What moves a parameter from outside, as the panel says it.
+QString tieText(const QJsonObject& q) {
+    const QJsonArray tied = q.value("tied").toArray();
+    if (tied.isEmpty())
+        return {};
+    const QJsonObject t = tied[0].toObject();
+    if (t.contains("trigger"))
+        return "set by " + t.value("trigger").toString();
+    const QString control = t.value("control").toString(), follows = t.value("follows").toString();
+    if (!follows.isEmpty())
+        return "follows " + follows;
+    if (t.value("pedal").toInt() > 0)
+        return QString("%1, pedal %2").arg(control).arg(t.value("pedal").toInt());
+    return "moved by " + control;
+}
+
+} // namespace
+
+bool ChainView::tied(int id) const {
+    for (const QJsonValue& v : plugin_.value("params").toArray())
+        if (v.toObject().value("id").toInt() == id)
+            return !v.toObject().value("tied").toArray().isEmpty();
+    return false;
+}
+
+QVector<int> ChainView::shownParams() const {
+    const QJsonArray params = plugin_.value("params").toArray();
+    QSet<int> have;
+    for (const QJsonValue& v : params)
+        have.insert(v.toObject().value("id").toInt());
+    QVector<int> ids;
+    const QJsonValue shown = shownPending_ ? QJsonValue(pendingShown_) : plugin_.value("shown");
+    if (shown.isArray()) {
+        for (const QJsonValue& v : shown.toArray())
+            if (have.contains(v.toInt()) && !ids.contains(v.toInt()))
+                ids << v.toInt();
+    } else {
+        // Nothing picked yet: the first few, in the plug-in's order.
+        for (int i = 0; i < params.size() && ids.size() < 8; ++i)
+            ids << params[i].toObject().value("id").toInt();
+    }
+    // What a pedal or MIDI moves always shows.
+    for (const QJsonValue& v : params) {
+        const QJsonObject q = v.toObject();
+        if (!q.value("tied").toArray().isEmpty() && !ids.contains(q.value("id").toInt()))
+            ids << q.value("id").toInt();
+    }
+    return ids;
+}
+
+void ChainView::setShown(const QVector<int>& ids) {
+    if (slot_ < 0 || chain_ < 0)
+        return;
+    pendingShown_ = {};
+    for (int id : ids)
+        pendingShown_.append(id);
+    ++shownPending_;
+    const int chain = chain_, slot = slot_;
+    s.link.request({{"cmd", "shown"}, {"chain", chain}, {"slot", slot}, {"params", pendingShown_}}, [this, chain, slot](const QJsonObject& r) {
+        if (chain != chain_ || slot != slot_)
+            return;
+        s.check(r, "The picks were not kept");
+        if (--shownPending_ <= 0) {
+            shownPending_ = 0;
+            plugin_["shown"] = pendingShown_;
+        }
+        update();
+    });
+    update();
+}
+
+void ChainView::setShowAll(bool all) {
+    if (all == showAll_)
+        return;
+    showAll_ = all;
+    scroll_ = 0;
+    dragRow_ = -1;
+    if (search_ && !all) {
+        search_->clear();
+        search_->hide();
+    }
+    update();
+}
+
+// The list scrolls by a drag anywhere but on a slider or a grip (touch has
+// no wheel), and by the wheel.
+void ChainView::scrollable(const QRectF& list, double contentH) {
+    listRect_ = list;
+    scrollMax_ = std::max(0.0, contentH - list.height());
     scroll_ = std::clamp(scroll_, 0.0, scrollMax_);
-    // A drag anywhere in the list but on a slider scrolls it (touch has no wheel).
     hit("params", list, {}, [this](QPointF pos, bool done) {
         if (scrollStartY_ < 0 || done) {
             scrollStartY_ = done ? -1 : pos.y();
@@ -627,47 +912,306 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         scroll_ = std::clamp(scrollFrom_ - (pos.y() - scrollStartY_), 0.0, scrollMax_);
         update();
     });
+}
+
+// One parameter: its name (and what moves it, purple), its slider and its
+// value. The row's first 40 units are left for a grip or a checkbox.
+void ChainView::paramRow(QPainter& p, const QRectF& row, const QRectF& list, const QJsonObject& q, const QString& format, bool all) {
+    Q_UNUSED(all);
+    const double pad = 18 * u, lead = 40 * u, valueW = 58 * u;
+    const double w = row.width() - 2 * pad - lead;
+    const double left = row.left() + pad + lead, nameW = w * 0.4;
+    const int id = q.value("id").toInt();
+    const double lo = q.value("min").toDouble(), hi = q.value("max").toDouble(1);
+    const double value = id == draggingParam_ ? draggingValue_ : q.value("value").toDouble(q.value("default").toDouble());
+    const double f = hi > lo ? std::clamp((value - lo) / (hi - lo), 0.0, 1.0) : 0;
+    QString text = q.value("text").toString();
+    if (text.isEmpty() || id == draggingParam_)
+        text = format == "vst3" ? QString("%1%").arg(std::lround(value * 100)) : QString::number(value, 'g', 3);
+    // What moves it, purple, on a line of its own under the rest.
+    const QString tie = tieText(q);
+    const double cy = tie.isEmpty() ? row.center().y() : row.top() + row.height() * 0.38;
+    p.setPen(color::text);
+    p.setFont(typeface(Face::Text, 14 * u));
+    draw::text(p, QRectF(left, cy - 12 * u, nameW - 8 * u, 24 * u), Qt::AlignLeft | Qt::AlignVCenter, q.value("name").toString());
+    if (!tie.isEmpty()) {
+        p.setPen(color::purple);
+        p.setFont(typeface(Face::Text, 11.5 * u));
+        draw::text(p, QRectF(left, cy + 9 * u, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, tie);
+    }
+    const QRectF track(left + nameW, cy - 3 * u, w - nameW - valueW - 8 * u, 6 * u);
+    p.setPen(Qt::NoPen);
+    p.setBrush(color::line);
+    p.drawRoundedRect(track, 3 * u, 3 * u);
+    p.setBrush(tie.isEmpty() ? color::orange : color::purple);
+    p.drawRoundedRect(QRectF(track.left(), track.top(), std::max(track.height(), track.width() * f), track.height()), 3 * u, 3 * u);
+    p.setPen(color::text2);
+    p.setFont(typeface(Face::Mono, 12 * u));
+    draw::text(p, QRectF(track.right() + 8 * u, cy - 12 * u, valueW, 24 * u), Qt::AlignRight | Qt::AlignVCenter, text);
+    // The slider takes the whole row's height, so a finger finds it.
+    const QRectF grab(track.left() - 6 * u, row.top() + 4 * u, track.width() + 12 * u, row.height() - 8 * u);
+    if (grab.intersects(list) && dragRow_ < 0)
+        hit(QString("param %1").arg(id), grab.intersected(list), {}, [this, q, track, lo, hi](QPointF pos, bool done) {
+            const double f = std::clamp((pos.x() - track.left()) / track.width(), 0.0, 1.0);
+            setParam(q, lo + f * (hi - lo), done);
+        });
+}
+
+// The picked parameters, each with a grip to move it up or down, then the
+// way to all of them.
+void ChainView::shownList(QPainter& p, const QRectF& area, const QJsonArray& params, const QString& format) {
+    const double pad = 18 * u, btnH = 46 * u, rowH = 54 * u;
+    const QRectF list(area.left(), area.top(), area.width(), area.height() - btnH - 12 * u);
+    const QVector<int> ids = shownParams();
+    const QHash<int, QJsonObject> all = byId(params);
+    scrollable(list, ids.size() * rowH);
+    if (ids.isEmpty()) {
+        p.setPen(color::muted);
+        p.setFont(typeface(Face::Text, 14 * u));
+        p.drawText(list.adjusted(pad, 0, -pad, 0), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                   "None picked. Show all parameters and check the ones to see here.");
+    }
+    const int n = ids.size();
+    auto targetOf = [this, list, rowH, n](double y) {
+        return std::clamp(static_cast<int>(std::lround((y - dragGrab_ - list.top() + scroll_) / rowH)), 0, std::max(0, n - 1));
+    };
+    const int target = dragRow_ >= 0 && dragRow_ < n ? targetOf(dragY_) : -1;
     p.save();
     p.setClipRect(list);
-    const double nameW = w * 0.36, valueW = 62 * u;
-    for (int i = 0; i < params.size(); ++i) {
-        const double ry = list.top() + i * rowH - scroll_;
-        if (ry + rowH < list.top() || ry > list.bottom())
+    auto grip = [&](const QRectF& row, bool lifted) {
+        p.setPen(QPen(lifted ? color::orange : color::dim, 2 * u, Qt::SolidLine, Qt::RoundCap));
+        const double gx = row.left() + pad + 4 * u, gy = row.center().y();
+        for (int k = -1; k <= 1; ++k)
+            p.drawLine(QPointF(gx, gy + k * 6 * u), QPointF(gx + 18 * u, gy + k * 6 * u));
+    };
+    int place = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i == dragRow_)
             continue;
+        if (place == target)
+            ++place;
+        const QRectF row(area.left(), list.top() + place * rowH - scroll_, area.width(), rowH);
+        ++place;
+        if (row.bottom() < list.top() || row.top() > list.bottom())
+            continue;
+        paramRow(p, row, list, all.value(ids[i]), format, false);
+        grip(row, false);
+        // The grip moves the row: lift it, drag it to its place, let go.
+        const QRectF gripRect = QRectF(row.left(), row.top(), pad + 40 * u, row.height()).intersected(list);
+        if (!gripRect.isEmpty())
+            hit(QString("move %1").arg(ids[i]), gripRect, {}, [this, i, row, ids, targetOf, list](QPointF pos, bool done) {
+                if (dragRow_ < 0) {
+                    dragRow_ = i;
+                    dragGrab_ = pos.y() - row.top();
+                    dragY_ = pos.y();
+                    update();
+                    return;
+                }
+                dragY_ = pos.y();
+                // Near an end of the list, it scrolls.
+                if (pos.y() < list.top() + 24 * u)
+                    scroll_ = std::max(0.0, scroll_ - 10 * u);
+                else if (pos.y() > list.bottom() - 24 * u)
+                    scroll_ = std::min(scrollMax_, scroll_ + 10 * u);
+                if (done) {
+                    QVector<int> order = ids;
+                    const int from = dragRow_, to = targetOf(dragY_);
+                    dragRow_ = -1;
+                    if (from != to) {
+                        order.move(from, to);
+                        setShown(order);
+                    }
+                }
+                update();
+            });
+    }
+    if (target >= 0) {
+        // The row being moved, lifted, under the finger.
+        const QRectF row(area.left(), dragY_ - dragGrab_, area.width(), rowH);
+        draw::card(p, row.adjusted(8 * u, 2 * u, -8 * u, -2 * u), 10 * u, color::raised, color::orange);
+        paramRow(p, row, list, all.value(ids[dragRow_]), format, false);
+        grip(row, true);
+    }
+    p.restore();
+    if (scrollMax_ > 0) {
+        const double bh = list.height() * list.height() / (list.height() + scrollMax_);
+        const double by = list.top() + (list.height() - bh) * scroll_ / scrollMax_;
+        p.fillRect(QRectF(area.right() - 5 * u, by, 3 * u, bh), color::border2);
+    }
+    button(p, "show all", QRectF(area.left() + pad, area.bottom() - btnH, area.width() - 2 * pad, btnH),
+           QString("Show all parameters (%1)").arg(params.size()), [this] { setShowAll(true); }, color::orange, color::border2, color::panel2, 15 * u);
+}
+
+// Every parameter in the plug-in's order, a checkmark on those shown;
+// sections (a plug-in's own groups) fold, and a search narrows a long list.
+void ChainView::allParams(QPainter& p, const QRectF& area, const QJsonArray& params, const QString& format) {
+    const double pad = 18 * u, rowH = 54 * u, headH = 40 * u;
+    double y = area.top();
+    button(p, "collapse", QRectF(area.left() + pad, y, area.width() - 2 * pad, 44 * u), "Collapse all parameters", [this] { setShowAll(false); },
+           color::orange, color::orange, color::panel2, 15 * u);
+    y += 54 * u;
+    QString filter;
+    if (params.size() > 16) {
+        if (!search_) {
+            search_ = new QLineEdit(this);
+            search_->setPlaceholderText("Search parameters");
+            search_->setClearButtonEnabled(true);
+            connect(search_, &QLineEdit::textChanged, this, [this] {
+                scroll_ = 0;
+                update();
+            });
+        }
+        const QRect g = QRectF(area.left() + pad, y, area.width() - 2 * pad, 40 * u).toRect();
+        if (search_->geometry() != g) {
+            search_->setGeometry(g);
+            search_->setFont(typeface(Face::Text, 15 * u));
+            search_->setStyleSheet(QString("QLineEdit { background: %1; color: %2; border: 1px solid %3; border-radius: %4px; padding: 0 %5px; }"
+                                           "QLineEdit:focus { border-color: %6; }")
+                                       .arg(color::panel2.name(), color::text.name(), color::border2.name())
+                                       .arg(std::lround(8 * u))
+                                       .arg(std::lround(10 * u))
+                                       .arg(color::orange.name()));
+        }
+        search_->show();
+        filter = search_->text().trimmed();
+        y += 50 * u;
+    } else if (search_) {
+        search_->hide();
+    }
+    const QRectF list(area.left(), y, area.width(), area.bottom() - y);
+    const QVector<int> ids = shownParams();
+
+    // Sections, when the plug-in has more than one.
+    QSet<QString> modules;
+    for (const QJsonValue& v : params)
+        modules.insert(v.toObject().value("module").toString());
+    const bool sections = modules.size() > 1;
+    struct Item {
+        QString section; // a header when q is empty
+        QJsonObject q;
+        int count = 0;
+    };
+    QVector<Item> items;
+    auto folded = [&](const QString& m) {
+        if (!filter.isEmpty() || closed_.contains(m))
+            return !filter.isEmpty() ? false : true;
+        if (opened_.contains(m) || params.size() <= 40)
+            return false;
+        // A long list starts folded, but for the sections with something shown.
+        for (const QJsonValue& v : params)
+            if (v.toObject().value("module").toString() == m && ids.contains(v.toObject().value("id").toInt()))
+                return false;
+        return true;
+    };
+    int header = -1;
+    QString current;
+    for (int i = 0; i < params.size(); ++i) {
         const QJsonObject q = params[i].toObject();
-        const int id = q.value("id").toInt();
-        const double lo = q.value("min").toDouble(), hi = q.value("max").toDouble(1);
-        const double value = id == draggingParam_ ? draggingValue_ : q.value("value").toDouble(q.value("default").toDouble());
-        const double f = hi > lo ? std::clamp((value - lo) / (hi - lo), 0.0, 1.0) : 0;
-        QString text = q.value("text").toString();
-        if (text.isEmpty() || id == draggingParam_)
-            text = pi->format == "vst3" ? QString("%1%").arg(std::lround(value * 100)) : QString::number(value, 'g', 3);
-        p.setPen(color::text);
+        const QString m = q.value("module").toString();
+        if (!filter.isEmpty() && !q.value("name").toString().contains(filter, Qt::CaseInsensitive))
+            continue;
+        if (sections && (header < 0 || m != current)) {
+            current = m;
+            header = items.size();
+            items.append({m, {}, 0});
+        }
+        if (header >= 0)
+            ++items[header].count;
+        if (!sections || !folded(m))
+            items.append({m, q, 0});
+    }
+    double contentH = 0;
+    for (const Item& it : items)
+        contentH += it.q.isEmpty() ? headH : rowH;
+    scrollable(list, contentH);
+    if (items.isEmpty()) {
+        p.setPen(color::muted);
         p.setFont(typeface(Face::Text, 14 * u));
-        draw::text(p, QRectF(r.left() + pad, ry, nameW - 8 * u, rowH), Qt::AlignLeft | Qt::AlignVCenter, q.value("name").toString());
-        const QRectF track(r.left() + pad + nameW, ry + rowH / 2 - 3 * u, w - nameW - valueW - 8 * u, 6 * u);
-        p.setPen(Qt::NoPen);
-        p.setBrush(color::line);
-        p.drawRoundedRect(track, 3 * u, 3 * u);
-        p.setBrush(color::orange);
-        p.drawRoundedRect(QRectF(track.left(), track.top(), std::max(track.height(), track.width() * f), track.height()), 3 * u, 3 * u);
-        p.setPen(color::text2);
-        p.setFont(typeface(Face::Mono, 12 * u));
-        draw::text(p, QRectF(track.right() + 8 * u, ry, valueW, rowH), Qt::AlignRight | Qt::AlignVCenter, text);
-        // The slider takes the whole row's height, so a finger finds it.
-        const QRectF grab(track.left() - 6 * u, ry + 4 * u, track.width() + 12 * u, rowH - 8 * u);
-        if (grab.intersects(list))
-            hit(QString("param %1").arg(id), grab.intersected(list), {}, [this, q, track, lo, hi](QPointF pos, bool done) {
-                const double f = std::clamp((pos.x() - track.left()) / track.width(), 0.0, 1.0);
-                setParam(q, lo + f * (hi - lo), done);
+        p.drawText(list.adjusted(pad, 0, -pad, 0), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, "No parameter is called that.");
+    }
+    p.save();
+    p.setClipRect(list);
+    double ry = list.top() - scroll_;
+    for (const Item& it : items) {
+        const double h = it.q.isEmpty() ? headH : rowH;
+        const QRectF row(area.left(), ry, area.width(), h);
+        ry += h;
+        if (row.bottom() < list.top() || row.top() > list.bottom())
+            continue;
+        if (it.q.isEmpty()) {
+            // A section: tap to fold or unfold it.
+            const bool f = folded(it.section);
+            const QString id = "section " + it.section;
+            p.setPen(color::text2);
+            p.setFont(typeface(Face::Text, 13 * u, QFont::DemiBold));
+            const QString name = it.section.isEmpty() ? "Other" : it.section;
+            draw::text(p, row.adjusted(pad + 22 * u, 0, -pad - 40 * u, 0), Qt::AlignLeft | Qt::AlignVCenter, name);
+            p.setPen(color::muted);
+            p.setFont(typeface(Face::Mono, 12 * u));
+            p.drawText(row.adjusted(0, 0, -pad, 0), Qt::AlignRight | Qt::AlignVCenter, QString::number(it.count));
+            // A triangle: right when folded, down when open.
+            QPolygonF tri;
+            const QPointF c(row.left() + pad + 7 * u, row.center().y());
+            if (f)
+                tri << c + QPointF(-3 * u, -6 * u) << c + QPointF(5 * u, 0) << c + QPointF(-3 * u, 6 * u);
+            else
+                tri << c + QPointF(-6 * u, -3 * u) << c + QPointF(6 * u, -3 * u) << c + QPointF(0, 5 * u);
+            p.setPen(Qt::NoPen);
+            p.setBrush(color::muted);
+            p.drawPolygon(tri);
+            p.setPen(QPen(color::line, 1));
+            p.drawLine(QPointF(row.left() + pad, row.bottom() - 0.5), QPointF(row.right() - pad, row.bottom() - 0.5));
+            const QRectF tap = row.intersected(list);
+            if (!tap.isEmpty() && filter.isEmpty())
+                hit(id, tap, [this, m = it.section, f] {
+                    if (f) {
+                        closed_.remove(m);
+                        opened_.insert(m);
+                    } else {
+                        opened_.remove(m);
+                        closed_.insert(m);
+                    }
+                    update();
+                });
+            continue;
+        }
+        const int pid = it.q.value("id").toInt();
+        const bool on = ids.contains(pid), locked = !it.q.value("tied").toArray().isEmpty();
+        paramRow(p, row, list, it.q, format, true);
+        // The checkbox: orange when shown, purple and fixed when a pedal or MIDI moves it.
+        const double bs = 22 * u;
+        const QRectF box(row.left() + pad + 2 * u, row.center().y() - bs / 2, bs, bs);
+        const QColor fill = locked ? color::purple : on ? color::orange : QColor();
+        draw::card(p, box, 5 * u, fill, locked ? color::purple : on ? color::orange : color::border2);
+        if (on || locked) {
+            QPainterPath tick;
+            tick.moveTo(box.left() + bs * 0.24, box.top() + bs * 0.52);
+            tick.lineTo(box.left() + bs * 0.43, box.top() + bs * 0.7);
+            tick.lineTo(box.left() + bs * 0.78, box.top() + bs * 0.32);
+            p.setPen(QPen(locked ? color::purpleBg : color::onOrange, 2.4 * u, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            p.drawPath(tick);
+        }
+        const QRectF tap = QRectF(row.left(), row.top(), pad + 40 * u, row.height()).intersected(list);
+        if (!tap.isEmpty())
+            hit(QString("pick %1").arg(pid), tap, [this, pid, locked, name = it.q.value("name").toString()] {
+                if (locked) {
+                    emit s.message(name + " is moved by a pedal or MIDI, so it always shows", false);
+                    return;
+                }
+                QVector<int> order = shownParams();
+                if (order.contains(pid))
+                    order.removeAll(pid);
+                else
+                    order.append(pid);
+                setShown(order);
             });
     }
     p.restore();
     if (scrollMax_ > 0) {
-        // Where in the list this is.
         const double bh = list.height() * list.height() / (list.height() + scrollMax_);
         const double by = list.top() + (list.height() - bh) * scroll_ / scrollMax_;
-        p.fillRect(QRectF(r.right() - 5 * u, by, 3 * u, bh), color::border2);
+        p.fillRect(QRectF(area.right() - 5 * u, by, 3 * u, bh), color::border2);
     }
 }
 

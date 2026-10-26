@@ -84,6 +84,8 @@ A `.cue` file is a zip:
   with `~`, so they work for another user name. `label` is what the mappings
   call the plug-in. `params` are set after the state, by parameter id
   (`cue params` lists them).
+  `shown` is the parameters the app shows under the selected block, by id
+  in the order picked there; without it the app shows the first eight.
 - **tuner** is the built-in tuner: the input it listens to and its settings,
   as `[tuner]` in [config.md](config.md).
 - The mapping strings (`on_select`, controls, triggers, groups, `fcb`) are the

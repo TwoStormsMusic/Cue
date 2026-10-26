@@ -185,6 +185,7 @@ struct Show::Impl {
         int pedal;
         bool hasFollow = false;
         Input follow;
+        std::string followText;
         double drivenValue = std::numeric_limits<double>::quiet_NaN(); // last value sent to drives
     };
 
@@ -1096,6 +1097,7 @@ struct Show::Impl {
                     return false;
                 }
                 k.hasFollow = true;
+                k.followText = cs.follows.text;
             }
             controls.push_back(k);
         }
@@ -1473,6 +1475,27 @@ std::string Show::status() const {
     for (const auto& k : d_->controls)
         s += "  " + k.name + ": " + Impl::text(k);
     return s;
+}
+
+std::vector<Show::ParamTie> Show::ties(int chain, size_t slot) const {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::vector<ParamTie> out;
+    auto names = [&](const std::vector<int>& plugins) {
+        for (int p : plugins)
+            if (d_->plugins[p].chain == chain && d_->plugins[p].slot == slot)
+                return true;
+        return false;
+    };
+    for (const auto& d : d_->drives)
+        if (names(d.plugins)) {
+            const auto& k = d_->controls[d.control];
+            out.push_back({d.paramId, k.name, k.followText, "", k.pedal});
+        }
+    for (const auto& t : d_->triggers)
+        for (const auto& a : t.actions)
+            if (a.type == Impl::Action::Type::Param && names(a.plugins))
+                out.push_back({a.paramId, "", "", t.name, 0});
+    return out;
 }
 
 } // namespace cue

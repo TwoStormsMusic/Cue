@@ -216,20 +216,19 @@ void StageView::levels(QPainter& p, const QRectF& r) {
 }
 
 void StageView::tunerStrip(QPainter& p, const QRectF& r) {
-    // The TwoStorms Tuner, small: the note at the left, the needle and the
-    // strobe across the rest; red-framed while the inputs are muted.
+    // The TwoStorms Tuner, small: the note with its chevrons at the left and
+    // the needle across the rest, nothing else, so it reads at a glance;
+    // red-framed while the inputs are muted.
     const TunerReading& t = s.tuner;
     tunerdraw::pane(p, r, s.status.valid && s.status.muted, u);
     if (isPressed("tuner strip"))
         draw::card(p, r, 14 * u, QColor(255, 255, 255, 12), QColor());
     hit("tuner strip", r, [this] { emit navigate("tuner"); });
     const double pad = 10 * u, h = r.height() - 2 * pad;
-    const double noteW = std::min(r.width() * 0.34, h * 2.45 + 8 * u);
-    tunerdraw::note(p, QRectF(r.left() + pad, r.top() + pad, noteW, h), t, u);
+    const double noteW = std::min(r.width() * 0.36, h * 3.4 + 8 * u);
+    tunerdraw::note(p, QRectF(r.left() + pad, r.top() + pad, noteW, h), t, u, false);
     const double x = r.left() + pad + noteW + 8 * u, w = r.right() - pad - x;
-    const double strobeH = std::max(12 * u, h * 0.3), meterH = h - strobeH - 6 * u;
-    tunerdraw::meter(p, QRectF(x, r.top() + pad, w, meterH), t, u, false);
-    tunerdraw::strobe(p, QRectF(x, r.bottom() - pad - strobeH, w, strobeH), t, s.strobePhase, u);
+    tunerdraw::meter(p, QRectF(x, r.top() + pad, w, h), t, u, false);
 }
 
 void StageView::chainButtons(QPainter& p, const QRectF& r, const QVector<int>& chains, int rows) {

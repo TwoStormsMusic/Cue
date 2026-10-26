@@ -152,6 +152,9 @@ TEST(cue_file_round_trips_a_whole_performance) {
     CHECK_MSG(parseConfigText(kPerformance(dir), dir + "/perf.ini", ini, &err), "%s", err.c_str());
     const std::string path = dir + "/perf.cue";
     std::vector<std::string> warnings;
+    // The parameters the app picked for the amp, in its order.
+    ini.scenes[0].chains[0].lines[0].plugins[1].shown = {7, 2, 40};
+    ini.scenes[0].chains[0].lines[0].plugins[1].shownSet = true;
     CHECK_MSG(saveCue(ini, path, &err, &warnings), "%s", err.c_str());
     CHECK(warnings.empty());
     // The state files are inside it: removing them changes nothing.
@@ -185,6 +188,8 @@ TEST(cue_file_round_trips_a_whole_performance) {
     CHECK(gain.muteOnBypass); // the [switching] default, written out
     const PluginSpec& amp = punk.lines[0].plugins[1];
     CHECK(amp.kind == "vst3" && amp.state.size() == 7 && bytes(amp.controllerState) == "ctrl" && !amp.muteOnBypass);
+    CHECK(amp.shownSet && amp.shown == (std::vector<uint32_t>{7, 2, 40}));
+    CHECK(!gain.shownSet && gain.shown.empty());
     const PluginSpec& echo = punk.lines[0].plugins[2];
     CHECK(echo.kind == "builtin" && echo.args == (std::vector<std::string>{"delay", "300", "0.4", "0.3"}));
     CHECK(echo.bypassed && !echo.midi && echo.label == "Echo");
