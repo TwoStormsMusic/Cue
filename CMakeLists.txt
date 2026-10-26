@@ -75,6 +75,7 @@ add_executable(cue
   src/app/service.cpp
   src/app/rpp.cpp
   src/app/rpp_export.cpp
+  src/app/realearn.cpp
   src/app/convert.cpp
   src/control/show.cpp
   src/app/cpu.cpp
@@ -108,7 +109,7 @@ target_sources(cue_test_vst3 PRIVATE
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_rpp_export.cpp tests/test_cuefile.cpp tests/test_service.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/rpp_export.cpp src/app/convert.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_rpp_export.cpp tests/test_cuefile.cpp tests/test_service.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/rpp_export.cpp src/app/realearn.cpp src/app/convert.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -132,6 +133,7 @@ if(CUE_BUILD_CONVERTER)
       src/app/convert.cpp
       src/app/rpp.cpp
       src/app/rpp_export.cpp
+      src/app/realearn.cpp
       src/app/config.cpp
       src/app/cuefile.cpp
     )

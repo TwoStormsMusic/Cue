@@ -1,5 +1,7 @@
 #include "rpp_export.h"
 
+#include "realearn.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -83,6 +85,8 @@ std::string quoted(const std::string& s) {
     return "`" + t + "`";
 }
 
+std::string bare(const std::string& guid) { return guid.size() > 2 ? guid.substr(1, guid.size() - 2) : guid; }
+
 bool readFile(const std::string& path, std::vector<uint8_t>& data) {
     std::ifstream f(path, std::ios::binary);
     if (!f)
@@ -139,6 +143,10 @@ struct Writer {
     std::string* error;
     std::map<std::string, std::string> vst3Ids;
     std::ostringstream rpp;
+    // What the pedals need to find: each chain's track and plug-in by GUID.
+    std::vector<RppChain> chainRefs;
+    std::vector<RppFx> fxRefs;
+    std::string curChain, curTrack;
     // What was left out, with the chains it was in, in order.
     std::vector<std::pair<std::string, std::vector<std::string>>> left;
 
@@ -264,6 +272,7 @@ struct Writer {
             out.notes.push_back(chain + ": " + label + ": bypass_mode mute has no REAPER equivalent; bypassing it there passes its input");
         o << "      FXID " << guid(seed) << "\n      WAK 0 0\n";
         rpp << o.str();
+        fxRefs.push_back({curChain, label, bare(guid(seed)), curTrack});
         ++out.plugins;
         return true;
     }
@@ -317,6 +326,9 @@ struct Writer {
         }
 
         const std::string id = guid("track " + scene.name + "\n" + c.name);
+        curChain = c.name;
+        curTrack = bare(id);
+        chainRefs.push_back({scene.name, c.name, curTrack});
         rpp << "  <TRACK " << id << "\n";
         rpp << "    NAME " << quoted(trackName) << "\n";
         rpp << "    VOLPAN 1 0 -1 -1 1\n";
@@ -398,6 +410,7 @@ struct Writer {
         rpp << "  SAMPLERATE " << config.audio.rate << " 0 0\n";
         rpp << "  TEMPO 120 4 4 0\n";
         rpp << "  MASTER_NCH 2 2\n";
+        rpp << cueMappingNotes(config);
         const bool folders = config.scenes.size() > 1;
         bool first = true;
         for (const SceneSpec& s : config.scenes) {
@@ -412,6 +425,11 @@ struct Writer {
                     return false;
                 first = false;
             }
+        }
+        const std::string pedals = realearnTrack(config, chainRefs, fxRefs, out.notes);
+        if (!pedals.empty()) {
+            rpp << pedals;
+            ++out.tracks;
         }
         rpp << ">\n";
         return true;
@@ -441,8 +459,8 @@ bool exportRpp(const Config& config, RppExport& out, std::string* error, const s
     for (const auto& s : config.scenes)
         chains += s.chains.size();
     if (chains > 1)
-        out.notes.push_back("REAPER plays every track at once: all chains but the first are muted, unmute one to play it");
-    out.notes.push_back("warm chains, crossfades and pedals are not in the REAPER project");
+        out.notes.push_back("REAPER plays every track at once: all chains but the first start muted, and selecting a chain (its pedal in ReaLearn) unmutes it");
+    out.notes.push_back("warm chains and crossfades are not in the REAPER project");
     out.text = w.rpp.str();
     return true;
 }
