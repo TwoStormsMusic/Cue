@@ -616,6 +616,157 @@ private slots:
         QCOMPARE(link.last("shown").value("params").toArray().first().toInt(), 102);
         QCOMPARE(v->shownParams().last(), 112);
         QCOMPARE(link.last("shown").value("slot").toInt(), 1);
+        // Undo puts it back.
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("shown").value("params").toArray().first().toInt(), 100);
+        QCOMPARE(v->shownParams().first(), 100);
+    }
+
+    void chain_view_double_taps_play_chains_and_switch_plugins() {
+        FakeLink link;
+        auto count = [&link](const QString& cmd) {
+            int n = 0;
+            for (const QJsonObject& r : link.sent)
+                n += r.value("cmd").toString() == cmd;
+            return n;
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        v->grab();
+        // A chain in the list: one tap shows it, two play it.
+        click(v, v->hitRect("show 2"));
+        QCOMPARE(v->shownChain(), 2);
+        QCOMPARE(count("select"), 0);
+        v->grab();
+        click(v, v->hitRect("show 0"));
+        v->grab();
+        click(v, v->hitRect("show 0"));
+        QCOMPARE(v->shownChain(), 0);
+        QCOMPARE(count("select"), 1);
+        QCOMPARE(link.last("select").value("index").toInt(), 0);
+
+        // Not playing yet (the engine has not said so), its wires are green
+        // all the same: they would carry sound if it played.
+        auto greenBetween = [v](const QString& a, const QString& b) {
+            const QImage img = v->grab().toImage();
+            const QRectF ra = v->hitRect(a), rb = v->hitRect(b);
+            const int x = static_cast<int>((ra.right() + rb.left()) / 2) * img.devicePixelRatio();
+            for (int dy = -3; dy <= 3; ++dy) {
+                const QColor c = img.pixelColor(x, static_cast<int>(ra.center().y() + dy) * img.devicePixelRatio());
+                if (c.green() > 150 && c.red() < 150)
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY(s.playing() != 0);
+        QVERIFY2(greenBetween("block 0", "block 1"), "the wire of a chain not playing is not green");
+        shot(v, "chains-not-playing");
+        // With the inputs muted, nothing carries sound.
+        fill(s, true);
+        QVERIFY(!greenBetween("block 0", "block 1"));
+        fill(s);
+
+        // A plug-in: two taps switch it off and leave it selected.
+        click(v, v->hitRect("show 1"));
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        QCOMPARE(v->selectedSlot(), 0);
+        QCOMPARE(count("bypass"), 0);
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        QCOMPARE(count("bypass"), 1);
+        QCOMPARE(link.last("bypass").value("slot").toInt(), 0);
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), true);
+        QCOMPARE(v->selectedSlot(), 0);
+        // The Wah is bypassed: two taps switch it on.
+        v->grab();
+        click(v, v->hitRect("block 1"));
+        v->grab();
+        click(v, v->hitRect("block 1"));
+        QCOMPARE(link.last("bypass").value("slot").toInt(), 1);
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), false);
+        // One tap on the selected one lets it go, once it is clear no second is coming.
+        v->grab();
+        click(v, v->hitRect("block 1"));
+        QCOMPARE(v->selectedSlot(), 1);
+        QTRY_COMPARE(v->selectedSlot(), -1);
+        QCOMPARE(count("bypass"), 2);
+    }
+
+    void undo_takes_back_what_was_changed_here() {
+        FakeLink link;
+        link.answer = [](const QJsonObject& r) -> QJsonObject {
+            if (r.value("cmd") == "plugin")
+                return parse(R"({"ok": true, "plugin": {"chain": 1, "slot": 0, "label": "Gain Stage", "name": "Test Gain", "format": "clap",
+                                  "bypassed": false, "params": [{"id": 0, "name": "Gain", "module": "", "min": 0, "max": 2, "default": 1,
+                                  "steps": 0, "value": 1, "text": "1.000"}]}})");
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        QSignalSpy said(&s, &AppState::message);
+        v->grab();
+        QVERIFY(!s.canUndo());
+        click(v, v->hitRect("undo"));
+        QCOMPARE(said.last().at(0).toString(), QString("Nothing to undo"));
+
+        // A slider dragged is one change, whatever it sent on the way.
+        click(v, v->hitRect("block 0"));
+        v->grab();
+        const QRectF slider = v->hitRect("param 0");
+        QTest::mousePress(v, Qt::LeftButton, {}, slider.center().toPoint());
+        QTest::mouseMove(v, QPoint(slider.center().x() + 20, slider.center().y()));
+        QTest::mouseRelease(v, Qt::LeftButton, {}, QPoint(slider.right() - 2, slider.center().y()));
+        const double moved = link.last("param").value("value").toDouble();
+        QVERIFY(moved > 1.8);
+        QVERIFY(s.canUndo());
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 1.0);
+        QCOMPARE(link.last("param").value("chain").toInt(), 1);
+        QCOMPARE(said.last().at(0).toString(), QString("Undone: Gain Stage: Gain"));
+        QVERIFY(s.canRedo());
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), moved);
+
+        // A bypass, undone by the button; a new change leaves nothing to redo.
+        v->grab();
+        click(v, v->hitRect("bypass"));
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), true);
+        v->grab();
+        click(v, v->hitRect("undo"));
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), false);
+        QVERIFY(s.canRedo());
+        v->grab();
+        click(v, v->hitRect("redo"));
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), true);
+        click(v, v->hitRect("undo"));
+        v->grab();
+        click(v, v->hitRect("bypass"));
+        QVERIFY(!s.canRedo());
+        click(v, v->hitRect("undo"));
+
+        // Undone from another chain, it shows where.
+        v->grab();
+        click(v, v->hitRect("show 0"));
+        QCOMPARE(v->shownChain(), 0);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 1.0);
+        QCOMPARE(v->shownChain(), 1);
+        QCOMPARE(v->selectedSlot(), 0);
+        QVERIFY(!s.canUndo());
+        shot(v, "chains-undone");
     }
 
     void settings_are_kept() {

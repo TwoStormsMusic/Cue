@@ -162,6 +162,18 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
             return;
         }
         break;
+    case Qt::Key_Z:
+        if (ctrl) {
+            e->modifiers() & Qt::ShiftModifier ? s_.redo() : s_.undo();
+            return;
+        }
+        break;
+    case Qt::Key_Y:
+        if (ctrl) {
+            s_.redo();
+            return;
+        }
+        break;
     case Qt::Key_T:
         autoTuner_ = false;
         showView(current_ == "tuner" ? beforeTuner_ : "tuner");

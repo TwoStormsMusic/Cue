@@ -56,11 +56,13 @@ and goes back when they are live again (Settings can turn this off).
 **Chains.** A chain's plug-ins as blocks and wires, as the routing board
 draws them: inputs and outputs are rectangles, Gain Stage a circle, Act a
 small circle, other plug-ins hexagons. Green is a plug-in that is on, or a
-wire carrying sound to an output in the chain playing; grey is bypassed or
-silent; orange is what you selected. The wheel, two fingers or the **−**,
+wire that carries sound to an output (or would, in a chain not playing);
+grey is bypassed or silent, and every wire while the inputs are muted;
+orange is what you selected. Tap a chain in the list to see it, tap it twice
+to play it. The wheel, two fingers or the **−**,
 **Fit** and **+** buttons zoom; dragging open space or two fingers move it; a
-double tap on open space fits the whole chain again. Tap a block to switch
-it on or off and move its parameters with sliders. It shows the parameters
+double tap on open space fits the whole chain again. Tap a block to move its
+parameters with sliders; tap it twice to switch it on or off. It shows the parameters
 you picked, in your order (drag a row by its grip to move it), and always the
 ones a control or trigger moves, purple, with what moves them; until you
 pick, the first eight. **Show all parameters** lists every one in the
@@ -68,11 +70,15 @@ plug-in's order, checked if shown: check the ones to show. Long lists fold by
 the plug-in's sections and have a search box. **Open editor** opens the plug-in's own
 window, the one it has in a DAW: Neural DSP through yabridge, the TwoStorms
 plug-ins, anything with an editor. It opens on the screen of the computer
-running the engine, which on stage is the one in front of you, and what you
-change there is heard at once and kept by **Save**. The sound never waits on
+running the engine, which on stage is the one in front of you, and stays
+over the app (full screen too) until you close it; tapping the app does not
+hide it. What you change there is heard at once and kept by **Save**. The sound never waits on
 an editor: it is drawn between blocks, never on the audio thread, and
-closing one changes nothing about what is heard. **Play this chain** plays the chain shown;
-**Save** saves the performance, plug-in settings included, to its `.cue`
+closing one changes nothing about what is heard. **Play this chain** plays the chain shown.
+**Undo** takes back what you changed here (a slider, a bypass, the parameters
+picked), showing where, and **Redo** makes it again; what a pedal or a
+plug-in's own editor changes is not in it. **Save** saves the performance,
+plug-in settings included, to its `.cue`
 file. Moving and wiring blocks comes with the routing editor.
 
 **Settings.** For this machine: the view the app starts in (Stage, Tuner or
@@ -96,6 +102,8 @@ smaller on top.
 | T | the tuner, and back |
 | Esc | the stage view |
 | Ctrl+S | save |
+| Ctrl+Z | undo |
+| Ctrl+Shift+Z, Ctrl+Y | redo |
 | F11 | full screen |
 | Ctrl+Q | quit the app (the engine plays on) |
 

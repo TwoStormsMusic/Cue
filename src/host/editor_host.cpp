@@ -33,7 +33,7 @@ struct EditorHost::Impl {
     };
 
     Display* display = nullptr;
-    Atom deleteWindow = 0;
+    Atom deleteWindow = 0, netName = 0, utf8 = 0;
     bool tried = false;
     std::string why;
     std::vector<Window> windows;
@@ -50,6 +50,8 @@ struct EditorHost::Impl {
             } else {
                 XSetErrorHandler(ignoreXError);
                 deleteWindow = XInternAtom(display, "WM_DELETE_WINDOW", False);
+                netName = XInternAtom(display, "_NET_WM_NAME", False);
+                utf8 = XInternAtom(display, "UTF8_STRING", False);
             }
         }
         if (!display && reason)
@@ -62,6 +64,12 @@ struct EditorHost::Impl {
             if (w.plugin == plugin)
                 return &w;
         return nullptr;
+    }
+
+    // Over the app's window, which keeps the focus.
+    void keepAbove(::Window w, unsigned long above) {
+        if (above)
+            XSetTransientForHint(display, w, static_cast<::Window>(above));
     }
 
     void resize(const Window& w, const EditorSize& size) {
@@ -90,12 +98,13 @@ size_t EditorHost::count() const { return impl_->windows.size(); }
 
 bool EditorHost::isOpen(const Processor& plugin) const { return impl_->find(&plugin) != nullptr; }
 
-bool EditorHost::open(Processor& plugin, const std::string& title, std::string* error) {
+bool EditorHost::open(Processor& plugin, const std::string& title, std::string* error, unsigned long above) {
     if (!plugin.hasEditor()) {
         *error = "this plug-in has no editor of its own";
         return false;
     }
     if (Impl::Window* open = impl_->find(&plugin)) {
+        impl_->keepAbove(open->window, above);
         XRaiseWindow(impl_->display, open->window);
         XFlush(impl_->display);
         return true;
@@ -111,8 +120,27 @@ bool EditorHost::open(Processor& plugin, const std::string& title, std::string* 
         *error = "the screen would not make a window for it";
         return false;
     }
-    XStoreName(d, w, title.c_str());
+    // The title in UTF-8 for window managers that read it so, and plain for
+    // the rest.
+    XChangeProperty(d, w, impl_->netName, impl_->utf8, 8, PropModeReplace, reinterpret_cast<const unsigned char*>(title.data()),
+                    static_cast<int>(title.size()));
+    std::string plain;
+    for (unsigned char c : title)
+        if (c < 0x80)
+            plain += static_cast<char>(c);
+        else if (c >= 0xC0) // the first byte of a character; the rest are left out
+            plain += '-';
+    XStoreName(d, w, plain.c_str());
     XSetWMProtocols(d, w, &impl_->deleteWindow, 1);
+    // The window manager never gives it the focus: a tap on the app after
+    // one on an editor would otherwise go to bringing the app forward. A
+    // plug-in that wants the keys (a value being typed) takes them itself.
+    XWMHints wm{};
+    wm.flags = InputHint | StateHint;
+    wm.input = False;
+    wm.initial_state = NormalState;
+    XSetWMHints(d, w, &wm);
+    impl_->keepAbove(w, above);
     XSelectInput(d, w, StructureNotifyMask);
     XClassHint hint{};
     char cls[] = "Cue", res[] = "cue";
@@ -228,7 +256,7 @@ bool EditorHost::available(std::string* why) {
         *why = "this build has no X11, so it cannot open plug-in editors";
     return false;
 }
-bool EditorHost::open(Processor&, const std::string&, std::string* error) {
+bool EditorHost::open(Processor&, const std::string&, std::string* error, unsigned long) {
     available(error);
     return false;
 }

@@ -279,6 +279,20 @@ PluginSpec* specAt(Config& config, int chain, size_t slot) {
     return nullptr;
 }
 
+// Whether the app's DISPLAY is the engine's (":0" and ":0.0" are the same).
+bool sameScreen(std::string theirs) {
+    const char* env = std::getenv("DISPLAY");
+    if (!env || theirs.empty())
+        return false;
+    std::string ours = env;
+    for (std::string* d : {&ours, &theirs}) {
+        const size_t colon = d->rfind(':'), dot = d->rfind('.');
+        if (dot != std::string::npos && colon != std::string::npos && dot > colon)
+            d->erase(dot);
+    }
+    return ours == theirs;
+}
+
 // A plug-in for the app: what it is, whether it is bypassed, and its
 // parameters with their values now.
 Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const std::vector<Show::ParamTie>& ties, const EditorHost* editors = nullptr) {
@@ -653,8 +667,13 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     editors.close(*p);
                 } else {
                     const std::string title = rig.plugins[k].label + " — " + rig.chainNames.at(chain);
+                    // The app's window, when the app is on this screen: the
+                    // editor stays over it.
+                    unsigned long above = 0;
+                    if (req.contains("above") && sameScreen(req.value("display", std::string())))
+                        above = req.at("above").get<unsigned long>();
                     std::string why;
-                    if (!editors.open(*p, title, &why))
+                    if (!editors.open(*p, title, &why, above))
                         return refuse(why);
                 }
             } else if (cmd == "shown") {

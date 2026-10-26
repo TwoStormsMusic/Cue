@@ -68,6 +68,22 @@ public:
     // A reply's "ok", or a message saying why not.
     bool check(const QJsonObject& reply, const QString& what);
 
+    // What was changed here, so it can be taken back (Ctrl+Z) and made again
+    // (Ctrl+Shift+Z): a parameter, a bypass, the parameters picked to show.
+    // Each is the request that undoes it and the one that does it again.
+    // What a pedal or a plug-in's own editor changes is not in it. A new
+    // engine or performance starts it afresh.
+    struct Edit {
+        QString what; // said when it is undone: "Delay: Output"
+        int chain = -1, slot = -1;
+        QJsonObject undo, redo;
+    };
+    void edited(const Edit& e);
+    bool canUndo() const { return !undo_.isEmpty(); }
+    bool canRedo() const { return !redo_.isEmpty(); }
+    void undo();
+    void redo();
+
 signals:
     // The connection, the hello or the performance changed.
     void changed();
@@ -75,12 +91,18 @@ signals:
     void tunerChanged();
     // For a moment at the bottom of the screen.
     void message(const QString& text, bool error);
+    // An edit was undone or redone: the plug-in it was on.
+    void undone(int chain, int slot);
+    void undoChanged();
 
 private:
     void onConnection(bool up);
     void onEvent(const QString& name, const QJsonObject& m);
 
+    void takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing);
+
     QElapsedTimer tunerClock_; // since the last reading
+    QVector<Edit> undo_, redo_; // the newest last
 };
 
 } // namespace cue::gui

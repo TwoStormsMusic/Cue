@@ -12,6 +12,12 @@
 
 #include <dlfcn.h>
 
+#ifdef CUE_HAVE_X11
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#endif
+
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -162,3 +168,61 @@ TEST(editor_closes_with_the_host_and_the_plugin_outlives_it) {
     editors.closeAll();
     gain->deactivate();
 }
+
+#ifdef CUE_HAVE_X11
+TEST(editor_stays_over_the_apps_window_and_leaves_it_the_focus) {
+    EditorHost editors;
+    if (noScreen(editors))
+        return;
+    // The app's window, as the app would have it.
+    Display* d = XOpenDisplay(nullptr);
+    CHECK(d != nullptr);
+    const ::Window root = DefaultRootWindow(d);
+    const ::Window app = XCreateSimpleWindow(d, root, 0, 0, 400, 300, 0, 0, 0);
+    XMapWindow(d, app);
+    XSync(d, False);
+
+    auto gain = loadGain();
+    CHECK(gain != nullptr);
+    std::string err;
+    CHECK_MSG(editors.open(*gain, "Gain Stage — Punk", &err, app), "%s", err.c_str());
+    turn(editors, *gain, 5);
+    XSync(d, False);
+
+    // The editor's window is the one the window manager is told to keep over the app's.
+    ::Window editor = 0, parent = 0, *children = nullptr;
+    unsigned n = 0;
+    XQueryTree(d, root, &parent, &parent, &children, &n);
+    for (unsigned i = 0; i < n; ++i) {
+        ::Window over = 0;
+        if (XGetTransientForHint(d, children[i], &over) && over == app)
+            editor = children[i];
+    }
+    if (children)
+        XFree(children);
+    CHECK_MSG(editor != 0, "no window is kept over the app's");
+    // It never takes the focus from the app.
+    XWMHints* hints = XGetWMHints(d, editor);
+    CHECK(hints && (hints->flags & InputHint) && !hints->input);
+    if (hints)
+        XFree(hints);
+    // Its title reads as written, dash and all.
+    Atom type = 0;
+    int format = 0;
+    unsigned long count = 0, after = 0;
+    unsigned char* title = nullptr;
+    XGetWindowProperty(d, editor, XInternAtom(d, "_NET_WM_NAME", False), 0, 256, False, XInternAtom(d, "UTF8_STRING", False), &type, &format,
+                       &count, &after, &title);
+    CHECK(title && std::string(reinterpret_cast<char*>(title), count) == "Gain Stage — Punk");
+    if (title)
+        XFree(title);
+    char* plain = nullptr;
+    CHECK(XFetchName(d, editor, &plain) && std::string(plain) == "Gain Stage - Punk");
+    if (plain)
+        XFree(plain);
+
+    editors.closeAll();
+    XDestroyWindow(d, app);
+    XCloseDisplay(d);
+}
+#endif

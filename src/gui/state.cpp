@@ -38,6 +38,10 @@ AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
 }
 
 void AppState::onConnection(bool up) {
+    // What could be undone was for the engine that was here.
+    undo_.clear();
+    redo_.clear();
+    emit undoChanged();
     if (up) {
         link.request({{"cmd", "hello"}}, [this](const QJsonObject& r) {
             if (r.value("ok").toBool()) {
@@ -123,6 +127,41 @@ void AppState::save() {
         if (!warnings.isEmpty())
             text += ", but " + warnings.first().toString();
         emit message(text, !warnings.isEmpty());
+    });
+}
+
+
+void AppState::edited(const Edit& e) {
+    undo_.append(e);
+    if (undo_.size() > 200)
+        undo_.removeFirst();
+    redo_.clear();
+    emit undoChanged();
+}
+
+void AppState::undo() {
+    if (undo_.isEmpty())
+        emit message("Nothing to undo", false);
+    else
+        takeBack(undo_, redo_, true);
+}
+
+void AppState::redo() {
+    if (redo_.isEmpty())
+        emit message("Nothing to redo", false);
+    else
+        takeBack(redo_, undo_, false);
+}
+
+void AppState::takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing) {
+    const Edit e = from.takeLast();
+    to.append(e);
+    emit undoChanged();
+    link.request(undoing ? e.undo : e.redo, [this, e, undoing](const QJsonObject& r) {
+        if (!check(r, undoing ? "Not undone" : "Not redone"))
+            return;
+        emit message((undoing ? "Undone: " : "Redone: ") + e.what, false);
+        emit undone(e.chain, e.slot);
     });
 }
 

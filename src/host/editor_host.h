@@ -27,8 +27,11 @@ public:
     bool available(std::string* why = nullptr);
 
     // Opens the plug-in's editor in a window of its own, or says why not.
-    // Opening one that is already open brings it to the front.
-    bool open(Processor& plugin, const std::string& title, std::string* error);
+    // Opening one that is already open brings it to the front. above is the
+    // app's window, when the app is on this screen: the editor stays over it,
+    // even full screen, and never takes the app's focus, so the app's next
+    // tap acts at once (the plug-in still takes the keys when it needs them).
+    bool open(Processor& plugin, const std::string& title, std::string* error, unsigned long above = 0);
     void close(Processor& plugin);
     bool isOpen(const Processor& plugin) const;
     void closeAll();

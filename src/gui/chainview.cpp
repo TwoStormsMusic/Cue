@@ -1,6 +1,7 @@
 #include "gui/chainview.h"
 
 #include <QFontMetricsF>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QLineEdit>
 #include <QLineF>
@@ -9,6 +10,7 @@
 #include <QPainterPath>
 #include <QPointingDevice>
 #include <QRegularExpression>
+#include <QStyleHints>
 #include <QTouchEvent>
 #include <QWheelEvent>
 
@@ -92,6 +94,45 @@ ChainView::ChainView(AppState& state, QWidget* parent) : Surface(state, parent) 
             showChain(s.playing());
         update();
     });
+    letGo_.setSingleShot(true);
+    letGo_.setInterval(QGuiApplication::styleHints()->mouseDoubleClickInterval());
+    connect(&letGo_, &QTimer::timeout, this, [this] { selectSlot(-1); });
+    // Something undone: show where, with its values now.
+    connect(&s, &AppState::undone, this, [this](int chain, int slot) {
+        if (!isVisible() || !s.chain(chain))
+            return;
+        if (chain != chain_) {
+            followPlaying_ = chain == s.playing();
+            showChain(chain);
+        }
+        selectSlot(slot);
+    });
+    connect(&s, &AppState::undoChanged, this, [this] { update(); });
+}
+
+bool ChainView::doubleTap(const QString& id) {
+    const qint64 now = clock_.elapsed();
+    const bool twice = id == lastTapOn_ && now - lastTapOnAt_ < QGuiApplication::styleHints()->mouseDoubleClickInterval();
+    lastTapOn_ = twice ? QString() : id;
+    lastTapOnAt_ = now;
+    return twice;
+}
+
+bool ChainView::bypassed(int chain, int slot) const {
+    if (s.status.valid)
+        return s.status.bypassed(chain, slot);
+    const ChainInfo* c = s.chain(chain);
+    const PluginInfo* pi = c ? c->plugin(slot) : nullptr;
+    return pi && pi->bypassed;
+}
+
+void ChainView::setBypass(int chain, int slot, bool bypassed) {
+    const ChainInfo* c = s.chain(chain);
+    const PluginInfo* pi = c ? c->plugin(slot) : nullptr;
+    auto request = [&](bool b) { return QJsonObject{{"cmd", "bypass"}, {"chain", chain}, {"slot", slot}, {"bypassed", b}}; };
+    s.link.request(request(bypassed), [this](const QJsonObject& r) { s.check(r, "Not switched"); });
+    s.edited({QString("%1 %2").arg(pi ? pi->label : "plug-in", bypassed ? "bypassed" : "on"), chain, slot, request(!bypassed),
+              request(bypassed)});
 }
 
 void ChainView::showEvent(QShowEvent*) {
@@ -145,6 +186,18 @@ void ChainView::setParam(const QJsonObject& param, double value, bool done) {
     value = std::clamp(value, lo, hi);
     if (steps > 0 && hi > lo)
         value = lo + std::round((value - lo) / (hi - lo) * steps) * (hi - lo) / steps;
+    // Where a drag started, to undo it as one change.
+    if (draggingParam_ != id)
+        draggingFrom_ = param.value("value").toDouble(param.value("default").toDouble());
+    if (done && value != draggingFrom_) {
+        const ChainInfo* c = s.chain(chain_);
+        const PluginInfo* pi = c ? c->plugin(slot_) : nullptr;
+        auto request = [&](double v) {
+            return QJsonObject{{"cmd", "param"}, {"chain", chain_}, {"slot", slot_}, {"param", id}, {"value", v}};
+        };
+        s.edited({QString("%1: %2").arg(pi ? pi->label : "plug-in", param.value("name").toString()), chain_, slot_, request(draggingFrom_),
+                  request(value)});
+    }
     draggingParam_ = done ? -1 : id;
     draggingValue_ = value;
     // Into the list as the value now, so the slider stays where it was let go.
@@ -308,7 +361,9 @@ void ChainView::paint(QPainter& p) {
     if (const ChainInfo* c = s.chain(chain_); c && c->scene < perf.scenes.size())
         subtitle = "Scene " + perf.scenes[c->scene].name;
     const double top = header(p, perf.valid ? perf.name : "Cue", subtitle, enginePills(),
-                              {{"stage", "Stage", [this] { emit navigate("stage"); }},
+                              {{"undo", "Undo", [this] { s.undo(); }, s.canUndo() ? color::text : color::dim},
+                               {"redo", "Redo", [this] { s.redo(); }, s.canRedo() ? color::text : color::dim},
+                               {"stage", "Stage", [this] { emit navigate("stage"); }},
                                {"tuner", "Tuner", [this] { emit navigate("tuner"); }, color::green, color::greenDark, color::panel},
                                {"settings", "Settings", [this] { emit navigate("settings"); }},
                                {"save", "Save", [this] { s.save(); }, color::onOrange, color::orange, color::orange}});
@@ -396,8 +451,14 @@ void ChainView::sidebar(QPainter& p, const QRectF& r) {
                 p.setFont(typeface(Face::Text, 12 * u));
                 p.drawText(row.adjusted(0, 0, -10 * u, 0), Qt::AlignRight | Qt::AlignVCenter, tag);
             }
-            hit(id, row, [this, index] {
-                followPlaying_ = index == s.playing();
+            // A tap shows the chain; a double tap plays it too.
+            hit(id, row, [this, id, index] {
+                if (doubleTap(id) && index != s.playing()) {
+                    s.select(index);
+                    followPlaying_ = true;
+                } else {
+                    followPlaying_ = index == s.playing();
+                }
                 showChain(index);
             });
             y += rowH;
@@ -464,15 +525,10 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         }
     });
 
-    const bool playing = c.index == s.playing() && s.status.valid;
-    const bool live = playing && !s.status.muted;
-    auto bypassed = [&](int slot) {
-        const PluginInfo* pi = c.plugin(slot);
-        if (s.status.valid)
-            return s.status.bypassed(c.index, slot);
-        return pi && pi->bypassed;
-    };
-    auto mutes = [&](const PluginInfo& pi) { return bypassed(pi.slot) && pi.muteOnBypass; };
+    // A wire is green when it carries sound to an output, or would if this
+    // chain played; muted inputs leave them all grey.
+    const bool live = !(s.status.valid && s.status.muted);
+    auto mutes = [&](const PluginInfo& pi) { return bypassed(c.index, pi.slot) && pi.muteOnBypass; };
     // Is the signal at a point of a line silenced by a muting bypass before it?
     std::function<bool(int, int)> silent = [&](int l, int pos) -> bool {
         const LineInfo& line = c.lines[l];
@@ -594,7 +650,7 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         for (int i = 0; i < c.lines[l].plugins.size(); ++i) {
             const PluginInfo& pi = c.lines[l].plugins[i];
             const QPointF center = at(blockCenter(l, i));
-            const bool on = !bypassed(pi.slot), selected = pi.slot == slot_;
+            const bool on = !bypassed(c.index, pi.slot), selected = pi.slot == slot_;
             const QString id = QString("block %1").arg(pi.slot);
             const QColor stroke = selected ? color::orange : on ? color::green : color::border2;
             const QColor fill = selected ? QColor(0x2A, 0x1A, 0x0A) : on ? color::greenBg : color::panel2;
@@ -647,8 +703,21 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
                 }
             }
             const QRectF tap = box.adjusted(-4, -4, 4, 4).intersected(r);
+            // A tap selects it (or lets it go); a double tap switches it on
+            // or off and leaves it selected.
             if (!tap.isEmpty())
-                hit(id, tap, [this, slot = pi.slot] { selectSlot(slot == slot_ ? -1 : slot); });
+                hit(id, tap, [this, id, chain = c.index, slot = pi.slot] {
+                    if (doubleTap(id)) {
+                        letGo_.stop();
+                        selectSlot(slot);
+                        setBypass(chain, slot, !bypassed(chain, slot));
+                    } else if (slot == slot_) {
+                        letGo_.start();
+                    } else {
+                        letGo_.stop();
+                        selectSlot(slot);
+                    }
+                });
         }
     p.restore();
 
@@ -734,7 +803,7 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         p.setPen(color::muted);
         p.setFont(typeface(Face::Text, 15 * u));
         p.drawText(QRectF(r.left() + pad, y, w, 120 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                   "Tap a plug-in to switch it on or off and see its parameters.");
+                   "Tap a plug-in to see its parameters; tap it twice to switch it on or off.");
         return;
     }
     p.setPen(color::text);
@@ -752,13 +821,10 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
     draw::text(p, QRectF(r.left() + pad, y, w, 22 * u), Qt::AlignLeft | Qt::AlignVCenter, sub);
     y += 34 * u;
 
-    const bool bypassed = s.status.valid ? s.status.bypassed(c.index, slot_) : pi->bypassed;
+    const bool off = bypassed(c.index, slot_);
     const QRectF bb(r.left() + pad, y, w, 50 * u);
-    button(p, "bypass", bb, bypassed ? "Turn on" : "Bypass", [this, chain = c.index, slot = slot_, bypassed] {
-               s.link.request({{"cmd", "bypass"}, {"chain", chain}, {"slot", slot}, {"bypassed", !bypassed}},
-                              [this](const QJsonObject& r) { s.check(r, "Not switched"); });
-           },
-           bypassed ? color::green : color::text, bypassed ? color::greenDark : color::border2, color::panel2, 16 * u);
+    button(p, "bypass", bb, off ? "Turn on" : "Bypass", [this, chain = c.index, slot = slot_, off] { setBypass(chain, slot, !off); },
+           off ? color::green : color::text, off ? color::greenDark : color::border2, color::panel2, 16 * u);
     y += 62 * u;
     // The plug-in's own editor, when it has one. It opens on the computer
     // running the engine, which on stage is this one.
@@ -767,11 +833,16 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         const QRectF eb(r.left() + pad, y, w, 50 * u);
         button(p, "editor", eb, open ? "Close editor" : "Open editor",
                [this, chain = c.index, slot = slot_, open] {
-                   s.link.request({{"cmd", "editor"}, {"chain", chain}, {"slot", slot}, {"open", !open}},
-                                  [this](const QJsonObject& r) {
-                                      if (s.check(r, "Could not open the editor"))
-                                          requestPlugin();
-                                  });
+                   QJsonObject req{{"cmd", "editor"}, {"chain", chain}, {"slot", slot}, {"open", !open}};
+                   // This window, so the editor stays over it and leaves it the focus.
+                   if (QGuiApplication::platformName() == "xcb") {
+                       req["above"] = static_cast<double>(window()->winId());
+                       req["display"] = QString::fromLocal8Bit(qgetenv("DISPLAY"));
+                   }
+                   s.link.request(req, [this](const QJsonObject& r) {
+                       if (s.check(r, "Could not open the editor"))
+                           requestPlugin();
+                   });
                },
                open ? color::onOrange : color::text, open ? color::orange : color::border2, open ? color::orange : color::panel2, 16 * u);
         y += 62 * u;
@@ -866,12 +937,28 @@ QVector<int> ChainView::shownParams() const {
 void ChainView::setShown(const QVector<int>& ids) {
     if (slot_ < 0 || chain_ < 0)
         return;
+    // The picks as they were, for undo: none yet shows the first few.
+    QJsonArray before;
+    const QJsonValue was = shownPending_ ? QJsonValue(pendingShown_) : plugin_.value("shown");
+    if (was.isArray()) {
+        before = was.toArray();
+    } else {
+        const QJsonArray params = plugin_.value("params").toArray();
+        for (int i = 0; i < params.size() && i < 8; ++i)
+            before.append(params[i].toObject().value("id").toInt());
+    }
     pendingShown_ = {};
     for (int id : ids)
         pendingShown_.append(id);
     ++shownPending_;
     const int chain = chain_, slot = slot_;
-    s.link.request({{"cmd", "shown"}, {"chain", chain}, {"slot", slot}, {"params", pendingShown_}}, [this, chain, slot](const QJsonObject& r) {
+    const ChainInfo* c = s.chain(chain);
+    const PluginInfo* pi = c ? c->plugin(slot) : nullptr;
+    auto request = [&](const QJsonArray& params) {
+        return QJsonObject{{"cmd", "shown"}, {"chain", chain}, {"slot", slot}, {"params", params}};
+    };
+    s.edited({QString("%1: the parameters shown").arg(pi ? pi->label : "plug-in"), chain, slot, request(before), request(pendingShown_)});
+    s.link.request(request(pendingShown_), [this, chain, slot](const QJsonObject& r) {
         if (chain != chain_ || slot != slot_)
             return;
         s.check(r, "The picks were not kept");

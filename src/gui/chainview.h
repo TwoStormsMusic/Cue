@@ -4,9 +4,11 @@
 // mockup draws them, laid out from the performance. The canvas zooms (wheel,
 // pinch, the buttons in its corner) and pans (drag open space, two fingers);
 // a double tap on open space fits the chain again. Tapping a block shows its
-// picked parameters as sliders, in the order picked, and switches it on or
-// off; "Show all parameters" lists every one to pick from. Save keeps it all
-// in the .cue file. Moving and wiring blocks comes with the routing editor.
+// picked parameters as sliders, in the order picked; a double tap switches
+// it on or off, and one on a chain in the list plays it. "Show all
+// parameters" lists every one to pick from. Undo takes back what was changed
+// here. Save keeps it all in the .cue file. Moving and wiring blocks comes
+// with the routing editor.
 
 #include "gui/surface.h"
 
@@ -62,6 +64,10 @@ private:
     void panel(QPainter& p, const QRectF& r, const ChainInfo& c);
     void requestPlugin();
     void setParam(const QJsonObject& param, double value, bool done);
+    void setBypass(int chain, int slot, bool bypassed);
+    bool bypassed(int chain, int slot) const;
+    // Whether this tap, on what is called id, makes a double tap of the last.
+    bool doubleTap(const QString& id);
     void paramRow(QPainter& p, const QRectF& row, const QRectF& list, const QJsonObject& q, const QString& format, bool all);
     void allParams(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
     void shownList(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
@@ -80,7 +86,7 @@ private:
     QRectF listRect_;
     // A slider being dragged shows where the finger is, not the engine.
     int draggingParam_ = -1;
-    double draggingValue_ = 0;
+    double draggingValue_ = 0, draggingFrom_ = 0;
     QElapsedTimer clock_;
     qint64 lastSend_ = 0;
     double scrollFrom_ = 0, scrollStartY_ = -1;
@@ -95,6 +101,12 @@ private:
     bool panning_ = false, panMoved_ = false;
     qint64 lastTapAt_ = -1000;
     QPointF lastTapPos_;
+    // The last tap on a chain or a block, for a double tap; a tap on the
+    // selected block lets it go only once it is clear it was not the first
+    // of two.
+    QString lastTapOn_;
+    qint64 lastTapOnAt_ = -1000;
+    QTimer letGo_;
     // Two fingers: the zoom and where the point between them was at the start.
     bool pinching_ = false, touchDone_ = false;
     double pinchDist_ = 0, pinchZoom_ = 1;

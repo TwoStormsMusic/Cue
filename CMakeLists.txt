@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.6.1 LANGUAGES C CXX)
+project(cue VERSION 0.6.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -161,6 +161,10 @@ if(CUE_BUILD_TESTS)
     CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"
     CUE_TEST_VST3="${TEST_VST3_BUNDLE}"
     CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>")
+  if(X11_FOUND)
+    # The editor tests look at the windows the way a window manager would.
+    target_compile_definitions(cue_tests PRIVATE CUE_HAVE_X11)
+  endif()
   add_dependencies(cue_tests cue_test_plugins cue_test_vst3)
   target_link_options(cue_tests PRIVATE -static-libstdc++ -static-libgcc)
   add_test(NAME cue_tests COMMAND cue_tests)

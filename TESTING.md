@@ -287,6 +287,24 @@ Same start as step 8 (`bin/cue-app --version` should say 0.6.1; it has the plug-
 
 **Send** what feels wrong, with a photo if it is about the look.
 
+## 12. Editors over Cue, double taps, undo (0.6.2)
+
+Same start as step 8 (`bin/cue-app --version` should say 0.6.2). Try each on the touchscreen and with a mouse.
+
+**Editors stay over Cue.** Open a TwoStorms editor and a Neural DSP one. Use the editor, then tap or click in Cue.
+
+- The editor stays in front of Cue, full screen or not. It goes only when you close it.
+- **Close editor** closes it on the first tap, with a TwoStorms plug-in as with Neural DSP.
+- A slider in Cue's panel moves on the first touch and the editor stays where it is.
+- Type a value into a TwoStorms editor's text box: the keys should go to it. **Send** it if they do not.
+- With two editors open, tapping the one underneath brings it to the front.
+
+**Double taps.** Tap a chain in the list twice: it plays. Tap a plug-in block twice: it switches off (or on) and stays selected. One tap on the selected block still lets it go.
+
+**Wires.** Look at a chain that is not playing: its wires are green where they would carry sound, grey after a bypassed plug-in that passes silence. Mute with the tuner pedal: every wire goes grey.
+
+**Undo.** Move a slider, bypass a plug-in, pick a parameter. Then **Undo** (top right, or Ctrl+Z) three times: each comes back, in the reverse order, and the panel shows the plug-in it was on. **Redo** (or Ctrl+Shift+Z) makes them again. Changes made with a pedal or in a plug-in's own editor are not undone by it.
+
 ## What passes
 
 | Check | Pass when |
