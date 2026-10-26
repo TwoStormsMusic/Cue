@@ -245,8 +245,13 @@ void Window::convert(const QString& path) {
                 summary += QString(", %1 left out").arg(r.skipped);
             if (r.missing)
                 summary += QString(", %1 not found on this computer").arg(r.missing);
-            for (const auto& n : r.notes)
+            bool pedalsLost = false;
+            for (const auto& n : r.notes) {
                 notes << QString::fromStdString(n);
+                pedalsLost = pedalsLost || (n.rfind("ReaLearn:", 0) == 0 && n.find("not converted") != std::string::npos);
+            }
+            if (pedalsLost)
+                summary += ". Some ReaLearn pedals were not converted: see the list";
         } else {
             summary = QString::fromStdString(err);
         }
