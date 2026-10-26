@@ -119,3 +119,26 @@ if(CUE_BUILD_TESTS)
   target_link_options(cue_tests PRIVATE -static-libstdc++ -static-libgcc)
   add_test(NAME cue_tests COMMAND cue_tests)
 endif()
+
+# The converter: REAPER projects to .cue performances and back, in a small
+# Qt 6 window (cue-convert), sharing Cue's own reading and writing code.
+option(CUE_BUILD_CONVERTER "Build cue-convert (needs Qt 6 Widgets)" ON)
+if(CUE_BUILD_CONVERTER)
+  find_package(Qt6 6.2 COMPONENTS Widgets QUIET)
+  if(Qt6_FOUND)
+    add_executable(cue-convert
+      src/converter/main.cpp
+      src/converter/window.cpp
+      src/app/convert.cpp
+      src/app/rpp.cpp
+      src/app/rpp_export.cpp
+      src/app/config.cpp
+      src/app/cuefile.cpp
+    )
+    set_target_properties(cue-convert PROPERTIES AUTOMOC ON)
+    target_include_directories(cue-convert PRIVATE src)
+    target_link_libraries(cue-convert PRIVATE cue_host miniz nlohmann_json Qt6::Widgets Threads::Threads)
+  else()
+    message(STATUS "Qt 6 not found: cue-convert is not built (install qt6-base-dev)")
+  endif()
+endif()

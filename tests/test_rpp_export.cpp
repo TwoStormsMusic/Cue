@@ -190,6 +190,8 @@ TEST(rpp_export_converts_files_both_ways) {
     std::filesystem::rename(dir + "/show.cue", dir + "/first.cue");
     CHECK_MSG(convertFile(dir + "/show.RPP", "", o, r, &err), "%s", err.c_str());
     CHECK(r.out == dir + "/show.cue" && r.chains == 2 && r.plugins == 8);
+    // Converting back does not replace the project it came from.
+    CHECK(convertFile(dir + "/show.cue", "", o, r, &err) && r.out == dir + "/show (2).RPP");
     Config back;
     const bool ok = loadCue(dir + "/show.cue", back, &err);
     CHECK_MSG(ok, "%s", err.c_str());

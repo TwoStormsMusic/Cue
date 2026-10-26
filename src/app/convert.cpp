@@ -143,6 +143,13 @@ std::string convertedName(const std::string& in) {
 bool convertFile(const std::string& in, const std::string& out, const ConvertOptions& options, ConvertResult& result, std::string* error) {
     result = ConvertResult{};
     result.out = out.empty() ? convertedName(in) : out;
+    // Without a name given, never replace a file: Song.RPP made from Song.cue
+    // would otherwise overwrite the project Song.cue came from.
+    std::error_code ec;
+    for (int n = 2; out.empty() && fs::exists(result.out, ec); ++n) {
+        const fs::path p = convertedName(in);
+        result.out = (p.parent_path() / (p.stem().string() + " (" + std::to_string(n) + ")" + p.extension().string())).string();
+    }
     if (fs::absolute(result.out) == fs::absolute(in)) {
         *error = "the converted file would replace " + in;
         return false;

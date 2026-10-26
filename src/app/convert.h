@@ -26,8 +26,8 @@ struct ConvertResult {
 std::string convertedName(const std::string& in);
 bool isRppFile(const std::string& path);
 
-// Converts in to out (or to convertedName(in) when out is empty). An existing
-// out is kept as out.bak.
+// Converts in to out, keeping an existing out as out.bak. Without out, to
+// convertedName(in), or "Song (2).RPP" and so on when that file exists.
 bool convertFile(const std::string& in, const std::string& out, const ConvertOptions& options, ConvertResult& result, std::string* error);
 
 } // namespace cue
