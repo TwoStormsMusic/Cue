@@ -9,7 +9,6 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 namespace cue {
 
@@ -28,8 +27,6 @@ bool socketAddress(const std::string& path, sockaddr_un& addr, std::string* erro
     std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
     return true;
 }
-
-void setNonBlocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
 
 std::string frame(const Json& message) {
     const std::string body = message.dump();

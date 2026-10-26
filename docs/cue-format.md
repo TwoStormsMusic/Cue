@@ -32,7 +32,7 @@ A `.cue` file is a zip:
 ```json
 {
   "cue": 1,
-  "saved_by": "Cue 0.3.6",
+  "saved_by": "Cue 0.4.0",
   "name": "Friday",
   "inputs": ["Bass"],
   "outputs": ["FOH", "Amp"],
