@@ -1,6 +1,7 @@
 #include "vst3_processor.h"
 
 #include "pluginterfaces/base/funknownimpl.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -25,6 +27,18 @@
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
+
+// The editor interfaces' ids: the SDK leaves these to whoever uses them, and
+// the VST3 files Cue builds define only the audio ones.
+namespace Steinberg {
+DEF_CLASS_IID(IPlugView)
+DEF_CLASS_IID(IPlugFrame)
+namespace Linux {
+DEF_CLASS_IID(IEventHandler)
+DEF_CLASS_IID(ITimerHandler)
+DEF_CLASS_IID(IRunLoop)
+} // namespace Linux
+} // namespace Steinberg
 
 namespace cue {
 
@@ -78,6 +92,87 @@ public:
 
 uint32_t vstTail(uint32 t) { return t == kInfiniteTail ? cue::kInfiniteTail : t; }
 
+// The frame an editor sits in: what the plug-in talks to about its size, and
+// the run loop it needs on Linux, where there is no run loop of its own.
+// Everything here happens on the main thread, with the editor's window.
+class PlugFrame : public U::Implements<U::Directly<IPlugFrame, Linux::IRunLoop>> {
+public:
+    struct Handler {
+        IPtr<Linux::IEventHandler> handler;
+        int fd = -1;
+    };
+    struct Timer {
+        IPtr<Linux::ITimerHandler> handler;
+        std::chrono::milliseconds period{16};
+        std::chrono::steady_clock::time_point due;
+    };
+
+    std::vector<Handler> handlers;
+    std::vector<Timer> timers;
+    bool resizeAsked = false;
+    cue::EditorSize asked;
+
+    tresult PLUGIN_API resizeView(IPlugView*, ViewRect* size) override {
+        if (!size)
+            return kInvalidArgument;
+        // Cue resizes the window at its next turn; the plug-in is told the
+        // new size when the window reports it.
+        asked = {static_cast<uint32_t>(size->getWidth()), static_cast<uint32_t>(size->getHeight()), true};
+        resizeAsked = true;
+        return kResultTrue;
+    }
+
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* h, Linux::FileDescriptor fd) override {
+        if (!h || fd < 0)
+            return kInvalidArgument;
+        handlers.push_back({IPtr<Linux::IEventHandler>(h), fd});
+        return kResultTrue;
+    }
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* h) override {
+        const auto it = std::remove_if(handlers.begin(), handlers.end(), [&](const Handler& e) { return e.handler.get() == h; });
+        if (it == handlers.end())
+            return kResultFalse;
+        handlers.erase(it, handlers.end());
+        return kResultTrue;
+    }
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* h, Linux::TimerInterval ms) override {
+        if (!h)
+            return kInvalidArgument;
+        const auto period = std::chrono::milliseconds(std::max<Linux::TimerInterval>(ms, 1));
+        timers.push_back({IPtr<Linux::ITimerHandler>(h), period, std::chrono::steady_clock::now() + period});
+        return kResultTrue;
+    }
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* h) override {
+        const auto it = std::remove_if(timers.begin(), timers.end(), [&](const Timer& t) { return t.handler.get() == h; });
+        if (it == timers.end())
+            return kResultFalse;
+        timers.erase(it, timers.end());
+        return kResultTrue;
+    }
+
+    // Called from the engine's loop: what is due, and what is readable.
+    void runTimers() {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<IPtr<Linux::ITimerHandler>> due;
+        for (Timer& t : timers)
+            if (now >= t.due) {
+                due.push_back(t.handler);
+                t.due = std::max(t.due + t.period, now);
+            }
+        for (auto& h : due)
+            h->onTimer();
+    }
+    void runFd(int fd) {
+        // A copy: a handler may register or unregister while it runs.
+        std::vector<IPtr<Linux::IEventHandler>> ready;
+        for (const Handler& h : handlers)
+            if (h.fd == fd)
+                ready.push_back(h.handler);
+        for (auto& h : ready)
+            h->onFDIsSet(fd);
+    }
+};
+
 } // namespace
 
 struct Vst3Processor::Impl {
@@ -100,6 +195,10 @@ struct Vst3Processor::Impl {
 
     CommandQueue<ParamChange, 512> audioQueue;
     CommandQueue<ParamChange, 512> controllerQueue;
+
+    // The editor, main thread only.
+    IPtr<IPlugView> view;
+    IPtr<PlugFrame> frame;
 
     int32 inChannels = 0, outChannels = 0;
     bool active = false, processing = false;
@@ -191,6 +290,7 @@ std::unique_ptr<Vst3Processor> Vst3Processor::load(const std::string& path, cons
 }
 
 Vst3Processor::~Vst3Processor() {
+    closeEditor();
     deactivate();
     if (impl_->controller)
         impl_->controller->setComponentHandler(nullptr);
@@ -326,6 +426,93 @@ bool Vst3Processor::saveState(std::vector<uint8_t>& component, std::vector<uint8
     return true;
 }
 
+// ---------------------------------------------------------------- the editor
+
+bool Vst3Processor::hasEditor() const { return impl_->controller != nullptr; }
+
+bool Vst3Processor::editorOpen() const { return impl_->view != nullptr; }
+
+bool Vst3Processor::openEditor(unsigned long window, EditorSize* size, std::string* error) {
+    Impl& d = *impl_;
+    if (d.view)
+        return true;
+    if (!d.controller) {
+        *error = name_ + " has no editor of its own";
+        return false;
+    }
+    IPtr<IPlugView> view = owned(d.controller->createView(ViewType::kEditor));
+    if (!view) {
+        *error = name_ + " has no editor of its own";
+        return false;
+    }
+    if (view->isPlatformTypeSupported(kPlatformTypeX11EmbedWindowID) != kResultTrue) {
+        *error = name_ + " cannot put its editor in an X11 window (a Windows plug-in needs yabridge)";
+        return false;
+    }
+    if (!d.frame)
+        d.frame = owned(new PlugFrame());
+    d.frame->resizeAsked = false;
+    view->setFrame(d.frame);
+    // Attached first: a bridged plug-in only knows its size once its window
+    // is there.
+    if (view->attached(reinterpret_cast<void*>(static_cast<uintptr_t>(window)), kPlatformTypeX11EmbedWindowID) != kResultOk) {
+        view->setFrame(nullptr);
+        *error = name_ + " would not put its editor in Cue's window";
+        return false;
+    }
+    ViewRect rect{};
+    if (view->getSize(&rect) != kResultOk)
+        rect = ViewRect(0, 0, 800, 600);
+    d.view = view;
+    *size = {static_cast<uint32_t>(rect.getWidth()), static_cast<uint32_t>(rect.getHeight()), view->canResize() == kResultTrue};
+    return true;
+}
+
+void Vst3Processor::closeEditor() {
+    Impl& d = *impl_;
+    if (!d.view)
+        return;
+    d.view->removed();
+    d.view->setFrame(nullptr);
+    d.view = nullptr;
+    // A plug-in that forgot to give them back does not keep the loop busy.
+    if (d.frame) {
+        d.frame->handlers.clear();
+        d.frame->timers.clear();
+        d.frame->resizeAsked = false;
+    }
+}
+
+bool Vst3Processor::editorResized(uint32_t width, uint32_t height) {
+    Impl& d = *impl_;
+    if (!d.view || !width || !height)
+        return false;
+    ViewRect rect(0, 0, static_cast<int32>(width), static_cast<int32>(height));
+    return d.view->onSize(&rect) == kResultOk;
+}
+
+bool Vst3Processor::takeEditorResize(EditorSize* size) {
+    Impl& d = *impl_;
+    if (!d.frame || !d.frame->resizeAsked)
+        return false;
+    d.frame->resizeAsked = false;
+    *size = d.frame->asked;
+    return true;
+}
+
+void Vst3Processor::editorFds(std::vector<int>& out) const {
+    if (!impl_->frame)
+        return;
+    for (const PlugFrame::Handler& h : impl_->frame->handlers)
+        if (std::find(out.begin(), out.end(), h.fd) == out.end())
+            out.push_back(h.fd);
+}
+
+void Vst3Processor::onEditorFd(int fd) {
+    if (impl_->frame && impl_->view)
+        impl_->frame->runFd(fd);
+}
+
 void Vst3Processor::pumpMainThread() {
     Impl& d = *impl_;
     while (auto c = d.controllerQueue.pop())
@@ -338,6 +525,9 @@ void Vst3Processor::pumpMainThread() {
         if (flags & kReloadComponent)
             std::fprintf(stderr, "[%s] asked to be reloaded; not supported while loaded yet\n", name_.c_str());
     }
+    // The editor's timers: what a plug-in redraws itself with on Linux.
+    if (d.view && d.frame)
+        d.frame->runTimers();
 }
 
 bool Vst3Processor::setParam(uint32_t id, double normalized) {

@@ -69,6 +69,16 @@ public:
     uint32_t latencySamples() const override;
     uint32_t tailSamples() const override;
 
+    // The plug-in's own editor, in a window the host makes. Main thread.
+    bool hasEditor() const override { return gui_ != nullptr; }
+    bool openEditor(unsigned long window, EditorSize* size, std::string* error) override;
+    void closeEditor() override;
+    bool editorOpen() const override { return editorOpen_; }
+    bool editorResized(uint32_t width, uint32_t height) override;
+    bool takeEditorResize(EditorSize* size) override;
+    void editorFds(std::vector<int>& out) const override;
+    void onEditorFd(int fd) override;
+
     // Host callbacks, public for the C trampolines.
     void onRequestRestart() { restartRequested_ = true; }
     void onRequestCallback() { callbackRequested_ = true; }
@@ -78,6 +88,10 @@ public:
     void onLog(int severity, const char* msg) const;
     bool onRegisterTimer(uint32_t periodMs, clap_id* id);
     bool onUnregisterTimer(clap_id id);
+    bool onRegisterFd(int fd);
+    bool onUnregisterFd(int fd);
+    void onGuiResize(uint32_t width, uint32_t height);
+    void onGuiClosed();
 
 private:
     struct ParamChange {
@@ -115,6 +129,8 @@ private:
     const clap_plugin_latency_t* latency_ = nullptr;
     const clap_plugin_tail_t* tail_ = nullptr;
     const clap_plugin_timer_support_t* timerExt_ = nullptr;
+    const clap_plugin_gui_t* gui_ = nullptr;
+    const clap_plugin_posix_fd_support_t* fdExt_ = nullptr;
 
     std::string name_, id_;
     bool activated_ = false;
@@ -151,6 +167,15 @@ private:
 
     std::vector<Timer> timers_; // main thread only
     clap_id nextTimerId_ = 1;
+
+    // The editor, all on the main thread: whether it is up, the file
+    // descriptors the plug-in asked the host to watch, and a size it asked
+    // for (its own zoom) that the host has not given it yet.
+    bool editorOpen_ = false;
+    bool editorResizable_ = false;
+    std::vector<int> editorFds_;
+    bool editorResizeAsked_ = false;
+    EditorSize editorAskedSize_;
 };
 
 } // namespace cue

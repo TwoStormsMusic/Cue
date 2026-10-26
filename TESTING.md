@@ -235,6 +235,36 @@ bin/cue-app --start "$HOME/cue/app-test.cue" --fullscreen
 
 Drawing wires, adding plug-ins and zooming are not in 0.5 yet: they come with the routing editor.
 
+## 10. Plug-in editors (0.6.0)
+
+Each plug-in's own window, the one you know from REAPER, opened by Cue. The engine opens it on the screen of the computer it runs on, so do this on the mini PC's own desktop, not over ssh. **This is the step that matters most: Neural DSP through yabridge is the one thing only your rig can prove.** `bin/cue-app --version` should say 0.6.0.
+
+```sh
+bin/cue-app --start "$HOME/cue/app-test.cue" --fullscreen
+```
+
+**From the app.** Tap **Chains**, tap a plug-in, then **Open editor**. Expect its window on the screen, drawing and taking the mouse. The button becomes **Close editor**. Try, in this order:
+
+- A TwoStorms plug-in (Gain Stage, Delay). It should look exactly as it does in REAPER.
+- **A Neural DSP plug-in (Parallax, Darkglass).** This goes through yabridge and Wine, which is the part I cannot test here. **Send** what happens, whatever it is: the window, a blank window, nothing at all, or a crash. If it does crash, say whether the sound carried on.
+- Two editors at once, from different chains. Both should draw; closing one should leave the other alone.
+
+**It is heard at once, and kept.** With an editor open, play and turn a knob in it: the sound follows. Then tap **Save** in the app and, over ssh or in another terminal:
+
+```sh
+bin/cue check "$HOME/cue/app-test.cue"
+```
+
+Load the file again (`bin/cue-app --start "$HOME/cue/app-test.cue"`) and open that plug-in's editor: the knob should be where you left it, not back where it was.
+
+**The sound does not wait on it.** With an editor open, play for a few minutes, switch chains, and watch the Xruns pill. It should stay at 0. Drag the editor's window around and resize it while playing: still 0. **Send** the number, and the CPU pill with an editor open and closed.
+
+**It closes cleanly.** Close an editor with its window's own X button: the app's button should go back to **Open editor** within a second. Then `bin/cue ctl quit` with editors open: everything should go away without a crash. **Send** the last lines it printed.
+
+From ssh you can also drive it: `bin/cue ctl editor 2 1` opens chain 2's first plug-in, `bin/cue ctl editor 2 1 close` shuts it. Over ssh the window still opens on the mini PC's screen (or it says there is no screen to open it on, if you started the engine over ssh without one).
+
+Note: `./run-tests.sh` now opens and closes a few small test windows when it is run on a desktop. That is the editor test, and it is quick.
+
 ## What passes
 
 | Check | Pass when |
@@ -248,6 +278,7 @@ Drawing wires, adding plug-ins and zooming are not in 0.5 yet: they come with th
 | Pedals | LEDs and display match the table above |
 | Same sound | `cmp` says `same`, or the .cue sounds the same as the INI |
 | Remote control | `cue ctl` switches as cleanly as the pedals, and `watch` adds no xruns |
+| Plug-in editors | Each plug-in's own window opens, is heard at once, is kept by Save, and leaves Xruns at 0 |
 | Save | Saving while playing makes no click; the saved file checks and plays |
 | App in step | Taps and pedals switch the same way, and the screen and the FCB always agree |
 | Tuner | The note settles fast and holds steady; the tuner pedal brings the tuner view up and back |

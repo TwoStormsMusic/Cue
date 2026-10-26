@@ -57,7 +57,13 @@ draws them: inputs and outputs are rectangles, Gain Stage a circle, Act a
 small circle, other plug-ins hexagons. Green is a plug-in that is on, or a
 wire carrying sound to an output in the chain playing; grey is bypassed or
 silent; orange is what you selected. Tap a block to switch it on or off and
-move its parameters with sliders. **Play this chain** plays the chain shown;
+move its parameters with sliders. **Open editor** opens the plug-in's own
+window, the one it has in a DAW: Neural DSP through yabridge, the TwoStorms
+plug-ins, anything with an editor. It opens on the screen of the computer
+running the engine, which on stage is the one in front of you, and what you
+change there is heard at once and kept by **Save**. The sound never waits on
+an editor: it is drawn between blocks, never on the audio thread, and
+closing one changes nothing about what is heard. **Play this chain** plays the chain shown;
 **Save** saves the performance, plug-in settings included, to its `.cue`
 file. Moving and wiring blocks comes with the routing editor.
 

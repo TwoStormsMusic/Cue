@@ -108,6 +108,9 @@ namespace {
 
 ClapProcessor* owner(const clap_host_t* host) { return static_cast<ClapProcessor*>(host->host_data); }
 
+// Editors are embedded in a window of Cue's own; on Linux that is X11.
+constexpr const char* kWindowApi = CLAP_WINDOW_API_X11;
+
 bool hostIsMainThread(const clap_host_t*) { return std::this_thread::get_id() == g_mainThread; }
 bool hostIsAudioThread(const clap_host_t*) { return isAudioThread(); }
 const clap_host_thread_check_t kThreadCheck = {hostIsMainThread, hostIsAudioThread};
@@ -135,6 +138,26 @@ bool hostRegisterTimer(const clap_host_t* host, uint32_t periodMs, clap_id* id) 
 bool hostUnregisterTimer(const clap_host_t* host, clap_id id) { return owner(host)->onUnregisterTimer(id); }
 const clap_host_timer_support_t kTimerSupport = {hostRegisterTimer, hostUnregisterTimer};
 
+// An editor draws from its own connection to the screen: the main loop waits
+// on the file descriptors the plug-in registers here, so it redraws as soon
+// as something happens.
+bool hostRegisterFd(const clap_host_t* host, int fd, clap_posix_fd_flags_t) { return owner(host)->onRegisterFd(fd); }
+bool hostModifyFd(const clap_host_t* host, int fd, clap_posix_fd_flags_t) { return owner(host)->onRegisterFd(fd); }
+bool hostUnregisterFd(const clap_host_t* host, int fd) { return owner(host)->onUnregisterFd(fd); }
+const clap_host_posix_fd_support_t kFdSupport = {hostRegisterFd, hostModifyFd, hostUnregisterFd};
+
+// The editor's window belongs to the host, so what the plug-in can ask for
+// is a size (its own zoom) and to be closed.
+void hostResizeHintsChanged(const clap_host_t*) {}
+bool hostRequestResize(const clap_host_t* host, uint32_t width, uint32_t height) {
+    owner(host)->onGuiResize(width, height);
+    return true;
+}
+bool hostRequestShow(const clap_host_t*) { return false; }
+bool hostRequestHide(const clap_host_t*) { return false; }
+void hostGuiClosed(const clap_host_t* host, bool) { owner(host)->onGuiClosed(); }
+const clap_host_gui_t kGuiHost = {hostResizeHintsChanged, hostRequestResize, hostRequestShow, hostRequestHide, hostGuiClosed};
+
 const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &kThreadCheck;
     if (!std::strcmp(id, CLAP_EXT_LOG)) return &kLog;
@@ -143,6 +166,8 @@ const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTailHost;
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kStateHost;
     if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &kTimerSupport;
+    if (!std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT)) return &kFdSupport;
+    if (!std::strcmp(id, CLAP_EXT_GUI)) return &kGuiHost;
     return nullptr;
 }
 void hostRequestRestart(const clap_host_t* host) { owner(host)->onRequestRestart(); }
@@ -242,6 +267,10 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->latency_ = static_cast<const clap_plugin_latency_t*>(ext(CLAP_EXT_LATENCY));
     p->tail_ = static_cast<const clap_plugin_tail_t*>(ext(CLAP_EXT_TAIL));
     p->timerExt_ = static_cast<const clap_plugin_timer_support_t*>(ext(CLAP_EXT_TIMER_SUPPORT));
+    p->fdExt_ = static_cast<const clap_plugin_posix_fd_support_t*>(ext(CLAP_EXT_POSIX_FD_SUPPORT));
+    if (const auto* gui = static_cast<const clap_plugin_gui_t*>(ext(CLAP_EXT_GUI)))
+        if (gui->is_api_supported && gui->is_api_supported(p->plugin_, kWindowApi, false))
+            p->gui_ = gui;
     if (const auto* notes = static_cast<const clap_plugin_note_ports_t*>(ext(CLAP_EXT_NOTE_PORTS))) {
         for (uint32_t i = 0, n = notes->count(p->plugin_, true); i < n; ++i) {
             clap_note_port_info_t info{};
@@ -263,6 +292,9 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
 ClapProcessor::~ClapProcessor() {
     if (!plugin_)
         return;
+    // A plug-in never leaves its editor behind; the window it was in is the
+    // host's to tidy up.
+    closeEditor();
     deactivate();
     plugin_->destroy(plugin_);
 }
@@ -368,6 +400,101 @@ void ClapProcessor::pumpMainThread() {
         std::fprintf(stderr, "[%s] asked for a restart; not supported while loaded yet\n", name_.c_str());
     rescanRequested_ = false;
 }
+
+// ---------------------------------------------------------------- the editor
+
+bool ClapProcessor::openEditor(unsigned long window, EditorSize* size, std::string* error) {
+    if (!gui_) {
+        *error = name_ + " has no editor of its own";
+        return false;
+    }
+    if (editorOpen_)
+        return true;
+    if (!gui_->create(plugin_, kWindowApi, false)) {
+        *error = name_ + " would not make its editor";
+        return false;
+    }
+    uint32_t width = 0, height = 0;
+    if (gui_->get_size)
+        gui_->get_size(plugin_, &width, &height);
+    editorResizable_ = gui_->can_resize && gui_->can_resize(plugin_);
+    clap_window_t parent{};
+    parent.api = kWindowApi;
+    parent.x11 = static_cast<clap_xwnd>(window);
+    if (!gui_->set_parent || !gui_->set_parent(plugin_, &parent)) {
+        gui_->destroy(plugin_);
+        editorFds_.clear();
+        *error = name_ + " would not put its editor in Cue's window";
+        return false;
+    }
+    if (gui_->show)
+        gui_->show(plugin_);
+    editorOpen_ = true;
+    editorResizeAsked_ = false;
+    *size = {width, height, editorResizable_};
+    return true;
+}
+
+void ClapProcessor::closeEditor() {
+    if (!editorOpen_)
+        return;
+    editorOpen_ = false;
+    if (gui_->hide)
+        gui_->hide(plugin_);
+    gui_->destroy(plugin_);
+    // A plug-in that forgot to give its file descriptors back does not keep
+    // the main loop waiting on them.
+    editorFds_.clear();
+    editorResizeAsked_ = false;
+}
+
+bool ClapProcessor::editorResized(uint32_t width, uint32_t height) {
+    if (!editorOpen_ || !editorResizable_ || !gui_->set_size || !width || !height)
+        return false;
+    return gui_->set_size(plugin_, width, height);
+}
+
+bool ClapProcessor::takeEditorResize(EditorSize* size) {
+    if (!editorResizeAsked_)
+        return false;
+    editorResizeAsked_ = false;
+    *size = editorAskedSize_;
+    return true;
+}
+
+void ClapProcessor::editorFds(std::vector<int>& out) const { out.insert(out.end(), editorFds_.begin(), editorFds_.end()); }
+
+void ClapProcessor::onEditorFd(int fd) {
+    // Each plug-in is asked only about its own; its handler checks whether
+    // anything is actually waiting.
+    if (fdExt_ && editorOpen_ && std::find(editorFds_.begin(), editorFds_.end(), fd) != editorFds_.end())
+        fdExt_->on_fd(plugin_, fd, CLAP_POSIX_FD_READ);
+}
+
+bool ClapProcessor::onRegisterFd(int fd) {
+    if (std::this_thread::get_id() != g_mainThread || fd < 0)
+        return false;
+    if (std::find(editorFds_.begin(), editorFds_.end(), fd) == editorFds_.end())
+        editorFds_.push_back(fd);
+    return true;
+}
+
+bool ClapProcessor::onUnregisterFd(int fd) {
+    const auto it = std::find(editorFds_.begin(), editorFds_.end(), fd);
+    if (it == editorFds_.end())
+        return false;
+    editorFds_.erase(it);
+    return true;
+}
+
+void ClapProcessor::onGuiResize(uint32_t width, uint32_t height) {
+    editorAskedSize_ = {width, height, editorResizable_};
+    editorResizeAsked_ = true;
+}
+
+// The plug-in wants its editor gone (its own close button). The window goes
+// with it at the next pump.
+void ClapProcessor::onGuiClosed() { editorResizeAsked_ = false; }
 
 std::vector<ParamInfo> ClapProcessor::params() const {
     std::vector<ParamInfo> out;

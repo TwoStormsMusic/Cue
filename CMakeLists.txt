@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.5.1 LANGUAGES C CXX)
+project(cue VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,9 @@ option(CUE_BUILD_TESTS "Build the offline tests" ON)
 option(CUE_BUILD_APP "Build the desktop app, cue-app (needs Qt 6 Widgets and Network)" ON)
 
 find_package(Threads REQUIRED)
+# X11, for the windows plug-in editors live in. Without it the engine still
+# builds and says editors are not available.
+find_package(X11)
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 add_compile_definitions(CUE_VERSION="${PROJECT_VERSION}")
@@ -64,9 +67,16 @@ target_include_directories(cue_core PUBLIC src)
 
 add_library(cue_host STATIC
   src/host/clap_processor.cpp
+  src/host/editor_host.cpp
   src/host/vst3_processor.cpp
 )
 target_link_libraries(cue_host PUBLIC cue_core clap_headers vst3_hosting ${CMAKE_DL_LIBS})
+if(X11_FOUND)
+  target_compile_definitions(cue_host PRIVATE CUE_HAVE_X11)
+  target_link_libraries(cue_host PUBLIC X11::X11)
+else()
+  message(STATUS "X11 not found: plug-in editors will not open (install libx11-dev)")
+endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
@@ -91,6 +101,12 @@ target_link_options(cue PRIVATE -static-libstdc++ -static-libgcc)
 # Test plug-ins: one .clap file with gain, delay, burn and crash plug-ins.
 add_library(cue_test_plugins MODULE plugins/test/test_plugins.cpp)
 target_link_libraries(cue_test_plugins PRIVATE clap_headers)
+if(X11_FOUND)
+  # cue.test.gain gets a small editor, so the host's editor windows can be
+  # tested without an outside plug-in.
+  target_compile_definitions(cue_test_plugins PRIVATE CUE_TEST_X11)
+  target_link_libraries(cue_test_plugins PRIVATE X11::X11)
+endif()
 set_target_properties(cue_test_plugins PROPERTIES PREFIX "" SUFFIX ".clap"
   OUTPUT_NAME "Cue Test Plugins" CXX_VISIBILITY_PRESET hidden)
 
@@ -138,7 +154,7 @@ endif()
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

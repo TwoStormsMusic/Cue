@@ -18,6 +18,12 @@ constexpr uint32_t kInfiniteTail = std::numeric_limits<uint32_t>::max();
 void markAudioThread();
 bool isAudioThread();
 
+// How big a plug-in's editor wants to be, and whether it takes any size.
+struct EditorSize {
+    uint32_t width = 0, height = 0;
+    bool resizable = false;
+};
+
 struct ParamInfo {
     uint32_t id;
     std::string name, module;
@@ -83,6 +89,33 @@ public:
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.
     virtual uint32_t tailSamples() const { return 0; }
+
+    // ---- the plug-in's own editor window ----
+    //
+    // The host makes the window and the plug-in draws inside it, so Cue
+    // decides where editors go. Every call here is on the main thread; none
+    // of it touches the audio thread, so an editor cannot cause a dropout
+    // (what the editor draws can still cost CPU, which is why they are
+    // opened by hand).
+    virtual bool hasEditor() const { return false; }
+    // Puts the editor inside window (an X11 window id), which the host sizes
+    // to what comes back, and shows it.
+    virtual bool openEditor(unsigned long /*window*/, EditorSize* /*size*/, std::string* error) {
+        *error = "this plug-in has no editor";
+        return false;
+    }
+    virtual void closeEditor() {}
+    virtual bool editorOpen() const { return false; }
+    // The window was resized by hand: the editor lays out again (false if it
+    // would rather keep the size it has).
+    virtual bool editorResized(uint32_t /*width*/, uint32_t /*height*/) { return false; }
+    // The size the plug-in has asked for since the last call, if any: its
+    // own zoom setting, say.
+    virtual bool takeEditorResize(EditorSize* /*size*/) { return false; }
+    // The plug-in asked the host to watch these file descriptors (its own
+    // connection to the display, usually); onEditorFd says one is ready.
+    virtual void editorFds(std::vector<int>& /*out*/) const {}
+    virtual void onEditorFd(int /*fd*/) {}
 };
 
 } // namespace cue

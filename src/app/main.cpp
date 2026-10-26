@@ -26,6 +26,7 @@
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
+#include "host/editor_host.h"
 #include "host/vst3_processor.h"
 #include "midi/alsa_midi.h"
 #include "midi/eurekaprom.h"
@@ -280,7 +281,7 @@ PluginSpec* specAt(Config& config, int chain, size_t slot) {
 
 // A plug-in for the app: what it is, whether it is bypassed, and its
 // parameters with their values now.
-Json pluginJson(const Rig& rig, int k, const PluginSpec& ps) {
+Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const EditorHost* editors = nullptr) {
     const RigPlugin& rp = rig.plugins[k];
     Processor* p = rp.processor;
     Json j;
@@ -290,6 +291,8 @@ Json pluginJson(const Rig& rig, int k, const PluginSpec& ps) {
     j["name"] = p->name();
     j["format"] = ps.kind;
     j["bypassed"] = rig.bypassedNow[k].load(std::memory_order_relaxed);
+    j["editor"] = p->hasEditor();
+    j["editor_open"] = editors && editors->isOpen(*p);
     Json params = Json::array();
     for (const ParamInfo& info : p->params()) {
         Json q = {{"id", info.id}, {"name", info.name}, {"module", info.module}, {"min", info.min}, {"max", info.max},
@@ -334,6 +337,15 @@ void captureStates(const Rig& rig, Config& config) {
                         ps.embeddedState = true;
                     else
                         std::fprintf(stderr, "warning: %s did not give its state; saving the one it was loaded with\n", p->name().c_str());
+                    // A param line in the file wins over the state when the
+                    // performance loads, so the lines follow what the
+                    // plug-in says now: a move made in its own editor is
+                    // kept rather than set back.
+                    for (auto& [id, value] : ps.params) {
+                        double now = value;
+                        if (p->paramValue(id, now))
+                            value = now;
+                    }
                 }
 }
 
@@ -499,6 +511,9 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     std::signal(SIGTERM, onSignal);
     show.start();
 
+    // The windows plug-in editors open in, on the computer's own screen.
+    EditorHost editors;
+
     // The control socket: the app and cue ctl.
     Service service;
     Window lastSample(engine.numChains());
@@ -589,7 +604,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             config.tuner.settings = t;
             tuner.setSettings(t);
             reply["tuner"] = tunerJson(tuner.reading(), t, config.inputs.at(tunerInput));
-        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param") {
+        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param" || cmd == "editor") {
             const int chain = req.at("chain").get<int>();
             const size_t slot = req.at("slot").get<size_t>();
             const int k = rig.find(chain, slot);
@@ -615,12 +630,24 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                         v = value;
                 reply["text"] = p->paramText(id, value);
                 return;
+            } else if (cmd == "editor") {
+                // The plug-in's own window, on the computer's screen, not the
+                // app's: the app may be on another machine.
+                const bool wanted = req.value("open", true);
+                if (!wanted) {
+                    editors.close(*p);
+                } else {
+                    const std::string title = rig.plugins[k].label + " — " + rig.chainNames.at(chain);
+                    std::string why;
+                    if (!editors.open(*p, title, &why))
+                        return refuse(why);
+                }
             }
-            reply["plugin"] = pluginJson(rig, k, *ps);
+            reply["plugin"] = pluginJson(rig, k, *ps, &editors);
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
-            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, quit, subscribe, unsubscribe)");
+            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {
@@ -645,9 +672,15 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     bool reportedSched = false;
     uint64_t reportedXruns = 0, reportedStartup = 0;
 
+    std::vector<int> editorFds;
     while (!g_quit) {
-        service.poll(10);
+        editorFds.clear();
+        editors.fds(editorFds);
+        // An editor redraws as soon as something happens on its screen,
+        // rather than at the next turn of the loop.
+        service.poll(10, editorFds);
         rig.pumpMainThread();
+        editors.pump();
         EngineEvent ev;
         while (engine.nextEvent(ev)) {
         }
@@ -741,6 +774,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
     }
     std::printf("\nstopping\n");
+    // The editors go before the plug-ins they belong to.
+    editors.closeAll();
     service.close();
     audio->stop();
     midiRun = false;
@@ -1230,7 +1265,7 @@ int cmdCtl(int argc, char** argv) {
     if (args.empty()) {
         std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | tuner | select <chain|number|next|previous> |\n"
                              "        do \"<action>\" | save [file.cue] | performance | plugin <chain> <n> | bypass <chain> <n> on|off |\n"
-                             "        param <chain> <n> <id> <value> | quit\n");
+                             "        param <chain> <n> <id> <value> | editor <chain> <n> [close] | quit\n");
         return 2;
     }
     ServiceClient client;
@@ -1341,7 +1376,8 @@ int cmdCtl(int argc, char** argv) {
             request["path"] = std::filesystem::absolute(args[1]).string();
     } else if (what == "performance" || what == "quit" || what == "hello") {
         request = {{"cmd", what}};
-    } else if ((what == "plugin" && args.size() >= 3) || (what == "bypass" && args.size() >= 4) || (what == "param" && args.size() >= 5)) {
+    } else if ((what == "plugin" && args.size() >= 3) || (what == "bypass" && args.size() >= 4) || (what == "param" && args.size() >= 5) ||
+               (what == "editor" && args.size() >= 3)) {
         // Chains and plug-ins by number from 1, as cue check lists them.
         request = {{"cmd", what}, {"chain", std::atoi(args[1].c_str()) - 1}, {"slot", std::atoi(args[2].c_str()) - 1}};
         if (what == "bypass")
@@ -1350,8 +1386,11 @@ int cmdCtl(int argc, char** argv) {
             request["param"] = std::strtoul(args[3].c_str(), nullptr, 10);
             request["value"] = std::atof(args[4].c_str());
         }
+        if (what == "editor")
+            request["open"] = args.size() < 4 || !(args[3] == "close" || args[3] == "off" || args[3] == "no");
     } else {
-        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, plugin, bypass, param, quit)\n",
+        std::fprintf(stderr,
+                     "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, plugin, bypass, param, editor, quit)\n",
                      what.c_str());
         return 2;
     }
@@ -1365,7 +1404,10 @@ int cmdCtl(int argc, char** argv) {
         std::printf("playing %s\n", reply.at("selected").value("name", "").c_str());
     else if (what == "param")
         std::printf("%s\n", reply.value("text", "").c_str());
-    else if (what == "plugin" || what == "bypass") {
+    else if (what == "editor") {
+        const Json& p = reply.at("plugin");
+        std::printf("%s: editor %s\n", p.value("label", "").c_str(), p.value("editor_open", false) ? "open" : "closed");
+    } else if (what == "plugin" || what == "bypass") {
         const Json& p = reply.at("plugin");
         std::printf("%s (%s, %s)%s\n", p.value("label", "").c_str(), p.value("name", "").c_str(), p.value("format", "").c_str(),
                     p.value("bypassed", false) ? "  bypassed" : "");

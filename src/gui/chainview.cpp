@@ -577,6 +577,22 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
            },
            bypassed ? color::green : color::text, bypassed ? color::greenDark : color::border2, color::panel2, 16 * u);
     y += 62 * u;
+    // The plug-in's own editor, when it has one. It opens on the computer
+    // running the engine, which on stage is this one.
+    if (plugin_.value("editor").toBool()) {
+        const bool open = plugin_.value("editor_open").toBool();
+        const QRectF eb(r.left() + pad, y, w, 50 * u);
+        button(p, "editor", eb, open ? "Close editor" : "Open editor",
+               [this, chain = c.index, slot = slot_, open] {
+                   s.link.request({{"cmd", "editor"}, {"chain", chain}, {"slot", slot}, {"open", !open}},
+                                  [this](const QJsonObject& r) {
+                                      if (s.check(r, "Could not open the editor"))
+                                          requestPlugin();
+                                  });
+               },
+               open ? color::onOrange : color::text, open ? color::orange : color::border2, open ? color::orange : color::panel2, 16 * u);
+        y += 62 * u;
+    }
     p.setPen(color::muted);
     p.setFont(typeface(Face::Text, 13 * u));
     draw::text(p, QRectF(r.left() + pad, y, w, 20 * u), Qt::AlignLeft | Qt::AlignVCenter,

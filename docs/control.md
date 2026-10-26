@@ -14,6 +14,7 @@ cue ctl save                   # save what is playing, plug-in states included, 
 cue ctl save ~/shows/fri.cue   # ...or to another one (later saves go there too)
 cue ctl performance            # the performance as JSON, without the states
 cue ctl plugin 2 1             # chain 2's first plug-in: whether it is bypassed, its parameters and values
+cue ctl editor 2 1             # open that plug-in's own editor window (editor 2 1 close shuts it)
 cue ctl bypass 2 1 on          # ...bypass it (off: back on); kept when the performance is saved
 cue ctl param 2 1 54 0.5       # ...set its parameter 54
 cue ctl quit                   # stop cue run
@@ -53,9 +54,10 @@ reply repeats:
 | `do` | `action` | |
 | `save` | `path` (optional: else the .cue it was loaded from) | `path`, `warnings` |
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
-| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text` |
+| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text` |
 | `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
 | `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
+| `editor` | `chain`, `slot`, `open` (true to open, false to close; true by default) | `plugin` as above. The window opens on the screen of the computer running the engine, not the app's, so it is the stage computer that shows it |
 | `quit` | | |
 | `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
 

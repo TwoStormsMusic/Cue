@@ -30,8 +30,9 @@ A **performance** is the whole config: **scenes** in the order you play them. A 
 | Performances as one `.cue` file, a rig profile per machine, a control socket (`cue ctl`) | done, needs the rig to test |
 | Built-in tuner: the TwoStorms Tuner's pitch detection on an input, before any plug-in | done, tested offline |
 | The app (`cue-app`): stage view, tuner, chains with bypass and parameter sliders, settings; by touch and mouse, any screen size ([docs/app.md](docs/app.md)) | done, needs the touchscreen to test |
+| Plug-in editors: each plug-in's own window, opened by the engine on the stage computer's screen, drawn between blocks and never on the audio thread | done, needs Neural DSP through yabridge on the rig to test |
 | Per-plug-in process isolation | **not yet** |
-| Plug-in windows, routing editor, MIDI learn, looper, LV2, JACK, PipeWire | later |
+| Routing editor, MIDI learn, looper, LV2, JACK, PipeWire | later |
 
 Everything runs in one process for now. That is deliberate: the first measurement is what your chains cost in process, and isolation is then added where it is worth its cost.
 
@@ -40,7 +41,7 @@ Everything runs in one process for now. That is deliberate: the first measuremen
 On the mini PC (AV Linux MXE-25, Debian based):
 
 ```sh
-sudo apt install build-essential cmake ninja-build pkg-config libasound2-dev qt6-base-dev
+sudo apt install build-essential cmake ninja-build pkg-config libasound2-dev qt6-base-dev libx11-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/cue_tests

@@ -419,6 +419,8 @@ private slots:
         QCOMPARE(param.value("param").toInt(), 0);
         QVERIFY(param.value("value").toDouble() > 1.8 && param.value("value").toDouble() <= 2.0);
         shot(v, "chains-selected");
+        // A plug-in with no editor of its own offers no button for one.
+        QVERIFY(v->hitRect("editor").isEmpty());
         click(v, v->hitRect("bypass"));
         const QJsonObject bypass = link.last("bypass");
         QCOMPARE(bypass.value("slot").toInt(), 0);
@@ -432,6 +434,48 @@ private slots:
         QCOMPARE(link.last("select").value("index").toInt(), 0);
         click(v, v->hitRect("save"));
         QVERIFY(!link.last("save").isEmpty());
+    }
+
+    void the_chain_view_opens_a_plugins_own_editor() {
+        FakeLink link;
+        bool open = false;
+        link.answer = [&open](const QJsonObject& r) -> QJsonObject {
+            if (r.value("cmd") == "editor")
+                open = r.value("open").toBool();
+            if (r.value("cmd") == "plugin" || r.value("cmd") == "editor")
+                return QJsonObject{{"ok", true},
+                                   {"plugin", QJsonObject{{"chain", 1},
+                                                          {"slot", 0},
+                                                          {"label", "Parallax"},
+                                                          {"name", "Parallax"},
+                                                          {"format", "vst3"},
+                                                          {"bypassed", false},
+                                                          {"editor", true},
+                                                          {"editor_open", open},
+                                                          {"params", QJsonArray{}}}}};
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        v->grab();
+        const QRectF button = v->hitRect("editor");
+        QVERIFY2(!button.isEmpty(), "no button to open the editor");
+        click(v, button);
+        QCOMPARE(link.last("editor").value("chain").toInt(), 1);
+        QCOMPARE(link.last("editor").value("slot").toInt(), 0);
+        QCOMPARE(link.last("editor").value("open").toBool(), true);
+        // Open, the same button closes it again.
+        v->grab();
+        click(v, v->hitRect("editor"));
+        QCOMPARE(link.last("editor").value("open").toBool(), false);
     }
 
     void settings_are_kept() {

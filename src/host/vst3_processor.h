@@ -57,6 +57,17 @@ public:
     uint32_t latencySamples() const override { return latency_.load(std::memory_order_relaxed); }
     uint32_t tailSamples() const override { return tail_.load(std::memory_order_relaxed); }
 
+    // The plug-in's own editor, in a window the host makes. Main thread.
+    // A Windows plug-in through yabridge looks like any other VST3 here.
+    bool hasEditor() const override;
+    bool openEditor(unsigned long window, EditorSize* size, std::string* error) override;
+    void closeEditor() override;
+    bool editorOpen() const override;
+    bool editorResized(uint32_t width, uint32_t height) override;
+    bool takeEditorResize(EditorSize* size) override;
+    void editorFds(std::vector<int>& out) const override;
+    void onEditorFd(int fd) override;
+
     struct Impl;
 
 private:
