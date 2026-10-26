@@ -43,7 +43,7 @@ cmake --build build
 ./build/cue_tests
 ```
 
-All third-party code is vendored under `third_party/`: the CLAP headers (MIT) and the VST3 SDK's interfaces and hosting helpers (MIT since SDK 3.8).
+All third-party code is vendored under `third_party/`: the CLAP headers (MIT), the VST3 SDK's interfaces and hosting helpers (MIT since SDK 3.8), and for `.cue` files miniz (MIT) and nlohmann/json (MIT).
 
 ## Commands
 
@@ -53,12 +53,13 @@ cue devices                      # sound cards and MIDI ports
 cue scan "<file.clap or bundle.vst3>"     # what is inside a plug-in file
 cue params "<file.clap or bundle.vst3>"   # a plug-in's parameters and their ids
 cue import-rpp "Cue Template.RPP" --mapping configs/cue-template-mapping.ini
-cue check <config.ini>           # load everything and print what Cue understood
+cue convert <config.ini> [out.cue] [--rig rig.json]  # save it as one .cue file (and this machine's settings as a rig profile)
+cue check <config.ini|file.cue>  # load everything and print what Cue understood
 cue check <config.ini> --no-load # the same without loading plug-ins
 cue midi-monitor M2              # print what the FCB sends, decoded
 cue fcb-test M2 --channel 1      # walk the FCB's LEDs and display
 cue bench <config.ini> --wav out.wav   # offline: CPU per chain + a WAV of the switching
-cue run <config.ini>             # live
+cue run <config.ini|file.cue>    # live; a .cue plays with ~/.config/cue/rig.json, or --rig FILE
 ```
 
 While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, the margin (the least audio still queued for playback when a block was written; at zero the sound card runs dry), xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own: when it happened, how long the block before it took and how late it started, and the slowest block around it with the chains that played in it.

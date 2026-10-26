@@ -220,7 +220,7 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->library_ = lib;
     p->id_ = desc->id;
     p->name_ = desc->name ? desc->name : desc->id;
-    p->host_ = {CLAP_VERSION_INIT, p.get(), "Cue", "TwoStorms", "", "0.1",
+    p->host_ = {CLAP_VERSION_INIT, p.get(), "Cue", "TwoStorms", "", CUE_VERSION,
                 hostGetExtension, hostRequestRestart, hostRequestProcess, hostRequestCallback};
     p->plugin_ = f->create_plugin(f, &p->host_, desc->id);
     if (!p->plugin_) {

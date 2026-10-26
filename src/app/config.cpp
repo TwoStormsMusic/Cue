@@ -416,6 +416,17 @@ struct Parser {
         return true;
     }
 
+    bool performanceLine(const std::string& key, const std::string& value) {
+        if (key == "inputs" || key == "outputs") {
+            auto names = splitList(value);
+            if (names.empty())
+                return fail(key + " lists names: outputs = FOH, Amp");
+            (key == "inputs" ? config.inputs : config.outputs) = names;
+        } else
+            return fail("unknown performance setting '" + key + "' (inputs, outputs)");
+        return true;
+    }
+
     bool presetLine(const std::string& key, const std::string& value) {
         PresetSpec& p = config.scenes[scene].presets[preset];
         double n = 0;
@@ -424,6 +435,7 @@ struct Parser {
         else if (key == "pedal" && parseNumber(value, n) && n >= 1 && n <= 12) p.pedal = static_cast<int>(n);
         else if (key == "program" && parseNumber(value, n) && n >= 0 && n <= 127) p.program = static_cast<int>(n);
         else if (key == "do") p.actions.push_back({value, where});
+        else if (key == "warm") p.warm = value;
         else return fail("unknown or invalid preset setting '" + key + "'");
         return true;
     }
@@ -556,7 +568,7 @@ struct Parser {
             case Section::Audio: ok = audio(key, value); break;
             case Section::Switching: ok = switching(key, value); break;
             case Section::Midi: ok = midi(key, value); break;
-            case Section::Performance: ok = fail("unknown performance setting '" + key + "'"); break;
+            case Section::Performance: ok = performanceLine(key, value); break;
             case Section::Scene: ok = sceneLine(key, value, dir); break;
             case Section::Chain:
             case Section::Branch: ok = chainLine(key, value, dir); break;
@@ -702,9 +714,21 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
     if (!parser.parse(text, path))
         return false;
     config.path = path;
-
     if (config.scenes.empty()) {
         *error = path + ": no [scene] or [chain] sections";
+        return false;
+    }
+    return finishConfig(config, error);
+}
+
+bool finishConfig(Config& config, std::string* error) {
+    if (config.inputs.size() != 1 || config.outputs.size() != 2) {
+        *error = config.path + ": Cue plays one input and two outputs for now (this performance has " + std::to_string(config.inputs.size()) +
+                 " and " + std::to_string(config.outputs.size()) + ")";
+        return false;
+    }
+    if (config.scenes.empty()) {
+        *error = config.path + ": no scenes";
         return false;
     }
     for (auto& s : config.scenes) {
@@ -734,11 +758,17 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
                 if (!named && s.chains.size() > 1)
                     config.warnings.push_back(p.where + ": preset '" + p.name + "' has no 'chain =' line and no chain of its name, so it plays the first chain, " + p.chain);
             }
-            bool found = false;
-            for (const auto& c : s.chains)
+            bool found = false, warmFound = false;
+            for (const auto& c : s.chains) {
                 found = found || lower(c.name) == lower(p.chain);
+                warmFound = warmFound || lower(c.name) == lower(p.warm);
+            }
             if (!found) {
                 *error = p.where + ": preset '" + p.name + "': scene '" + s.name + "' has no chain named " + p.chain;
+                return false;
+            }
+            if (!p.warm.empty() && lower(p.warm) != "next" && lower(p.warm) != "none" && !warmFound) {
+                *error = p.where + ": preset '" + p.name + "': warm is next, none or a chain of scene '" + s.name + "', and it has no chain named " + p.warm;
                 return false;
             }
         }

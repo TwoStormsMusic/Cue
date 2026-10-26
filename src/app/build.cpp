@@ -106,7 +106,9 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     } else if (ps.kind == "vst3") {
                         auto vst = Vst3Processor::load(ps.path, ps.id, &err);
                         if (vst) {
-                            if (!ps.stateFile.empty()) {
+                            if (ps.embeddedState) {
+                                states.push_back({vst.get(), ps.state, ps.controllerState, ps.stateFile, true});
+                            } else if (!ps.stateFile.empty()) {
                                 PendingState st{vst.get(), {}, {}, ps.stateFile, true};
                                 if (!readFile(ps.stateFile, st.data, error) ||
                                     (!ps.controllerStateFile.empty() && !readFile(ps.controllerStateFile, st.controller, error)))
@@ -119,7 +121,9 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
                     } else {
                         auto clap = ClapProcessor::load(ps.path, ps.id, &err);
                         if (clap) {
-                            if (!ps.stateFile.empty()) {
+                            if (ps.embeddedState) {
+                                states.push_back({clap.get(), ps.state, {}, ps.stateFile, false});
+                            } else if (!ps.stateFile.empty()) {
                                 PendingState st{clap.get(), {}, {}, ps.stateFile, false};
                                 if (!readFile(ps.stateFile, st.data, error))
                                     return false;

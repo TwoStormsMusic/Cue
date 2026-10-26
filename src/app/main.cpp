@@ -1,6 +1,8 @@
 // cue: the live plug-in host prototype.
 //
-//   cue run <config>             play live: ALSA audio, FCB1010 switching
+//   cue run <config|file.cue>    play live: ALSA audio, FCB1010 switching
+//                                (a .cue takes this machine's settings from its rig profile, or --rig FILE)
+//   cue convert <config> [out]   save a config as a .cue performance (--rig FILE: and its audio and MIDI settings)
 //   cue bench <config> [opts]    offline: measure CPU per chain and render a WAV
 //   cue doctor [--device M2]     check real-time settings
 //   cue devices                  list sound cards and MIDI ports
@@ -15,6 +17,7 @@
 #include "app/build.h"
 #include "app/config.h"
 #include "app/cpu.h"
+#include "app/cuefile.h"
 #include "app/doctor.h"
 #include "app/rpp.h"
 #include "control/show.h"
@@ -163,9 +166,11 @@ struct RawTerminal {
 
 // ------------------------------------------------------------ commands
 
+std::string rigPath; // --rig: the rig profile a .cue plays with
+
 bool load(const std::string& path, Config& config) {
     std::string err;
-    if (!loadConfig(path, config, &err)) {
+    if (!loadPerformance(path, rigPath, config, &err)) {
         std::fprintf(stderr, "config: %s\n", err.c_str());
         return false;
     }
@@ -726,6 +731,59 @@ int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vect
     return result.missing ? 3 : 0;
 }
 
+int cmdConvert(const std::string& in, std::string out, std::string rigOut) {
+    namespace fs = std::filesystem;
+    Config config;
+    std::string err;
+    if (!loadConfig(in, config, &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    if (out.empty())
+        out = (fs::path(in).parent_path() / (fs::path(in).stem().string() + ".cue")).string();
+    if (config.performance.empty())
+        config.performance = fs::path(in).stem().string();
+    std::error_code ec;
+    if (fs::exists(out, ec)) {
+        fs::copy_file(out, out + ".bak", fs::copy_options::overwrite_existing, ec);
+        std::printf("kept the previous file as %s.bak\n", out.c_str());
+    }
+    std::vector<std::string> warnings;
+    if (!saveCue(config, out, &err, &warnings)) {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+    size_t chains = 0, plugins = 0, states = 0;
+    for (const auto& scene : config.scenes)
+        for (const auto& c : scene.chains) {
+            ++chains;
+            for (const PluginSpec* p : chainPlugins(c)) {
+                ++plugins;
+                states += !p->stateFile.empty() + !p->controllerStateFile.empty();
+            }
+        }
+    std::printf("wrote %s\n  %zu scene(s), %zu chain(s), %zu plug-in(s), %zu state(s)\n", out.c_str(), config.scenes.size(), chains, plugins, states);
+    for (const auto& w : config.warnings)
+        std::printf("  - %s\n", w.c_str());
+    for (const auto& w : warnings)
+        std::printf("  - %s\n", w.c_str());
+    if (rigOut.empty()) {
+        std::printf("\nThe config's audio and MIDI settings are not part of a performance. To keep them as this machine's rig\n"
+                    "profile: cue convert \"%s\" \"%s\" --rig %s\n",
+                    in.c_str(), out.c_str(), defaultRigPath().c_str());
+    } else {
+        rigOut = expandPath(rigOut);
+        fs::create_directories(fs::path(rigOut).parent_path(), ec);
+        if (!saveRig(config, rigOut, &err)) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("wrote the rig profile %s\n", rigOut.c_str());
+    }
+    std::printf("\nnext: cue check \"%s\"\n", out.c_str());
+    return 0;
+}
+
 int cmdScan(const std::string& path) {
     std::string err;
     if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0) {
@@ -802,11 +860,12 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  cue run <config.ini>\n"
-                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
+                 "  cue run <config.ini|file.cue> [--rig rig.json]\n"
+                 "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
+                 "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
-                 "  cue check <config.ini> [--no-load]\n"
+                 "  cue check <config.ini|file.cue> [--no-load] [--rig rig.json]\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
@@ -827,6 +886,9 @@ int main(int argc, char** argv) {
                 return argv[i + 1];
         return def;
     };
+    rigPath = opt("--rig", "");
+    if (cmd == "convert" && argc >= 3)
+        return cmdConvert(argv[2], argc >= 4 && argv[3][0] != '-' ? argv[3] : "", opt("--rig", ""));
     if (cmd == "run" && argc >= 3)
         return cmdRun(argv[2]);
     if (cmd == "bench" && argc >= 3)

@@ -45,7 +45,7 @@ tail_hold_ms = 300
 tail_quiet_db = -90
 bypass_fade_ms = 10 ; crossfade when a plug-in is switched on or off
 mute_fade_ms = 10
-warm = next         ; next: the next preset's chain runs muted in the background; none
+warm = next         ; next: the next preset's chain runs muted in the background; none. A preset's own warm = wins
 reset_tails_on_warm = yes ; delays and reverbs in the warm chain hear silence until the switch
 bypass_mode = thru  ; what a bypassed plug-in passes on, unless it says otherwise: thru (its input) or mute (nothing)
 
@@ -61,6 +61,8 @@ forward = yes       ; pass incoming MIDI on to plug-ins that take MIDI (a wah's 
 
 ```ini
 [performance Friday]          ; optional: names the performance
+inputs = Bass                 ; optional: what it calls its input and outputs (default In 1; Out 1, Out 2),
+outputs = FOH, Amp            ; the names a .cue keeps and a machine's rig profile gives channels to
 
 [scene Covers]
 display = CV                  ; optional: FCB display when no preset says otherwise
@@ -108,6 +110,7 @@ program = 5                   ; a program change that selects it from anywhere
 display = PU                  ; up to two letters or digits (three with a leading 1, - or +)
 do = group Preset start       ; actions, in order, every time it is selected
 do = Wah = Off
+warm = next                   ; optional: the chain kept warm while this plays: next, none or a chain's name
 ```
 
 A scene without `[preset]` sections gets one preset per chain. In a scene with several chains, `cue check` warns about a preset that names no chain and has no chain of its own name, since it would play the first chain. Presets are numbered through the whole performance; keys 1 to 9 pick them in `cue run`, and the FCB's up and down pedals step through them (unless something else uses those pedals). Selecting the preset that is already playing runs its actions again, which is handy for "back to how this song starts".
@@ -194,7 +197,7 @@ do = preset next
 | `Effect 1 = toggle` | first value if it is not there, else the last |
 | `Wah = default` | back to its default |
 | `group Preset start` | runs a group |
-| `preset Djent`, `preset 3`, `preset next`, `preset previous` | selects a preset |
+| `preset Djent`, `preset 3`, `preset next`, `preset previous` | selects a preset (`chain Djent` is the same: in a .cue file, each chain is selected by itself) |
 | `scene Covers`, `scene next`, `scene previous` | selects a scene's first preset |
 | `bypass Delay`, `enable Delay`, `toggle Delay` | switches plug-ins directly |
 | `param Delay 12 = 40` | sets a plug-in parameter |
@@ -221,7 +224,7 @@ Used by `when`, `enable ... when`, `mute`, and the `[fcb]` section.
 | `Tuner` | the control is not at its first value |
 | `Wah is Auto`, `Wah = Auto`, `Wah Auto` | it has that value (`is not`, `!=` for the opposite) |
 | `Mix > 0.5` | `<`, `<=`, `>`, `>=` compare numbers |
-| `preset is Djent`, `scene is Covers` | that preset or scene is playing |
+| `preset is Djent`, `chain is Djent`, `scene is Covers` | that preset (chain) or scene is playing |
 | `not ...`, `... and ...`, `... or ...`, `( ... )` | combinations |
 | `always` | always |
 

@@ -12,6 +12,14 @@ option(CUE_BUILD_TESTS "Build the offline tests" ON)
 find_package(Threads REQUIRED)
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+add_compile_definitions(CUE_VERSION="${PROJECT_VERSION}")
+
+# .cue files: zip (miniz, MIT) and JSON (nlohmann/json, MIT).
+add_library(miniz STATIC third_party/miniz/miniz.c)
+target_include_directories(miniz PUBLIC third_party/miniz)
+target_compile_options(miniz PRIVATE -w)
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json SYSTEM INTERFACE third_party)
 
 add_library(clap_headers INTERFACE)
 target_include_directories(clap_headers INTERFACE third_party/clap/include)
@@ -63,6 +71,7 @@ add_executable(cue
   src/app/main.cpp
   src/app/build.cpp
   src/app/config.cpp
+  src/app/cuefile.cpp
   src/app/rpp.cpp
   src/control/show.cpp
   src/app/cpu.cpp
@@ -70,7 +79,7 @@ add_executable(cue
   src/audio/alsa_backend.cpp
   src/midi/alsa_midi.cpp
 )
-target_link_libraries(cue PRIVATE cue_host PkgConfig::ALSA Threads::Threads)
+target_link_libraries(cue PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA Threads::Threads)
 # Self-contained C++ runtime, so the binary runs on any distribution with glibc 2.38 or newer.
 target_link_options(cue PRIVATE -static-libstdc++ -static-libgcc)
 
@@ -96,8 +105,8 @@ target_sources(cue_test_vst3 PRIVATE
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp src/app/config.cpp src/app/rpp.cpp src/control/show.cpp)
-  target_link_libraries(cue_tests PRIVATE cue_host PkgConfig::ALSA)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp src/app/config.cpp src/app/cuefile.cpp src/app/rpp.cpp src/control/show.cpp)
+  target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"

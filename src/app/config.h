@@ -24,6 +24,10 @@ struct PluginSpec {
     std::vector<std::pair<uint32_t, double>> params;
     std::string stateFile;           // plug-in state to load after activation
     std::string controllerStateFile; // VST3 only: the edit controller's state
+    // A .cue file carries the states themselves; stateFile then only names
+    // where they came from, for messages.
+    bool embeddedState = false;
+    std::vector<uint8_t> state, controllerState;
     std::string label;               // `name =`: what mappings call it
     bool bypassed = false;           // loaded, but not processed until a mapping enables it
     bool muteOnBypass = false;       // bypass_mode: when bypassed, pass silence (mute) instead of the input (thru)
@@ -63,6 +67,9 @@ struct PresetSpec {
     int pedal = 0;       // FCB pedal (1-10) that selects it
     int program = -1;    // MIDI program change that selects it
     std::vector<ConfigText> actions;
+    // Which chain is kept warm while it plays: "next", "none" or a chain of
+    // its scene. Empty: [switching] warm decides.
+    std::string warm;
     std::string where;
 };
 
@@ -138,6 +145,10 @@ struct Config {
     bool muteOnBypass = false; // [switching] bypass_mode: what plug-ins without their own do
     MidiSettings midi;
     std::string performance;   // the performance's name
+    // What the performance calls its input and outputs. A machine's rig
+    // profile says which sound card channel each one is.
+    std::vector<std::string> inputs = {"In 1"};
+    std::vector<std::string> outputs = {"Out 1", "Out 2"};
     std::vector<SceneSpec> scenes;
     std::vector<ControlSpec> controls;
     std::vector<TriggerSpec> triggers;
@@ -150,6 +161,9 @@ struct Config {
 // Parses the INI-style config described in docs/config.md.
 bool loadConfig(const std::string& path, Config& config, std::string* error);
 bool parseConfigText(const std::string& text, const std::string& path, Config& config, std::string* error);
+// What every loaded performance goes through: presets for scenes without
+// any, presets matched to chains, outputs tapped, controls completed.
+bool finishConfig(Config& config, std::string* error);
 
 // Every plug-in of a chain, line by line: the order of the engine's slots.
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain);
