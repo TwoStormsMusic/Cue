@@ -2,6 +2,7 @@
 
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
+#include "tuner/tuner.h"
 
 #include <cstdint>
 #include <string>
@@ -139,6 +140,14 @@ struct FcbSpec {
     std::vector<ConfigText> displays;             // text [when condition], first match wins
 };
 
+// The built-in tuner: the input it listens to, and its settings.
+struct TunerSpec {
+    std::string input;     // by name or as in1, in2...; empty = the first
+    size_t inputIndex = 0; // found by finishConfig
+    TunerSettings settings;
+    std::string where;
+};
+
 struct MidiSettings {
     bool enabled = true;
     std::string in = "any";    // sequencer port name match for input, or "any"
@@ -168,6 +177,7 @@ struct Config {
     std::vector<TriggerSpec> triggers;
     std::vector<GroupSpec> groups;
     FcbSpec fcb;
+    TunerSpec tuner;
     std::string path;          // the file that was loaded
     std::vector<std::string> warnings; // things that load but are probably mistakes
 };

@@ -7,6 +7,7 @@ doing and tell it what to do: the desktop app, and `cue ctl` from a terminal
 ```sh
 cue ctl status                 # one line: DSP load, margin, xruns, the chain playing, the controls
 cue ctl watch                  # the same twice a second, and every xrun or slow-block line, until Ctrl-C
+cue ctl tuner                  # the built-in tuner's reading, until Ctrl-C
 cue ctl select Slap            # play a chain: by name, by number (1 = the first), or next / previous
 cue ctl do "Wah = Auto"        # any action of the mapping language (docs/config.md)
 cue ctl save                   # save what is playing, plug-in states included, to its .cue file
@@ -48,8 +49,9 @@ reply repeats:
 | `select` | `chain` (a name), `index` (from 0) or `step` (+1, -1) | `selected`: `index`, `name` |
 | `do` | `action` | |
 | `save` | `path` (optional: else the .cue it was loaded from) | `path`, `warnings` |
+| `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
 | `quit` | | |
-| `subscribe`, `unsubscribe` | `events`: `["status", "log"]` | `events` now subscribed |
+| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
 
 Events have an `event` field instead of an `id`:
 
@@ -61,6 +63,13 @@ Events have an `event` field instead of an `id`:
   stopping; `avg_us`, `max_us` per block since the last event).
 - `log`: `level` (info, warning, error) and `text`, for each xrun, slow block
   and start-up stall line `cue run` prints.
+- `tuner`, about 30 times a second: the built-in tuner (the TwoStorms Tuner's
+  pitch detection on one input, before any plug-in). `note` (`"E"`, `"F#"`,
+  or null before one is heard), `octave`, `midi`, `cents` (settled, against
+  the note), `hz`, `held` (no pitch for a quarter second: the last note),
+  `in_tune`, `signal` and `level_db` of the input, and its settings:
+  `input`, `reference`, `range`, `tolerance`, `names`. The tuner only listens
+  while a client is subscribed to it, so it costs nothing otherwise.
 
 Everything runs on `cue run`'s main thread, never on the audio thread: a slow
 or stuck client cannot cause a click. A client that stops reading is

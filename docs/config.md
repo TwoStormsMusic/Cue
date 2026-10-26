@@ -21,7 +21,7 @@ include = more.ini      ; anywhere: reads that file here, relative to this one
 | **trigger** | An input and the actions it runs. |
 | **group** | Named actions that any trigger, preset or other group can run. |
 
-## Audio, switching, MIDI
+## Audio, switching, tuner, MIDI
 
 ```ini
 [audio]
@@ -48,6 +48,13 @@ mute_fade_ms = 10
 warm = next         ; next: the next preset's chain runs muted in the background; none. A preset's own warm = wins
 reset_tails_on_warm = yes ; delays and reverbs in the warm chain hear silence until the switch
 bypass_mode = thru  ; what a bypassed plug-in passes on, unless it says otherwise: thru (its input) or mute (nothing)
+
+[tuner]
+input = Bass        ; the input it listens to, before any plug-in (default: the first)
+reference = 440     ; A4 in Hz, 415 to 466
+range = bass        ; guitar, bass (down to a five-string's low B), vocals or any
+tolerance = 2       ; in tune within this many cents
+names = sharps      ; or flats
 
 [midi]
 in = M2             ; any MIDI port whose name contains this; 'any' for all

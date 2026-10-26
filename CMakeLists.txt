@@ -55,6 +55,9 @@ add_library(cue_core STATIC
   src/core/engine.cpp
   src/core/chain.cpp
   src/core/processor.cpp
+  src/tuner/fft.cpp
+  src/tuner/pitch.cpp
+  src/tuner/tuner.cpp
 )
 target_include_directories(cue_core PUBLIC src)
 
@@ -106,7 +109,7 @@ target_sources(cue_test_vst3 PRIVATE
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

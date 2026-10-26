@@ -147,7 +147,7 @@ bool parseRange(const std::string& v, double& a, double& b) {
     return false;
 }
 
-enum class Section { None, Audio, Switching, Midi, Performance, Scene, Chain, Branch, Preset, Control, Trigger, Group, Fcb };
+enum class Section { None, Audio, Switching, Midi, Tuner, Performance, Scene, Chain, Branch, Preset, Control, Trigger, Group, Fcb };
 
 struct Parser {
     Config& config;
@@ -198,6 +198,10 @@ struct Parser {
         if (kind == "audio") section = Section::Audio;
         else if (kind == "switching") section = Section::Switching;
         else if (kind == "midi") section = Section::Midi;
+        else if (kind == "tuner") {
+            section = Section::Tuner;
+            config.tuner.where = where;
+        }
         else if (kind == "fcb") section = Section::Fcb;
         else if (kind == "performance") {
             section = Section::Performance;
@@ -324,6 +328,19 @@ struct Parser {
             if (config.warm != "none" && config.warm != "next")
                 return fail("warm must be none or next");
         } else return fail("unknown or invalid switching setting '" + key + "'");
+        return true;
+    }
+
+    bool tunerLine(const std::string& key, const std::string& value) {
+        TunerSettings& t = config.tuner.settings;
+        double n = 0;
+        const std::string v = lower(value);
+        if (key == "input" && !value.empty()) config.tuner.input = value;
+        else if (key == "reference" && parseNumber(value, n) && n >= 415 && n <= 466) t.reference = n;
+        else if (key == "range" && tunerRange(v) >= 0) t.range = tunerRange(v);
+        else if (key == "tolerance" && parseNumber(value, n) && n > 0 && n <= 10) t.tolerance = n;
+        else if (key == "names" && (v == "sharps" || v == "flats")) t.flats = v == "flats";
+        else return fail("unknown or invalid tuner setting '" + key + "' (input, reference 415-466, range guitar/bass/vocals/any, tolerance in cents, names sharps/flats)");
         return true;
     }
 
@@ -614,6 +631,7 @@ struct Parser {
             case Section::Audio: ok = audio(key, value); break;
             case Section::Switching: ok = switching(key, value); break;
             case Section::Midi: ok = midi(key, value); break;
+            case Section::Tuner: ok = tunerLine(key, value); break;
             case Section::Performance: ok = performanceLine(key, value); break;
             case Section::Scene: ok = sceneLine(key, value, dir); break;
             case Section::Chain:
@@ -896,6 +914,17 @@ bool finishConfig(Config& config, std::string* error) {
                     if (!p.bypassModeSet)
                         p.muteOnBypass = config.muteOnBypass;
         }
+    }
+    config.tuner.inputIndex = 0;
+    if (!config.tuner.input.empty()) {
+        const int i = port(config.inputs, config.tuner.input, "in");
+        if (i < 0) {
+            *error = (config.tuner.where.empty() ? config.path : config.tuner.where) + ": tuner input = " + config.tuner.input +
+                     ": the performance has no such input (inputs: " + joined(config.inputs) + ")";
+            return false;
+        }
+        config.tuner.inputIndex = static_cast<size_t>(i);
+        config.tuner.input = config.inputs[config.tuner.inputIndex];
     }
     for (auto& c : config.controls)
         if (!finishControl(c, error))

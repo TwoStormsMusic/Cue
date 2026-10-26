@@ -40,6 +40,7 @@ A `.cue` file is a zip:
   "switching": {"preroll_ms": 50, "crossfade_ms": 20, "tail_cap_ms": 10000, "tail_hold_ms": 300,
                 "tail_quiet_db": -90, "bypass_fade_ms": 10, "mute_fade_ms": 10, "reset_tails_on_warm": true},
   "controller": {"profile": "eurekaprom", "channel": 1, "forward": true},
+  "tuner": {"input": "Bass", "reference": 440, "range": "bass", "tolerance": 2, "names": "sharps"},
   "scenes": [{
     "name": "Covers", "display": "CV", "pedal": 2,
     "chains": [{
@@ -83,6 +84,8 @@ A `.cue` file is a zip:
   with `~`, so they work for another user name. `label` is what the mappings
   call the plug-in. `params` are set after the state, by parameter id
   (`cue params` lists them).
+- **tuner** is the built-in tuner: the input it listens to and its settings,
+  as `[tuner]` in [config.md](config.md).
 - The mapping strings (`on_select`, controls, triggers, groups, `fcb`) are the
   language of [config.md](config.md), unchanged.
 - `cue` is the format's version. A file from a newer Cue is refused with a

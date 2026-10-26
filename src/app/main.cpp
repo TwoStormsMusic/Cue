@@ -29,6 +29,7 @@
 #include "host/vst3_processor.h"
 #include "midi/alsa_midi.h"
 #include "midi/eurekaprom.h"
+#include "tuner/tuner.h"
 
 #include <alsa/asoundlib.h>
 #include <pthread.h>
@@ -168,6 +169,26 @@ std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
 }
 
 // What a status event says: the numbers of one sample and what the show is doing.
+// The tuner event: the reading and what it is measured against.
+Json tunerJson(const TunerReading& r, const TunerSettings& s, const std::string& input) {
+    Json j;
+    j["input"] = input;
+    j["signal"] = r.signal;
+    j["level_db"] = std::round(r.levelDb * 10) / 10;
+    j["note"] = r.note ? Json(r.name) : Json(nullptr);
+    j["octave"] = r.octave;
+    j["midi"] = r.midi;
+    j["cents"] = std::round(r.cents * 10) / 10;
+    j["hz"] = std::round(r.hz * 100) / 100;
+    j["held"] = r.held;
+    j["in_tune"] = r.inTune;
+    j["reference"] = s.reference;
+    j["range"] = tunerRangeName(s.range);
+    j["tolerance"] = s.tolerance;
+    j["names"] = s.flats ? "flats" : "sharps";
+    return j;
+}
+
 Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& show, const Config& config) {
     const double periodNs = 1e9 * config.audio.period / config.audio.rate;
     Json j;
@@ -369,12 +390,18 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
     }
 
+    // The built-in tuner hears its input before any plug-in.
+    Tuner tuner(config.audio.rate);
+    tuner.setSettings(config.tuner.settings);
+    const size_t tunerInput = config.tuner.inputIndex;
+
     std::atomic<bool> marked{false};
     audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
         if (!marked.load(std::memory_order_relaxed)) {
             markClapAudioThread();
             marked.store(true, std::memory_order_relaxed);
         }
+        tuner.write(ins[tunerInput], frames);
         engine.process(ins, outs, frames);
     }, &err);
 
@@ -447,6 +474,25 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             reply["path"] = to;
             reply["warnings"] = warnings;
             std::printf("\nsaved %s\n", to.c_str());
+        } else if (cmd == "tuner") {
+            TunerSettings t = config.tuner.settings;
+            t.reference = req.value("reference", t.reference);
+            if (t.reference < 415 || t.reference > 466)
+                throw std::runtime_error("the reference is 415 to 466 Hz");
+            if (req.contains("range")) {
+                const int range = tunerRange(req.at("range").get<std::string>());
+                if (range < 0)
+                    throw std::runtime_error("the range is guitar, bass, vocals or any");
+                t.range = range;
+            }
+            t.tolerance = req.value("tolerance", t.tolerance);
+            if (t.tolerance <= 0 || t.tolerance > 10)
+                throw std::runtime_error("the tolerance is above 0 and at most 10 cents");
+            if (req.contains("names"))
+                t.flats = req.at("names").get<std::string>() == "flats";
+            config.tuner.settings = t;
+            tuner.setSettings(t);
+            reply["tuner"] = tunerJson(tuner.reading(), t, config.inputs.at(tunerInput));
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
@@ -530,6 +576,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             window.add(lastSample);
             if (service.subscribed("status"))
                 service.publish("status", status());
+            // The tuner listens while someone looks at it.
+            tuner.setListening(service.subscribed("tuner"));
+            if (tuner.listening())
+                service.publish("tuner", tunerJson(tuner.reading(), tuner.settings(), config.inputs.at(tunerInput)));
         }
         if (now >= nextStatus) {
             nextStatus += std::chrono::milliseconds(500);
@@ -1053,8 +1103,8 @@ int cmdCtl(int argc, char** argv) {
             args.push_back(argv[i]);
     }
     if (args.empty()) {
-        std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | select <chain|number|next|previous> | do \"<action>\" |\n"
-                             "        save [file.cue] | performance | quit\n");
+        std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | tuner | select <chain|number|next|previous> |\n"
+                             "        do \"<action>\" | save [file.cue] | performance | quit\n");
         return 2;
     }
     ServiceClient client;
@@ -1111,6 +1161,38 @@ int cmdCtl(int argc, char** argv) {
         }
         return 0;
     }
+    if (what == "tuner") {
+        if (!ask({{"cmd", "subscribe"}, {"events", {"tuner"}}}, reply))
+            return 1;
+        std::signal(SIGINT, onSignal);
+        while (!g_quit) {
+            Json m;
+            if (!client.next(m, 500, &err)) {
+                if (err.find("in time") != std::string::npos)
+                    continue;
+                std::fprintf(stderr, "%s\n", err.c_str());
+                return 1;
+            }
+            if (m.value("event", "") != "tuner")
+                continue;
+            if (asJson) {
+                std::printf("%s\n", m.dump().c_str());
+            } else {
+                char line[160];
+                if (m.at("note").is_null())
+                    std::snprintf(line, sizeof line, "%s  level %.0f dB", m.value("signal", false) ? "listening" : "no signal",
+                                  m.value("level_db", -200.0));
+                else
+                    std::snprintf(line, sizeof line, "%-2s%d  %+6.1f cents  %8.2f Hz  %s", m.value("note", "").c_str(), m.value("octave", 0),
+                                  m.value("cents", 0.0), m.value("hz", 0.0),
+                                  m.value("held", true) ? "(held)" : m.value("in_tune", false) ? "IN TUNE" : "");
+                std::printf("\r%-60s", line);
+            }
+            std::fflush(stdout);
+        }
+        std::printf("\n");
+        return 0;
+    }
     Json request;
     if (what == "select" && args.size() >= 2) {
         const std::string a = args[1];
@@ -1134,7 +1216,7 @@ int cmdCtl(int argc, char** argv) {
     } else if (what == "performance" || what == "quit" || what == "hello") {
         request = {{"cmd", what}};
     } else {
-        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, select, do, save, performance, quit)\n", what.c_str());
+        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, quit)\n", what.c_str());
         return 2;
     }
     if (!ask(request, reply))
@@ -1230,7 +1312,7 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none]\n"
-                 "  cue ctl [--socket PATH] [--json] status|watch|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
+                 "  cue ctl [--socket PATH] [--json] status|watch|tuner|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
                  "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
                  "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"

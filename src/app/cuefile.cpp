@@ -230,6 +230,12 @@ struct Writer {
                           {"tail_quiet_db", e.tailQuietDb},      {"bypass_fade_ms", e.bypassFadeMs},
                           {"mute_fade_ms", e.muteFadeMs},        {"reset_tails_on_warm", e.resetTailsOnWarmSwitch}};
         j["controller"] = {{"profile", c.midi.profile}, {"channel", c.midi.channel + 1}, {"forward", c.midi.forward}};
+        const TunerSettings& t = c.tuner.settings;
+        j["tuner"] = {{"input", c.inputs.at(c.tuner.inputIndex)},
+                      {"reference", t.reference},
+                      {"range", tunerRangeName(t.range)},
+                      {"tolerance", t.tolerance},
+                      {"names", t.flats ? "flats" : "sharps"}};
 
         json scenes = json::array();
         for (size_t s = 0; s < c.scenes.size(); ++s) {
@@ -505,6 +511,25 @@ struct Reader {
                 throw std::runtime_error("controller channel is 1 to 16");
             c.midi.channel = static_cast<uint8_t>(channel - 1);
             c.midi.forward = m.value("forward", c.midi.forward);
+        }
+        if (j.contains("tuner")) {
+            const json& t = j.at("tuner");
+            TunerSettings& s = c.tuner.settings;
+            c.tuner.input = t.value("input", "");
+            s.reference = t.value("reference", s.reference);
+            if (s.reference < 415 || s.reference > 466)
+                throw std::runtime_error("tuner reference is 415 to 466 Hz");
+            const int range = tunerRange(lower(t.value("range", std::string(tunerRangeName(s.range)))));
+            if (range < 0)
+                throw std::runtime_error("tuner range is guitar, bass, vocals or any");
+            s.range = range;
+            s.tolerance = t.value("tolerance", s.tolerance);
+            if (s.tolerance <= 0 || s.tolerance > 10)
+                throw std::runtime_error("tuner tolerance is above 0 and at most 10 cents");
+            const std::string names = lower(t.value("names", std::string("sharps")));
+            if (names != "sharps" && names != "flats")
+                throw std::runtime_error("tuner names are sharps or flats");
+            s.flats = names == "flats";
         }
 
         for (const json& sj : j.at("scenes")) {
