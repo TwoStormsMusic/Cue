@@ -9,6 +9,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace cue {
@@ -353,6 +354,63 @@ void AlsaBackend::close() {
     if (playback_)
         snd_pcm_close(playback_);
     capture_ = playback_ = nullptr;
+}
+
+// ------------------------------------------------------------ no sound card
+
+NullBackend::~NullBackend() { stop(); }
+
+bool NullBackend::open(const AlsaConfig& config, std::string* error) {
+    if (config.rate == 0 || config.period == 0) {
+        *error = "rate and period must be above zero";
+        return false;
+    }
+    config_ = config;
+    return true;
+}
+
+bool NullBackend::start(Callback callback, std::string* error) {
+    callback_ = std::move(callback);
+    running_ = true;
+    thread_ = std::thread([this] {
+        enableFlushToZero();
+        std::vector<float> in(config_.period, 0.0f);
+        std::vector<std::vector<float>> outs(config_.outputChannels.size(), std::vector<float>(config_.period, 0.0f));
+        std::vector<float*> ptrs;
+        for (auto& o : outs)
+            ptrs.push_back(o.data());
+        const auto period = std::chrono::nanoseconds(1000000000ull * config_.period / config_.rate);
+        auto next = std::chrono::steady_clock::now();
+        while (running_) {
+            next += period;
+            const auto t0 = std::chrono::steady_clock::now();
+            callback_(in.data(), ptrs.data(), config_.period);
+            const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            stats_.cycles.fetch_add(1, std::memory_order_relaxed);
+            stats_.totalCycleNs.fetch_add(ns, std::memory_order_relaxed);
+            if (ns > stats_.maxCycleNs.load(std::memory_order_relaxed))
+                stats_.maxCycleNs.store(static_cast<uint32_t>(std::min<uint64_t>(ns, UINT32_MAX)), std::memory_order_relaxed);
+            std::this_thread::sleep_until(next);
+            // Fell far behind (a debugger, a suspended machine): start again from now.
+            if (std::chrono::steady_clock::now() - next > 50 * period)
+                next = std::chrono::steady_clock::now();
+        }
+    });
+    (void)error;
+    return true;
+}
+
+void NullBackend::stop() {
+    running_ = false;
+    if (thread_.joinable())
+        thread_.join();
+}
+
+std::string NullBackend::describe() const {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "no sound card: the engine runs on a timer, hearing silence (%u Hz, %u frames, %zu outputs)", config_.rate,
+                  config_.period, config_.outputChannels.size());
+    return buf;
 }
 
 } // namespace cue

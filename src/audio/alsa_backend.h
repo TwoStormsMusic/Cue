@@ -44,23 +44,34 @@ struct AlsaStats {
     std::atomic<bool> failed{false};     // the device could not be recovered; audio stopped
 };
 
-// Full-duplex ALSA I/O on one device, driven by a real-time thread that reads
-// a period, calls the engine, and writes a period. No extra buffering: the
-// latency is one capture period plus the playback buffer.
-class AlsaBackend {
+// Where the engine's audio comes from and goes to.
+class AudioBackend {
 public:
     // in: one mono channel. outs: one buffer per configured output channel.
     using Callback = std::function<void(const float* in, float* const* outs, uint32_t frames)>;
 
-    ~AlsaBackend();
-    bool open(const AlsaConfig& config, std::string* error);
-    bool start(Callback callback, std::string* error);
-    void stop();
+    virtual ~AudioBackend() = default;
+    virtual bool open(const AlsaConfig& config, std::string* error) = 0;
+    virtual bool start(Callback callback, std::string* error) = 0;
+    virtual void stop() = 0;
+    virtual const AlsaStats& stats() const = 0;
+    virtual std::string describe() const = 0;
+};
+
+// Full-duplex ALSA I/O on one device, driven by a real-time thread that reads
+// a period, calls the engine, and writes a period. No extra buffering: the
+// latency is one capture period plus the playback buffer.
+class AlsaBackend : public AudioBackend {
+public:
+    ~AlsaBackend() override;
+    bool open(const AlsaConfig& config, std::string* error) override;
+    bool start(Callback callback, std::string* error) override;
+    void stop() override;
     void close();
 
-    const AlsaStats& stats() const { return stats_; }
+    const AlsaStats& stats() const override { return stats_; }
     const AlsaConfig& config() const { return config_; }
-    std::string describe() const; // negotiated format, channels, latency
+    std::string describe() const override; // negotiated format, channels, latency
 
 private:
     struct Format;
@@ -82,6 +93,26 @@ private:
     std::vector<std::vector<float>> outs_;
     std::vector<float*> outPtrs_;
 
+    Callback callback_;
+    std::thread thread_;
+    std::atomic<bool> running_{false};
+    AlsaStats stats_;
+};
+
+// No sound card: the engine runs in real time on a timer, hearing silence,
+// for a machine without its interface (editing a performance on a laptop,
+// the tests). Nothing is played.
+class NullBackend : public AudioBackend {
+public:
+    ~NullBackend() override;
+    bool open(const AlsaConfig& config, std::string* error) override;
+    bool start(Callback callback, std::string* error) override;
+    void stop() override;
+    const AlsaStats& stats() const override { return stats_; }
+    std::string describe() const override;
+
+private:
+    AlsaConfig config_;
     Callback callback_;
     std::thread thread_;
     std::atomic<bool> running_{false};

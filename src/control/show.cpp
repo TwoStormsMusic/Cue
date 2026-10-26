@@ -1437,6 +1437,19 @@ std::string Show::valueText(const std::string& control) const {
     return c < 0 ? "" : Impl::text(d_->controls[c]);
 }
 
+std::string Show::sceneName(int index) const {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    return index >= 0 && index < static_cast<int>(d_->scenes.size()) ? d_->scenes[index].name : "";
+}
+
+std::vector<std::string> Show::controlNames() const {
+    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::vector<std::string> out;
+    for (const auto& c : d_->controls)
+        out.push_back(c.name);
+    return out;
+}
+
 bool Show::muted() const {
     std::lock_guard<std::mutex> lock(d_->mutex);
     return d_->currentMute();

@@ -113,10 +113,13 @@ std::vector<ConfigText> texts(const json& j, const char* key, const std::string&
 struct Writer {
     std::vector<std::pair<std::string, std::vector<uint8_t>>> files; // states/..., in order
     std::string* error;
+    bool withStates = true;
 
     // The state's path in the zip, or "" if the plug-in has none.
     bool state(const PluginSpec& p, bool controller, const std::string& name, std::string& out) {
         out.clear();
+        if (!withStates)
+            return true;
         const std::string& file = controller ? p.controllerStateFile : p.stateFile;
         std::vector<uint8_t> data;
         if (p.embeddedState) {
@@ -662,6 +665,18 @@ bool saveCue(const Config& config, const std::string& path, std::string* error, 
     if (!w.performance(c, j))
         return false;
     return writeZip(path, j.dump(2) + "\n", w.files, error);
+}
+
+bool performanceText(const Config& config, std::string& text, std::string* error) {
+    Config c = config;
+    if (!presetsToChains(c, error))
+        return false;
+    Writer w{{}, error, false};
+    json j;
+    if (!w.performance(c, j))
+        return false;
+    text = j.dump(2) + "\n";
+    return true;
 }
 
 bool loadCue(const std::string& path, Config& config, std::string* error) {

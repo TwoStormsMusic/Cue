@@ -29,6 +29,9 @@ bool presetsToChains(Config& config, std::string* error);
 // (or carried from the .cue it was loaded from). The rig settings are not
 // part of it. warnings: what presetsToChains changed.
 bool saveCue(const Config& config, const std::string& path, std::string* error, std::vector<std::string>* warnings = nullptr);
+// performance.json as saveCue would write it, without the states: what the
+// app is told about a running performance.
+bool performanceText(const Config& config, std::string& json, std::string* error);
 // Reads a performance, leaving config's audio and MIDI port settings alone.
 bool loadCue(const std::string& path, Config& config, std::string* error);
 

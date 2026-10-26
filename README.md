@@ -60,6 +60,8 @@ cue midi-monitor M2              # print what the FCB sends, decoded
 cue fcb-test M2 --channel 1      # walk the FCB's LEDs and display
 cue bench <config.ini> --wav out.wav   # offline: CPU per chain + a WAV of the switching
 cue run <config.ini|file.cue>    # live; a .cue plays with ~/.config/cue/rig.json, or --rig FILE
+cue run show.cue --audio none    # the same without a sound card (to edit and save on another machine)
+cue ctl status | watch | select Slap | do "Wah = Auto" | save | quit   # talk to a running cue (docs/control.md)
 ```
 
 While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, the margin (the least audio still queued for playback when a block was written; at zero the sound card runs dry), xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own: when it happened, how long the block before it took and how late it started, and the slowest block around it with the chains that played in it.
