@@ -261,6 +261,9 @@ void Engine::emit(EngineEvent::Type type, int chain) {
 
 void Engine::setState(int index, ChainState state) {
     chains_[index].state = state;
+    // A chain that changes state is processed again, until it goes quiet anew.
+    chains_[index].resting = false;
+    chains_[index].mutedQuietFrames = 0;
     chains_[index].stats->state.store(static_cast<uint8_t>(state), std::memory_order_relaxed);
 }
 
@@ -306,7 +309,12 @@ void Engine::handle(const EngineCommand& cmd) {
     case EngineCommand::Type::SetMute:
         if (cmd.on != muted_) {
             muted_ = cmd.on;
-            outputGain_.linearTo(muted_ ? 0.0f : 1.0f, ms(settings_.muteFadeMs));
+            inputGain_.linearTo(muted_ ? 0.0f : 1.0f, ms(settings_.muteFadeMs));
+            if (!muted_)
+                for (auto& s : chains_) {
+                    s.resting = false;
+                    s.mutedQuietFrames = 0;
+                }
         }
         break;
     }
@@ -499,20 +507,20 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
     for (auto& s : chains_)
         s.ran = s.background = false;
     size_t heard = 0, unheard = 0;
-    if (active_ >= 0) {
+    if (active_ >= 0 && !chains_[active_].resting) {
         jobs_[heard++] = active_;
         chains_[active_].ran = true;
     }
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
-        if (s.state != ChainState::Idle && static_cast<int>(i) != active_ && !background(s)) {
+        if (s.state != ChainState::Idle && !s.resting && static_cast<int>(i) != active_ && !background(s)) {
             jobs_[heard++] = static_cast<int>(i);
             s.ran = true;
         }
     }
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
-        if (s.state != ChainState::Idle && !s.ran) {
+        if (s.state != ChainState::Idle && !s.resting && !s.ran) {
             jobs_[heard + unheard++] = static_cast<int>(i);
             s.ran = s.background = true;
         }
@@ -556,13 +564,7 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
 
         recordStats(s);
         advance(static_cast<int>(i), frames, peak);
-    }
-
-    if (!outputGain_.done() || outputGain_.value() != 1.0f) {
-        outputGain_.render(gainScratch_.data(), frames);
-        for (size_t o = 0; o < settings_.numOutputs; ++o)
-            for (uint32_t n = 0; n < frames; ++n)
-                outs[o][n] *= gainScratch_[n];
+        restWhenQuiet(s, frames, peak);
     }
 
     block.ns = nsSince(blockStart);
@@ -585,8 +587,19 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
 void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, size_t background, bool flushIdle) {
     // A copy of the inputs: background chains may read them after process()
     // has returned and the caller has reused its buffers.
-    for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i)
-        std::memcpy(jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames), ins[i], frames * sizeof(float));
+    // Muted, they hear silence (with a fade), so tails ring out.
+    const bool inputsLive = inputGain_.done() && inputGain_.value() == 1.0f;
+    if (!inputsLive)
+        inputGain_.render(gainScratch_.data(), frames);
+    for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i) {
+        float* dst = jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames);
+        if (inputsLive) {
+            std::memcpy(dst, ins[i], frames * sizeof(float));
+        } else {
+            for (uint32_t n = 0; n < frames; ++n)
+                dst[n] = ins[i][n] * gainScratch_[n];
+        }
+    }
     jobFrames_ = frames;
     heardJobs_ = heard;
     backgroundJobs_ = background;
@@ -608,12 +621,12 @@ void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, s
             runChain(jobs_[k], false);
     }
 
-    // Idle chains are nobody's job: the audio thread sees to them while
-    // the helpers finish.
+    // Idle and resting chains are nobody's job: the audio thread sees to
+    // them while the helpers finish.
     if (flushIdle) {
         for (auto& s : chains_) {
             // Not while the reset helper has it.
-            if (s.state == ChainState::Idle && s.clean->load() == kClean)
+            if ((s.state == ChainState::Idle && s.clean->load() == kClean) || s.resting)
                 s.chain->flushIdle();
         }
     }
@@ -639,8 +652,22 @@ void Engine::finishBackground() {
         s.backgroundNs = s.blockNs;
         recordStats(s);
         advance(jobs_[k], jobFrames_, 0.0f); // pre-roll and warm need no peak
+        restWhenQuiet(s, jobFrames_, 0.0f); // nobody hears a warm chain's tail
     }
     backgroundJobs_ = 0;
+}
+
+// While the inputs are muted, the chain played and the warm one stop being
+// processed once they have been quiet for a while. A chain on its way in or
+// out (pre-roll, releasing) goes on: it has somewhere to get to.
+void Engine::restWhenQuiet(Slot& s, uint32_t frames, float peak) {
+    const bool inputsSilent = muted_ && inputGain_.done() && inputGain_.value() == 0.0f;
+    if (!inputsSilent || (s.state != ChainState::Active && s.state != ChainState::Warm))
+        return;
+    const float threshold = std::pow(10.0f, settings_.tailQuietDb / 20.0f);
+    s.mutedQuietFrames = peak < threshold ? s.mutedQuietFrames + frames : 0;
+    if (s.mutedQuietFrames >= ms(settings_.tailHoldMs))
+        s.resting = true;
 }
 
 void Engine::recordStats(Slot& s) {

@@ -107,7 +107,7 @@ void MainWindow::applySettings() {
         v->update();
 }
 
-// The outputs muted (the tuner pedal, most often): the tuner comes up, and
+// The inputs muted (the tuner pedal, most often): the tuner comes up, and
 // goes back when they are live again.
 void MainWindow::onStatus() {
     const bool muted = s_.status.valid && s_.status.muted;

@@ -49,7 +49,7 @@ public:
     void pumpMainThread();
 
     // Any non-real-time thread: queued, delivered on the audio thread by the
-    // next process() call, or by flushIdle() if the scene is idle.
+    // next process() call, or by flushIdle() if its chain is idle or resting.
     bool setParam(uint32_t id, double value) override;
 
     // Audio thread.

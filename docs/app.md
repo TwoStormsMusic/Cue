@@ -38,13 +38,19 @@ each control: a switch shows ON or OFF, a control with values shows them
 all, a continuous one is a slider. A tap does what the pedal does, so the
 screen and the FCB always agree.
 
-**Tuner.** The built-in tuner (the TwoStorms Tuner's pitch detection) on the
-performance's tuner input, before any plug-in: the note, cents, hertz and the
-string, and a bar from -50 to +50 cents with the in-tune zone. Green is in
-tune. The mute button goes through the control that mutes (your tuner pedal),
-so its LED and the screen agree. When the outputs are muted the tuner view
-comes up by itself and goes back when they are live again (Settings can turn
-this off).
+**Tuner.** The TwoStorms Tuner, built in: its pitch detection on the
+performance's tuner input, before any plug-in, drawn as the plug-in draws it.
+The note with its sharp or flat and octave, chevrons on the side it is off to
+(more of them the further off), the cents and hertz under it, the needle from
+-50 to +50 cents over the in-tune zone, and the strobe, which drifts with the
+error and stands still in tune. Green is in tune; a note that has gone is
+drawn dark. The stage view's strip is the same tuner, small. The **Mute**
+button goes through the control that mutes (your tuner pedal, whose number it
+shows), so its LED and the screen agree; while muted the tuner is framed in
+red. Muting silences the inputs, not the outputs: what is ringing (a delay, a
+reverb) rings out, and a chain that has gone quiet costs no CPU until the
+inputs come back. When the inputs are muted the tuner view comes up by itself
+and goes back when they are live again (Settings can turn this off).
 
 **Chains.** A chain's plug-ins as blocks and wires, as the routing board
 draws them: inputs and outputs are rectangles, Gain Stage a circle, Act a

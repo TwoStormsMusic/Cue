@@ -112,8 +112,8 @@ void StageView::hero(QPainter& p, const QRectF& r) {
     p.drawText(QRectF(r.left() + pad, r.top() + pad - 4 * u, r.width() - 2 * pad, 24 * u), Qt::AlignLeft | Qt::AlignVCenter, position);
 
     if (s.status.valid && s.status.muted) {
-        const double h = 34 * u, w = draw::pillWidth("OUTPUTS MUTED", h, true);
-        draw::pill(p, QRectF(r.right() - pad - w, r.top() + pad - 9 * u, w, h), "OUTPUTS MUTED", color::red, color::red, color::red, color::redBg);
+        const double h = 34 * u, w = draw::pillWidth("INPUTS MUTED", h, true);
+        draw::pill(p, QRectF(r.right() - pad - w, r.top() + pad - 9 * u, w, h), "INPUTS MUTED", color::red, color::red, color::red, color::redBg);
     }
 
     // The FCB's display, beside the name.
@@ -216,35 +216,20 @@ void StageView::levels(QPainter& p, const QRectF& r) {
 }
 
 void StageView::tunerStrip(QPainter& p, const QRectF& r) {
+    // The TwoStorms Tuner, small: the note at the left, the needle and the
+    // strobe across the rest; red-framed while the inputs are muted.
     const TunerReading& t = s.tuner;
-    const bool down = isPressed("tuner strip");
-    draw::card(p, r, 14 * u, down ? color::raised : color::panel, color::line);
+    tunerdraw::pane(p, r, s.status.valid && s.status.muted, u);
+    if (isPressed("tuner strip"))
+        draw::card(p, r, 14 * u, QColor(255, 255, 255, 12), QColor());
     hit("tuner strip", r, [this] { emit navigate("tuner"); });
-    const double pad = 24 * u;
-    const QColor c = tunerdraw::noteColor(t);
-    const QString note = t.valid && !t.note.isEmpty() ? t.note : "–";
-    p.setPen(c);
-    p.setFont(typeface(Face::Display, std::min(64 * u, r.height() * 0.78), QFont::Bold));
-    const double noteW = QFontMetricsF(p.font()).horizontalAdvance(note);
-    p.drawText(QRectF(r.left() + pad, r.top(), noteW + 4 * u, r.height()), Qt::AlignLeft | Qt::AlignVCenter, note);
-    p.setFont(typeface(Face::Display, 26 * u, QFont::DemiBold));
-    p.drawText(QRectF(r.left() + pad + noteW + 10 * u, r.top(), 90 * u, r.height() * 0.78), Qt::AlignLeft | Qt::AlignBottom,
-               tunerdraw::centsText(t));
-
-    QString right;
-    if (!t.valid)
-        right = "tuner off";
-    else if (t.note.isEmpty())
-        right = t.signal ? "listening" : "no signal";
-    else
-        right = QString("%1 Hz").arg(t.hz, 0, 'f', 1) + (t.string().isEmpty() ? QString() : " · " + t.string());
-    p.setFont(typeface(Face::Text, 15 * u));
-    const double rightW = std::max(150 * u, QFontMetricsF(p.font()).horizontalAdvance(right) + 10 * u);
-    p.setPen(color::muted);
-    p.drawText(QRectF(r.right() - pad - rightW, r.top(), rightW, r.height()), Qt::AlignRight | Qt::AlignVCenter, right);
-
-    const double bx = r.left() + pad + 150 * u, bh = r.height() - 44 * u;
-    tunerdraw::centsBar(p, QRectF(bx, r.center().y() - bh / 2, r.right() - pad - rightW - 24 * u - bx, bh), t, u, false);
+    const double pad = 10 * u, h = r.height() - 2 * pad;
+    const double noteW = std::min(r.width() * 0.34, h * 2.45 + 8 * u);
+    tunerdraw::note(p, QRectF(r.left() + pad, r.top() + pad, noteW, h), t, u);
+    const double x = r.left() + pad + noteW + 8 * u, w = r.right() - pad - x;
+    const double strobeH = std::max(12 * u, h * 0.3), meterH = h - strobeH - 6 * u;
+    tunerdraw::meter(p, QRectF(x, r.top() + pad, w, meterH), t, u, false);
+    tunerdraw::strobe(p, QRectF(x, r.bottom() - pad - strobeH, w, strobeH), t, s.strobePhase, u);
 }
 
 void StageView::chainButtons(QPainter& p, const QRectF& r, const QVector<int>& chains, int rows) {

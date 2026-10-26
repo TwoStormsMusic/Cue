@@ -50,8 +50,8 @@ public:
     virtual void process(const float* const* in, float* const* out, uint32_t frames) = 0;
 
     // Called on the audio thread, between processing, for processors in idle
-    // scenes, so queued parameter changes still reach a plug-in that is not
-    // being processed. Must be cheap when there is nothing to do.
+    // or resting chains, so queued parameter changes still reach a plug-in
+    // that is not being processed. Must be cheap when there is nothing to do.
     virtual void flushIdle() {}
 
     // MIDI for plug-ins that take it (a wah moved by an expression pedal).

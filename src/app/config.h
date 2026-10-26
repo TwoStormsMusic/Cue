@@ -99,7 +99,7 @@ struct SceneSpec {
 };
 
 // A named value that pedals and MIDI move, and that switches plug-ins on and
-// off, moves their parameters, mutes the outputs and lights LEDs.
+// off, moves their parameters, mutes the inputs and lights LEDs.
 struct ControlSpec {
     enum class Type { Toggle, Discrete, Continuous };
     std::string name;

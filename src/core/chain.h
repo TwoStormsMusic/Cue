@@ -104,7 +104,7 @@ public:
     // bypass fades to and from silence instead of its input. idle: the chain
     // is not being processed; only the slot's flags change.
     void setBypass(size_t slot, bool bypassed, uint32_t fadeFrames, bool idle = false);
-    // For idle chains: delivers queued parameter changes without processing.
+    // For idle and resting chains: delivers queued parameter changes without processing.
     void flushIdle();
     // in: frames mono samples. outs: numOutputs() buffers, each overwritten.
     void process(const float* in, float* const* outs, uint32_t frames);

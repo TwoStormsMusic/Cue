@@ -151,7 +151,7 @@ void ChainView::setParam(const QJsonObject& param, double value, bool done) {
     if (done || now - lastSend_ >= 40) {
         lastSend_ = now;
         const int chain = chain_, slot = slot_;
-        s.link.request({{"cmd", "param"}, {"chain", chain}, {"slot", slot}, {"id", id}, {"value", value}},
+        s.link.request({{"cmd", "param"}, {"chain", chain}, {"slot", slot}, {"param", id}, {"value", value}},
                        [this, chain, slot, id](const QJsonObject& r) {
                            if (!s.check(r, "The plug-in did not take it") || chain != chain_ || slot != slot_)
                                return;

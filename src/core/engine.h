@@ -25,7 +25,7 @@ struct EngineSettings {
     float tailCapMs = 10000.0f;  // a releasing chain stops after this long whatever its level
     float stopFadeMs = 50.0f;    // fade applied when a releasing chain stops
     float bypassFadeMs = 10.0f;  // crossfade when a plug-in is bypassed or brought back
-    float muteFadeMs = 10.0f;    // fade of the outputs when they are muted (the tuner)
+    float muteFadeMs = 10.0f;    // fade of the inputs when they are muted (the tuner)
     // A warm chain's delays and reverbs would hear the old chain's playing.
     // They are fed silence until the switch, so no echoes of notes played
     // before it are heard.
@@ -119,7 +119,9 @@ public:
     bool setBypass(int chain, size_t slot, bool bypassed) {
         return post({EngineCommand::Type::SetBypass, chain, static_cast<uint32_t>(slot), bypassed});
     }
-    // Silences every output, with a short fade. Chains keep playing.
+    // Silences every input, with a short fade, so delays and reverbs ring
+    // out. A chain that has gone quiet (tailQuietDb for tailHoldMs) then
+    // rests: it is not processed until the inputs come back.
     bool setMute(bool muted) { return post({EngineCommand::Type::SetMute, -1, 0, muted}); }
     // One reader thread drains events.
     bool nextEvent(EngineEvent& ev);
@@ -144,6 +146,7 @@ public:
     int warmChain() const { return warm_; }
     bool muted() const { return muted_; }
     ChainState state(size_t i) const { return chains_[i].state; }
+    bool resting(size_t i) const { return chains_[i].resting; }
 
 private:
     // An idle chain's plug-ins: rung out to silence or reset (clean), or
@@ -161,6 +164,9 @@ private:
         uint64_t releaseFrames = 0;
         uint64_t quietFrames = 0;
         bool quietEnd = false; // its tail died away rather than being capped
+        // While the inputs are muted: quiet for this long, and so not processed.
+        uint64_t mutedQuietFrames = 0;
+        bool resting = false;
         // Its own buffers, so chains can be processed on several threads at once.
         std::vector<float> buffers;
         float* in = nullptr;
@@ -190,6 +196,7 @@ private:
     void takeJobs(uint32_t generation, uint32_t limit);
     void runChain(int index, bool helper);
     void recordStats(Slot& s);
+    void restWhenQuiet(Slot& s, uint32_t frames, float peak);
     void workerLoop();
     void stopWorkers();
 
@@ -237,7 +244,7 @@ private:
     std::vector<float> gainScratch_;
     uint32_t idleFlushCounter_ = 0;
     bool muted_ = false;
-    Ramp outputGain_{1.0f};
+    Ramp inputGain_{1.0f};
 };
 
 } // namespace cue

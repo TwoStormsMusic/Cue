@@ -603,7 +603,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 output.setBypass(chain, slot, bypassed);
                 ps->bypassed = bypassed;
             } else if (cmd == "param") {
-                const uint32_t id = req.at("id").get<uint32_t>();
+                // "param", not "id": a request's "id" is its number on the socket.
+                const uint32_t id = req.at("param").get<uint32_t>();
                 const double value = req.at("value").get<double>();
                 if (!p->setParam(id, value))
                     return refuse(p->name() + " did not take the change (too many at once)");
@@ -1346,7 +1347,7 @@ int cmdCtl(int argc, char** argv) {
         if (what == "bypass")
             request["bypassed"] = args[3] == "on" || args[3] == "yes";
         if (what == "param") {
-            request["id"] = std::strtoul(args[3].c_str(), nullptr, 10);
+            request["param"] = std::strtoul(args[3].c_str(), nullptr, 10);
             request["value"] = std::atof(args[4].c_str());
         }
     } else {

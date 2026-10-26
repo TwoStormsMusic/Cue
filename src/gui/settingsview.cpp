@@ -116,7 +116,7 @@ void SettingsView::paint(QPainter& p) {
             s.settings.scale = 1.0;
         changed();
     });
-    y = row(p, y, "Tuner while muted", "the tuner view comes up while the outputs are muted", {"On", "Off"}, st.tunerWhenMuted ? 0 : 1,
+    y = row(p, y, "Tuner while muted", "the tuner view comes up while the inputs are muted", {"On", "Off"}, st.tunerWhenMuted ? 0 : 1,
             [this](int i) {
                 s.settings.tunerWhenMuted = i == 0;
                 changed();

@@ -17,7 +17,7 @@ include = more.ini      ; anywhere: reads that file here, relative to this one
 | **chain** | Plug-ins in series from one input to every output, with optional branches. Only the chain you hear is processed; the others cost nothing. |
 | **branch** | A copy of a chain's signal from one point, with its own plug-ins: for example the IR loader that only FOH gets. |
 | **preset** | Which chain plays, and what to set when it is selected. |
-| **control** | A named value you move with pedals and MIDI, which switches plug-ins, moves their parameters, mutes the outputs and lights LEDs. |
+| **control** | A named value you move with pedals and MIDI, which switches plug-ins, moves their parameters, mutes the inputs and lights LEDs. |
 | **trigger** | An input and the actions it runs. |
 | **group** | Named actions that any trigger, preset or other group can run. |
 
@@ -44,7 +44,7 @@ tail_cap_ms = 10000 ; the old chain's tail rings out at most this long
 tail_hold_ms = 300
 tail_quiet_db = -90
 bypass_fade_ms = 10 ; crossfade when a plug-in is switched on or off
-mute_fade_ms = 10
+mute_fade_ms = 10   ; fade of the inputs when they are muted (the tuner pedal)
 warm = next         ; next: the next preset's chain runs muted in the background; none. A preset's own warm = wins
 reset_tails_on_warm = yes ; delays and reverbs in the warm chain hear silence until the switch
 bypass_mode = thru  ; what a bypassed plug-in passes on, unless it says otherwise: thru (its input) or mute (nothing)
@@ -146,13 +146,13 @@ drive = TwoStorms Delay param 12 from 0 to 100
 
 [control Tuner]
 pedal = 5
-mute = on                     ; every output is muted while this holds
+mute = on                     ; every input is muted while this holds
 ```
 
 - **Stepping** goes value by value; when a step would pass the end, the control first lands on the end, and the next step wraps to the start (or stays, with `wrap = no`). Going down works the same way.
 - **enable = \<plug-ins> [when \<condition>]**: those plug-ins run while the condition holds and are bypassed otherwise, with a short crossfade. Without `when`, while the control is not at its first value. A plug-in named by several enables runs if any of them holds. Do not also switch it with `bypass`/`enable` actions: the control decides.
 - **drive = \<plug-ins> param \<id> [from \<a> to \<b>]**: sets that parameter whenever the control changes, mapping the control's range onto a..b (default: the control's own value).
-- **mute = \<condition>**: mutes every output while it holds.
+- **mute = \<condition>**: mutes every input while it holds. Delays and reverbs ring out; a chain that has gone quiet is then no longer processed until the inputs come back. The tuner and the input meters still hear the inputs.
 - Inside a control, a bare value is a condition on that control: `when Auto` means "when this control is Auto", `mute = on` means "when this control is on".
 
 ## Naming plug-ins
@@ -209,7 +209,7 @@ do = preset next
 | `scene Covers`, `scene next`, `scene previous` | selects a scene's first preset |
 | `bypass Delay`, `enable Delay`, `toggle Delay` | switches plug-ins directly |
 | `param Delay 12 = 40` | sets a plug-in parameter |
-| `mute on`, `mute off`, `mute toggle` | mutes every output |
+| `mute on`, `mute off`, `mute toggle` | mutes every input (tails ring out) |
 | `midi B0 6D 0F` | sends a MIDI message (hex) to the controller |
 
 ## Groups

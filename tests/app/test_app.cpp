@@ -184,7 +184,7 @@ private slots:
         const TunerReading t = TunerReading::fromJson(parse(kTuner));
         QCOMPARE(t.note, QString("E"));
         QCOMPARE(t.string(), QString("string 4"));
-        QCOMPARE(tunerdraw::centsText(t), QString("+2 ¢"));
+        QCOMPARE(tunerdraw::centsText(t), QString("+2.2¢"));
         QCOMPARE(audioSummary(parse(R"({"audio_settings": {"device": "hw:M2,0", "rate": 48000, "period": 64, "periods": 3}})")),
                  QString("M2 · 48k · 64×3"));
     }
@@ -275,6 +275,56 @@ private slots:
         }
     }
 
+    void the_tuner_draws_every_reading() {
+        FakeLink link;
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        struct Case {
+            const char* name;
+            QJsonObject change;
+            bool muted;
+        };
+        const QJsonValue none(QJsonValue::Null);
+        const Case cases[] = {
+            {"out", {}, false},
+            {"in-tune", {{"cents", -0.6}, {"in_tune", true}}, false},
+            {"sharp-name", {{"note", "F#"}, {"octave", 2}, {"cents", -14.5}, {"hz", 91.71}}, false},
+            {"flat-name", {{"note", "Bb"}, {"octave", 1}, {"cents", 31}, {"hz", 59.33}, {"names", "flats"}}, false},
+            {"off-scale", {{"cents", -63}}, false},
+            {"held", {{"held", true}, {"signal", false}, {"level_db", -90}}, false},
+            {"no-note", {{"note", none}, {"signal", true}}, false},
+            {"no-audio", {{"note", none}, {"signal", false}, {"level_db", -200}}, true},
+        };
+        for (const Case& c : cases) {
+            QJsonObject t = parse(kTuner);
+            for (auto it = c.change.begin(); it != c.change.end(); ++it)
+                t[it.key()] = it.value();
+            fill(s, c.muted);
+            s.tuner = TunerReading::fromJson(t);
+            // The strobe turns with the error and stands still on a held note.
+            const double turned = s.tuner.turn(0.5, 0.1);
+            QVERIFY(turned >= 0 && turned < 1);
+            if (s.tuner.held || s.tuner.note.isEmpty())
+                QCOMPARE(turned, 0.5);
+            else
+                QVERIFY(std::abs(turned - 0.5) > 1e-6);
+            for (const char* view : {"tuner", "stage"}) {
+                w.showView(view);
+                w.view(view)->resize(1280, 800);
+                QVERIFY(!w.view(view)->grab().isNull());
+                shot(w.view(view), QString("%1-%2").arg(view, c.name));
+            }
+        }
+        QCOMPARE(tunerdraw::centsText(s.tuner), QString());
+        s.tuner.note = "A";
+        s.tuner.cents = -0.04;
+        QCOMPARE(tunerdraw::centsText(s.tuner), QString("0.0¢"));
+        s.tuner.cents = -3.26;
+        QCOMPARE(tunerdraw::centsText(s.tuner), QString("−3.3¢"));
+    }
+
     void stage_taps_ask_what_the_pedals_would() {
         FakeLink link;
         AppState s(link);
@@ -302,7 +352,7 @@ private slots:
         QCOMPARE(w.current(), QString("tuner"));
     }
 
-    void the_tuner_comes_up_while_the_outputs_are_muted() {
+    void the_tuner_comes_up_while_the_inputs_are_muted() {
         FakeLink link;
         AppState s(link);
         fill(s);
@@ -366,7 +416,7 @@ private slots:
         QTest::mouseRelease(v, Qt::LeftButton, {}, QPoint(slider.right() - 2, slider.center().y()));
         const QJsonObject param = link.last("param");
         QCOMPARE(param.value("chain").toInt(), 1);
-        QCOMPARE(param.value("id").toInt(), 0);
+        QCOMPARE(param.value("param").toInt(), 0);
         QVERIFY(param.value("value").toDouble() > 1.8 && param.value("value").toDouble() <= 2.0);
         shot(v, "chains-selected");
         click(v, v->hitRect("bypass"));
@@ -450,10 +500,24 @@ private slots:
         const QJsonArray params = plugin.value("plugin").toObject().value("params").toArray();
         QCOMPARE(params.size(), 1);
         QCOMPARE(params[0].toObject().value("name").toString(), QString("Gain"));
-        QJsonObject set;
-        link.request({{"cmd", "param"}, {"chain", 1}, {"slot", 0}, {"id", 0}, {"value", 0.5}}, [&](const QJsonObject& r) { set = r; });
-        QTRY_VERIFY_WITH_TIMEOUT(!set.isEmpty(), 3000);
-        QCOMPARE(set.value("text").toString(), QString("0.500"));
+        // The plug-in itself takes the value, on the chain playing (3) and on one
+        // that is not (1): read back, it stays where it was set.
+        for (int chain : {3, 1}) {
+            QJsonObject set;
+            link.request({{"cmd", "param"}, {"chain", chain}, {"slot", 0}, {"param", 0}, {"value", 0.5}}, [&](const QJsonObject& r) { set = r; });
+            QTRY_VERIFY_WITH_TIMEOUT(!set.isEmpty(), 3000);
+            QCOMPARE(set.value("text").toString(), QString("0.500"));
+            double now = -1;
+            for (int tries = 0; tries < 30 && now != 0.5; ++tries) {
+                QJsonObject r;
+                link.request({{"cmd", "plugin"}, {"chain", chain}, {"slot", 0}}, [&](const QJsonObject& reply) { r = reply; });
+                QTRY_VERIFY_WITH_TIMEOUT(!r.isEmpty(), 3000);
+                now = r.value("plugin").toObject().value("params").toArray().at(0).toObject().value("value").toDouble();
+                if (now != 0.5)
+                    QTest::qWait(100);
+            }
+            QCOMPARE(now, 0.5);
+        }
         link.request({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"bypassed", true}});
         QTRY_VERIFY_WITH_TIMEOUT(s.status.bypassed(1, 2), 3000);
 

@@ -56,6 +56,7 @@ protected:
         QString id, text;
         std::function<void()> tap;
         QColor textColor = color::text, stroke = color::border2, fill = color::panel;
+        QString tag; // a pedal's tag before the text, purple (or in textColor on a coloured button)
     };
     double header(QPainter& p, const QString& title, const QString& subtitle, const QVector<Pill>& pills, const QVector<Button>& buttons);
 

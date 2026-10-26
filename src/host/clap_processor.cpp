@@ -478,7 +478,7 @@ void ClapProcessor::reset() {
 }
 
 void ClapProcessor::flushIdle() {
-    if (!paramsPending_.load(std::memory_order_acquire) || processing_ || !paramsExt_ || !activated_)
+    if (!paramsPending_.load(std::memory_order_acquire) || !paramsExt_ || !activated_)
         return;
     drainParams(static_cast<uint32_t>(events_.size()));
     if (inEvents_->count > 0)

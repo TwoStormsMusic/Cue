@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 
+#include <algorithm>
 #include <cmath>
 
 namespace cue::gui {
@@ -242,6 +243,13 @@ QString TunerReading::string() const {
         if (strings[i] == midi)
             return QString("string %1").arg(i + 1);
     return {};
+}
+
+double TunerReading::turn(double phase, double seconds) const {
+    if (!valid || note.isEmpty() || held)
+        return phase;
+    phase += std::clamp(cents * 0.25, -12.0, 12.0) * seconds;
+    return phase - std::floor(phase);
 }
 
 QString audioSummary(const QJsonObject& hello) {

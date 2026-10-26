@@ -15,7 +15,7 @@ A **performance** is the whole config: **scenes** in the order you play them. A 
 | Part | State |
 | --- | --- |
 | Engine: pre-roll, crossfade, tail ring-out, warm next chain | done, tested offline |
-| Branches, outputs tapped anywhere, plug-in bypass and output mute with short fades | done, tested offline |
+| Branches, outputs tapped anywhere, plug-in bypass and input mute (for the tuner: tails ring out, then chains rest) with short fades | done, tested offline |
 | Bypass mode per plug-in: thru (passes its input) or mute (passes nothing); bypassed plug-ins ring out, then cost nothing | done, tested offline |
 | Side-chains: a plug-in's key input fed from an earlier plug-in (the Djent keyed gate) | done, tested with test plug-ins |
 | Switches never wait on a plug-in: resets run on a helper thread while a chain is idle, every plug-in is primed at load | done, benched with the TwoStorms plug-ins |

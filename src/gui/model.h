@@ -129,6 +129,10 @@ struct TunerReading {
     // "string 4" when the note is an open string of a bass or guitar in
     // standard tuning (the range says which), else empty.
     QString string() const;
+    // Where the strobe is (in stripes, 0 to 1) seconds after phase, as the
+    // TwoStorms Tuner turns it: a quarter stripe a second per cent off, at
+    // most 12 a second; still for a held note.
+    double turn(double phase, double seconds) const;
 };
 
 // "M2 · 48k · 64×3" from the hello's audio_settings.

@@ -67,7 +67,13 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         status = Status::fromJson(m);
         emit statusChanged();
     } else if (name == "tuner") {
+        double dt = 0;
+        if (tunerClock_.isValid())
+            dt = std::min(0.2, tunerClock_.restart() / 1000.0);
+        else
+            tunerClock_.start();
         tuner = TunerReading::fromJson(m);
+        strobePhase = tuner.turn(strobePhase, dt);
         emit tunerChanged();
     } else if (name == "log") {
         log.append({m.value("level").toString(), m.value("text").toString(), QDateTime::currentDateTime()});

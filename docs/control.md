@@ -55,7 +55,7 @@ reply repeats:
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
 | `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text` |
 | `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
-| `param` | `chain`, `slot`, `id`, `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
+| `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
 | `quit` | | |
 | `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
 

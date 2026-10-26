@@ -215,6 +215,26 @@ The sound carries on, and the pedals still switch, light and show. Start it agai
 
 When done, `bin/cue ctl quit` stops the engine (closing the app does not).
 
+## 9. Tuner, mute and sliders (0.5.1)
+
+0.5.1 answers the notes on 0.5.0. Same start as step 8 (`bin/cue-app --version` should say 0.5.1):
+
+```sh
+bin/cue-app --start "$HOME/cue/app-test.cue" --fullscreen
+```
+
+**The tuner looks like the TwoStorms Tuner.** Tap **Tuner**. The note, its sharp or flat and octave, the chevrons, the cents and hertz under the note, the needle and the strobe should all look and move as in the TwoStorms Tuner plug-in (open it in REAPER beside it if you can). The stage view's strip is the same, small. **Send** a photo if anything still looks off.
+
+**The tuner pedal mutes the inputs.** On a chain with a delay or a reverb, play a note and press the tuner pedal while it rings:
+
+- The delay or reverb rings out instead of stopping, and the tuner still reads your strings. The pane is framed in red with **INPUTS MUTED**, and the **Mute** button turns red.
+- Once the tail has died away the chain rests, so the CPU pill should drop and `bin/cue ctl status` over ssh should show that chain's time at 0. A plug-in that keeps making a little noise of its own keeps its chain awake; **send** which one if so.
+- Press the pedal again: the sound is back at once with no click. Switch chains while muted, then unmute: the new chain plays.
+
+**Sliders stay where you leave them.** Tap **Chains**, tap the Gain Stage, and move a slider: it stays where you let go and the sound follows. Do the same on a Neural DSP plug-in. Tap **Save**, then `bin/cue check "$HOME/cue/app-test.cue"`. **Send** what it printed.
+
+Drawing wires, adding plug-ins and zooming are not in 0.5 yet: they come with the routing editor.
+
 ## What passes
 
 | Check | Pass when |

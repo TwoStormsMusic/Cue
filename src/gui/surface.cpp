@@ -158,11 +158,27 @@ double Surface::header(QPainter& p, const QString& title, const QString& subtitl
     // The buttons, from the right.
     double right = width() - m;
     const double bh = 46 * u, bpx = 16 * u;
+    const QFont bfont = typeface(Face::Text, bpx, QFont::DemiBold);
+    const double th = 22 * u;
     for (int i = buttons.size() - 1; i >= 0; --i) {
         const Button& b = buttons[i];
-        const double bw = QFontMetricsF(typeface(Face::Text, bpx, QFont::DemiBold)).horizontalAdvance(b.text) + 38 * u;
+        const double textW = QFontMetricsF(bfont).horizontalAdvance(b.text);
+        const double tw = b.tag.isEmpty() ? 0 : draw::tagWidth(b.tag, th) + 10 * u;
+        const double bw = tw + textW + 38 * u;
         const QRectF r(right - bw, cy - bh / 2, bw, bh);
-        button(p, b.id, r, b.text, b.tap, b.textColor, b.stroke, b.fill, bpx);
+        if (b.tag.isEmpty()) {
+            button(p, b.id, r, b.text, b.tap, b.textColor, b.stroke, b.fill, bpx);
+        } else {
+            // The tag and the words, centred together.
+            button(p, b.id, r, QString(), b.tap, b.textColor, b.stroke, b.fill, bpx);
+            const bool plain = b.fill == color::panel;
+            const double x = r.left() + 19 * u;
+            draw::tag(p, QRectF(x, cy - th / 2, tw - 10 * u, th), b.tag, plain ? color::purpleBorder : b.textColor,
+                      plain ? color::purple : b.textColor, plain ? color::purpleBg : QColor());
+            p.setPen(b.textColor);
+            p.setFont(bfont);
+            p.drawText(QRectF(x + tw, r.top(), textW + 1, bh), Qt::AlignLeft | Qt::AlignVCenter, b.text);
+        }
         right -= bw + 10 * u;
     }
     // The logo and the titles.

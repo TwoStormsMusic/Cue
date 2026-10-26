@@ -7,6 +7,7 @@
 #include "gui/model.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
@@ -20,7 +21,7 @@ struct Settings {
     QString startView = "stage"; // stage, tuner or chains
     bool percent = false;        // times as % of the budget rather than ms
     double scale = 1.0;          // size of everything, 0.5 to 2.5
-    bool tunerWhenMuted = true;  // the tuner view comes up while the outputs are muted
+    bool tunerWhenMuted = true;  // the tuner view comes up while the inputs are muted
     bool fullScreen = false;
 
     static QString path();
@@ -45,6 +46,7 @@ public:
     Performance perf;
     Status status;
     TunerReading tuner;
+    double strobePhase = 0; // the tuner's strobe, turned by each reading
     struct LogLine {
         QString level, text;
         QDateTime at;
@@ -77,6 +79,8 @@ signals:
 private:
     void onConnection(bool up);
     void onEvent(const QString& name, const QJsonObject& m);
+
+    QElapsedTimer tunerClock_; // since the last reading
 };
 
 } // namespace cue::gui

@@ -125,6 +125,28 @@ TEST(clap_idle_plugin_gets_params_without_processing) {
     CHECK(stat("process_while_stopped") == stoppedBefore);
 }
 
+TEST(clap_resting_plugin_gets_params_while_the_inputs_are_muted) {
+    Engine e(settings());
+    auto gain = load("cue.test.gain");
+    ClapProcessor* g = gain.get();
+    std::vector<std::unique_ptr<Processor>> chain;
+    chain.push_back(std::move(gain));
+    e.addChain(chainOf(std::move(chain)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    runConstant(e, 0.5f, 100);
+    e.setMute(true);
+    runConstant(e, 0.5f, 400); // quiet for long enough: resting
+    CHECK(e.resting(0));
+    CHECK(g->setParam(0, 1.5));
+    runConstant(e, 0.5f, 10);
+    double value = 0;
+    CHECK(g->paramValue(0, value));
+    CHECK_MSG(std::fabs(value - 1.5) < 1e-9, "value %.3f", value);
+    e.setMute(false);
+    CHECK(std::fabs(runConstant(e, 0.5f, 100) - 0.75f) < 1e-5f);
+}
+
 TEST(clap_delay_reports_tail_and_rings_out) {
     Engine e(settings());
     std::vector<std::unique_ptr<Processor>> ca, cb;
