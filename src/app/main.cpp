@@ -454,9 +454,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     AlsaMidi midi;
     std::thread midiThread;
     std::atomic<bool> midiRun{true};
+    int midiPorts = 0;
     if (config.midi.enabled) {
         if (midi.open("Cue", &err)) {
-            const int ins = midi.connectInputFrom(config.midi.in);
+            const int ins = midiPorts = midi.connectInputFrom(config.midi.in);
             const int outs = config.midi.out.empty() ? 0 : midi.connectOutputTo(config.midi.out);
             std::printf("midi: input from %d port(s) matching '%s', output to %d port(s) matching '%s', profile %s\n", ins,
                         config.midi.in.c_str(), outs, config.midi.out.c_str(), config.midi.profile.c_str());
@@ -520,6 +521,11 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             reply["performance"] = config.performance;
             reply["file"] = path;
             reply["audio"] = audio->describe();
+            reply["audio_settings"] = {{"device", opts.noAudio ? "none" : config.audio.device},
+                                       {"rate", config.audio.rate},
+                                       {"period", config.audio.period},
+                                       {"periods", config.audio.periods}};
+            reply["midi"] = {{"enabled", config.midi.enabled}, {"in", config.midi.in}, {"profile", config.midi.profile}, {"ports", midiPorts}};
         } else if (cmd == "status") {
             reply["status"] = status();
         } else if (cmd == "performance") {
@@ -1469,6 +1475,9 @@ int usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Line by line even into a file (the app's --start writes engine.log), so
+    // what it says is there when it is said.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     if (argc < 2)
         return usage();
     const std::string cmd = argv[1];

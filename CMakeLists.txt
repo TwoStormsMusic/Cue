@@ -8,6 +8,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(CUE_BUILD_TESTS "Build the offline tests" ON)
+option(CUE_BUILD_APP "Build the desktop app, cue-app (needs Qt 6 Widgets and Network)" ON)
 
 find_package(Threads REQUIRED)
 
@@ -107,6 +108,34 @@ target_sources(cue_test_vst3 PRIVATE
   ${VST3_DIR}/pluginterfaces/base/funknown.cpp
   ${VST3_DIR}/public.sdk/source/vst/vstinitiids.cpp)
 
+# The desktop app: Qt 6 Widgets, drawn by hand; talks to cue run over its socket.
+if(CUE_BUILD_APP)
+  find_package(Qt6 6.2 COMPONENTS Widgets Network QUIET)
+  if(Qt6_FOUND)
+    add_library(cue_gui STATIC
+      src/gui/link.cpp
+      src/gui/model.cpp
+      src/gui/state.cpp
+      src/gui/theme.cpp
+      src/gui/surface.cpp
+      src/gui/stageview.cpp
+      src/gui/tunerview.cpp
+      src/gui/chainview.cpp
+      src/gui/settingsview.cpp
+      src/gui/mainwindow.cpp
+      src/gui/fonts.qrc
+    )
+    set_target_properties(cue_gui PROPERTIES AUTOMOC ON AUTORCC ON)
+    target_include_directories(cue_gui PUBLIC src)
+    target_link_libraries(cue_gui PUBLIC Qt6::Widgets Qt6::Network)
+    add_executable(cue-app src/gui/main.cpp)
+    target_link_libraries(cue-app PRIVATE cue_gui)
+  else()
+    message(STATUS "Qt 6 not found: cue-app is not built (install qt6-base-dev)")
+    set(CUE_BUILD_APP OFF)
+  endif()
+endif()
+
 if(CUE_BUILD_TESTS)
   enable_testing()
   add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
@@ -119,4 +148,18 @@ if(CUE_BUILD_TESTS)
   add_dependencies(cue_tests cue_test_plugins cue_test_vst3)
   target_link_options(cue_tests PRIVATE -static-libstdc++ -static-libgcc)
   add_test(NAME cue_tests COMMAND cue_tests)
+
+  if(CUE_BUILD_APP)
+    find_package(Qt6 COMPONENTS Test REQUIRED)
+    add_executable(cue_app_tests tests/app/test_app.cpp)
+    set_target_properties(cue_app_tests PROPERTIES AUTOMOC ON)
+    target_link_libraries(cue_app_tests PRIVATE cue_gui Qt6::Test)
+    target_compile_definitions(cue_app_tests PRIVATE
+      CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+      CUE_BIN="$<TARGET_FILE:cue>"
+      CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>")
+    add_dependencies(cue_app_tests cue cue_test_plugins)
+    add_test(NAME cue_app_tests COMMAND cue_app_tests)
+    set_tests_properties(cue_app_tests PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
+  endif()
 endif()
