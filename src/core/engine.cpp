@@ -74,12 +74,13 @@ bool Engine::activate() {
     }
     gainScratch_.assign(maxFrames, 0.0f);
     for (auto& s : chains_) {
-        s.buffers.assign((2 + settings_.numOutputs) * static_cast<size_t>(maxFrames), 0.0f);
+        s.buffers.assign((3 + settings_.numOutputs) * static_cast<size_t>(maxFrames), 0.0f);
         s.in = s.buffers.data();
         s.gain = s.in + maxFrames;
+        s.editScratch = s.gain + maxFrames;
         s.outs.resize(settings_.numOutputs);
         for (size_t o = 0; o < settings_.numOutputs; ++o)
-            s.outs[o] = s.gain + (1 + o) * static_cast<size_t>(maxFrames);
+            s.outs[o] = s.editScratch + (1 + o) * static_cast<size_t>(maxFrames);
     }
     jobs_.assign(chains_.size(), -1);
     const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
@@ -179,6 +180,20 @@ void Engine::resetLoop() {
 }
 
 void Engine::prime(float milliseconds) {
+    // Every plug-in, bypassed ones too: they may be switched on mid-song.
+    std::vector<Processor*> all;
+    for (auto& s : chains_) {
+        if (s.state != ChainState::Idle)
+            continue;
+        for (size_t i = 0; i < s.chain->numSlots(); ++i)
+            all.push_back(&s.chain->slot(i));
+    }
+    primeProcessors(all, milliseconds);
+}
+
+void Engine::primeProcessors(const std::vector<Processor*>& processors, float milliseconds) {
+    if (processors.empty())
+        return;
     std::thread([&] {
         markAudioThread();
         const uint32_t frames = settings_.maxFrames;
@@ -196,26 +211,88 @@ void Engine::prime(float milliseconds) {
         }
         const float* noise[kChainChannels] = {noiseStore, noiseStore + frames};
         const size_t blocks = std::max<uint32_t>(1, ms(milliseconds) / frames);
-        // Every plug-in, bypassed ones too: they may be switched on mid-song.
-        for (auto& s : chains_) {
-            if (s.state != ChainState::Idle)
-                continue;
-            for (size_t i = 0; i < s.chain->numSlots(); ++i) {
-                Processor& p = s.chain->slot(i);
-                p.startProcessing();
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(silence, scratch, frames);
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(noise, scratch, frames);
-                // Clear what the noise left, then let anything a reset
-                // misses die away on silence.
-                p.reset();
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(silence, scratch, frames);
-                p.stopProcessing();
-            }
+        for (Processor* p : processors) {
+            p->startProcessing();
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(silence, scratch, frames);
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(noise, scratch, frames);
+            // Clear what the noise left, then let anything a reset
+            // misses die away on silence.
+            p->reset();
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(silence, scratch, frames);
+            p->stopProcessing();
         }
     }).join();
+}
+
+bool Engine::prepareEdit(int chain, ChainEdit& edit, PreparedEdit& out, std::string* error) {
+    if (chain < 0 || chain >= static_cast<int>(chains_.size())) {
+        *error = "there is no chain number " + std::to_string(chain + 1);
+        return false;
+    }
+    if (!activated_) {
+        *error = "the engine is not running";
+        return false;
+    }
+    Chain::PlanPtr plan = chains_[chain].chain->prepare(edit, error);
+    if (!plan)
+        return false;
+    primeProcessors(Chain::added(*plan), 100.0f);
+    out.chain = chain;
+    out.plan = std::move(plan);
+    return true;
+}
+
+bool Engine::applyEdit(PreparedEdit& edit, std::string* error) {
+    if (!edit.plan || edit.chain < 0 || edit.chain >= static_cast<int>(chains_.size())) {
+        *error = "nothing to change";
+        return false;
+    }
+    Chain::Plan* plan = edit.plan.get();
+    EngineCommand cmd{EngineCommand::Type::Edit, edit.chain};
+    cmd.plan = plan;
+    bool posted = post(cmd);
+    for (int tries = 0; !posted && tries < 500; ++tries) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        posted = post(cmd);
+    }
+    if (!posted) {
+        *error = "the engine is not taking changes";
+        return false;
+    }
+    // The audio thread has it now; it only reads what commit copies.
+    edit.plan.release();
+    chains_[edit.chain].chain->commit(*plan);
+    return true;
+}
+
+bool Engine::edit(int chain, ChainEdit edit, std::string* error) {
+    PreparedEdit prepared;
+    return prepareEdit(chain, edit, prepared, error) && applyEdit(prepared, error);
+}
+
+bool Engine::setWire(int chain, Port from, Port to, WireGains gains) {
+    if (chain < 0 || chain >= static_cast<int>(chains_.size()))
+        return false;
+    const uint32_t id = chains_[chain].chain->setGains(from, to, gains);
+    if (id == 0)
+        return false;
+    if (activated_)
+        post({EngineCommand::Type::SetWire, chain, id, false, gains});
+    return true;
+}
+
+void Engine::collect() {
+    while (auto plan = retired_.pop())
+        Chain::PlanDeleter()(*plan);
+}
+
+// The audio thread never frees: what it is done with goes to the main thread.
+void Engine::retire(Chain::Plan* plan) {
+    if (plan)
+        retired_.push(plan); // with 256 waiting the main thread has stopped collecting, and this one is never freed
 }
 
 void Engine::deactivate() {
@@ -225,6 +302,7 @@ void Engine::deactivate() {
     stopResetter_ = true;
     if (resetter_.joinable())
         resetter_.join();
+    collect();
     for (size_t i = 0; i < chains_.size(); ++i) {
         if (chains_[i].state != ChainState::Idle)
             chains_[i].chain->stopProcessing();
@@ -290,6 +368,9 @@ void Engine::stopChain(int index, bool rangOut) {
     s.chain->stopProcessing();
     s.inGain.set(0.0f);
     s.outGain.set(0.0f);
+    // A change waiting on its fade is swapped in at once, now that it is idle.
+    s.editing = false;
+    s.editGain.set(1.0f);
     setState(index, ChainState::Idle);
     s.clean->store(rangOut && s.chain->settled() ? kClean : kDirty);
     emit(EngineEvent::Type::ChainIdle, index);
@@ -305,6 +386,20 @@ void Engine::handle(const EngineCommand& cmd) {
             const bool idle = s.state == ChainState::Idle;
             s.chain->setBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
         }
+        break;
+    case EngineCommand::Type::Edit:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
+            Slot& s = chains_[cmd.chain];
+            retire(s.chain->receive(cmd.plan));
+            if (s.editing)
+                s.chain->prepareSwap(ms(settings_.editFadeMs));
+        } else {
+            retire(cmd.plan);
+        }
+        break;
+    case EngineCommand::Type::SetWire:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size()))
+            chains_[cmd.chain].chain->setWireGains(cmd.slot, cmd.gains, ms(settings_.bypassFadeMs));
         break;
     case EngineCommand::Type::SetMute:
         if (cmd.on != muted_) {
@@ -468,6 +563,42 @@ void Engine::advance(int index, uint32_t frames, float peak) {
     }
 }
 
+// Changes to chains' wiring. An idle chain takes one at once (unless the
+// reset helper has it); a playing one fades its output out, swaps and fades
+// back in.
+void Engine::applyPlans() {
+    const uint32_t fade = ms(settings_.editFadeMs);
+    for (auto& s : chains_) {
+        if (!s.chain->hasPending())
+            continue;
+        if (s.state == ChainState::Idle) {
+            uint8_t c = s.clean->load();
+            if ((c != kClean && c != kDirty) || !s.clean->compare_exchange_strong(c, kInUse))
+                continue;
+            bool stale = c == kDirty;
+            retire(s.chain->swap(false, 0, &stale));
+            s.clean->store(stale ? kDirty : kClean);
+            continue;
+        }
+        if (s.resting) {
+            retire(s.chain->swap(true, fade));
+            s.editing = false;
+            s.editGain.set(1.0f);
+            continue;
+        }
+        if (!s.editing) {
+            s.editing = true;
+            s.editGain.linearTo(0.0f, fade);
+            s.chain->prepareSwap(fade);
+        }
+        if (s.editGain.done() && s.editGain.value() == 0.0f) {
+            retire(s.chain->swap(true, fade));
+            s.editing = false;
+            s.editGain.linearTo(1.0f, fade);
+        }
+    }
+}
+
 void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     oneInput_[0] = in;
     process(oneInput_.data(), outs, frames);
@@ -488,6 +619,7 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
         warm_ = -1;
         setWarmTarget(target);
     }
+    applyPlans();
 
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         std::memset(outs[o], 0, frames * sizeof(float));
@@ -628,6 +760,10 @@ void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, s
             // Not while the reset helper has it.
             if ((s.state == ChainState::Idle && s.clean->load() == kClean) || s.resting)
                 s.chain->flushIdle();
+            // A playing chain's blocks that nothing reaches: a helper may be
+            // processing the chain, but never these.
+            else if (s.state != ChainState::Idle)
+                s.chain->flushUnplayed();
         }
     }
 
@@ -692,6 +828,12 @@ void Engine::runChain(int index, bool helper) {
             s.in[n] = in[n] * s.gain[n];
     }
     s.chain->process(s.in, s.outs.data(), frames);
+    if (!s.editGain.done() || s.editGain.value() != 1.0f) {
+        s.editGain.render(s.editScratch, frames);
+        for (float* out : s.outs)
+            for (uint32_t n = 0; n < frames; ++n)
+                out[n] *= s.editScratch[n];
+    }
     s.helper = helper;
     s.blockNs = nsSince(t0);
 }

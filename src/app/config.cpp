@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <sstream>
 
 namespace cue {
@@ -725,13 +728,80 @@ std::string expandPath(std::string p) {
     return p;
 }
 
+bool pluginFromText(const std::string& text, PluginSpec& spec, std::string* error) {
+    spec = PluginSpec{};
+    spec.where = "the new plug-in";
+    return parsePlugin(trim(text), "", spec, error);
+}
+
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain) {
     std::vector<const PluginSpec*> out;
-    for (const auto& l : chain.lines)
-        for (const auto& p : l.plugins)
-            out.push_back(&p);
+    for (const auto& p : chain.blocks)
+        out.push_back(&p);
     return out;
 }
+
+std::string wireList(const ChainSpec& chain, const std::vector<std::string>& outputs) {
+    auto end = [&](const Port& p) -> std::string {
+        switch (p.kind) {
+        case Port::Kind::Input: return "in";
+        case Port::Kind::Block: return std::to_string(p.index) + (p.key ? ":key" : "");
+        case Port::Kind::Output: break;
+        }
+        return p.index >= 0 && static_cast<size_t>(p.index) < outputs.size() ? outputs[p.index] : "out" + std::to_string(p.index + 1);
+    };
+    std::string s;
+    for (const WireSpec& w : chain.wires) {
+        if (!s.empty())
+            s += ' ';
+        s += end(w.from) + ">" + end(w.to);
+        if (!w.gains.neutral()) {
+            char buf[80];
+            std::snprintf(buf, sizeof buf, "(%gdB w%g p%g)", w.gains.levelDb, std::round(w.gains.width * 1000) / 10, std::round(w.gains.pan * 1000) / 10);
+            s += buf;
+        }
+    }
+    return s;
+}
+
+namespace {
+
+// A chain described as lines becomes blocks and wires: each plug-in wired
+// from what comes before it on its line, each output from where it is
+// taken. The blocks keep the lines' order, line 0 first, so slots stay as
+// they were.
+void linesToWires(ChainSpec& c) {
+    const size_t n = c.lines.size();
+    std::vector<size_t> first(n), count(n);
+    for (size_t l = 0; l < n; ++l) {
+        first[l] = c.blocks.size();
+        count[l] = c.lines[l].plugins.size();
+        for (auto& p : c.lines[l].plugins)
+            c.blocks.push_back(std::move(p));
+    }
+    // The signal of a line after so many of its plug-ins.
+    std::function<Port(size_t, size_t)> at = [&](size_t l, size_t k) -> Port {
+        if (k > 0)
+            return Port::block(static_cast<int>(first[l] + k - 1));
+        if (l == 0)
+            return Port::input();
+        const int parent = c.lines[l].parent;
+        const size_t from = parent >= 0 && static_cast<size_t>(parent) < l ? static_cast<size_t>(parent) : 0;
+        return at(from, std::min(c.lines[l].after, count[from]));
+    };
+    for (size_t l = 0; l < n; ++l)
+        for (size_t k = 0; k < count[l]; ++k)
+            c.wires.push_back({at(l, k), Port::block(static_cast<int>(first[l] + k)), {}, c.blocks[first[l] + k].where});
+    for (size_t o = 0; o < c.out.size(); ++o) {
+        const TapSpec& t = c.out[o];
+        const size_t line = t.line >= 0 && static_cast<size_t>(t.line) < n ? static_cast<size_t>(t.line) : 0;
+        c.wires.push_back({at(line, std::min(t.after, count[line])), Port::output(static_cast<int>(o)), {}, t.where.empty() ? c.where : t.where});
+    }
+    c.lines.clear();
+    c.out.clear();
+}
+
+} // namespace
 
 bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
                      std::string* error) {
@@ -888,6 +958,20 @@ bool finishConfig(Config& config, std::string* error) {
                 c.inputIndex = static_cast<size_t>(i);
                 c.input = config.inputs[c.inputIndex];
             }
+            if (c.lines.empty()) {
+                // Blocks and wires already (a .cue file): they must fit the performance.
+                for (const WireSpec& w : c.wires)
+                    for (const Port& p : {w.from, w.to})
+                        if ((p.kind == Port::Kind::Block && (p.index < 0 || static_cast<size_t>(p.index) >= c.blocks.size())) ||
+                            (p.kind == Port::Kind::Output && (p.index < 0 || static_cast<size_t>(p.index) >= config.outputs.size()))) {
+                            *error = (w.where.empty() ? c.where : w.where) + ": chain '" + c.name + "': a wire joins a plug-in or output it does not have";
+                            return false;
+                        }
+                for (auto& p : c.blocks)
+                    if (!p.bypassModeSet)
+                        p.muteOnBypass = config.muteOnBypass;
+                continue;
+            }
             std::vector<TapSpec> taps(config.outputs.size());
             for (size_t o = 0; o < taps.size(); ++o) {
                 taps[o].output = config.outputs[o];
@@ -909,10 +993,10 @@ bool finishConfig(Config& config, std::string* error) {
                 to.after = std::min(to.after, c.lines[static_cast<size_t>(to.line)].plugins.size());
             }
             c.out = std::move(taps);
-            for (auto& l : c.lines)
-                for (auto& p : l.plugins)
-                    if (!p.bypassModeSet)
-                        p.muteOnBypass = config.muteOnBypass;
+            linesToWires(c);
+            for (auto& p : c.blocks)
+                if (!p.bypassModeSet)
+                    p.muteOnBypass = config.muteOnBypass;
         }
     }
     config.tuner.inputIndex = 0;

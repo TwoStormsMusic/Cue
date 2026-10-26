@@ -40,7 +40,12 @@ struct Rig {
     Processor* at(int chain, size_t slot) const;
     // Where a plug-in is in plugins, or -1.
     int find(int chain, size_t slot) const;
+    // The plug-ins as the show sees them, bypassed as they are now.
     std::vector<ShowPlugin> showPlugins() const;
+    // Main thread: a plug-in that needs servicing, and one that no longer
+    // does (it has been removed).
+    void track(Processor* p, const PluginSpec& spec);
+    void untrack(Processor* p);
 
     // Main thread, every few milliseconds: plug-in callbacks and controller updates.
     void pumpMainThread() {
@@ -54,8 +59,13 @@ struct Rig {
 std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* error);
 
 // Loads every plug-in of every chain and activates the engine. Prints what
-// it loads. On failure returns false with the reason.
-bool buildRig(const Config& config, Rig& rig, std::string* error);
+// it loads. On failure returns false with the reason. A plug-in's
+// `sidechain =` becomes a wire into its key.
+bool buildRig(Config& config, Rig& rig, std::string* error);
+
+// A plug-in for a chain that is playing: loaded, activated for the engine,
+// with its state and params set. Not yet in any chain.
+bool loadLivePlugin(const PluginSpec& spec, const EngineSettings& engine, std::unique_ptr<Processor>& out, std::string* error);
 
 // The show's output for a live rig: engine commands, plug-in parameters and
 // MIDI into plug-ins, and MIDI to the controller through midiOut.

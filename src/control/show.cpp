@@ -253,7 +253,6 @@ struct Show::Impl {
     };
 
     ShowOutput& out;
-    mutable std::mutex mutex;
     Config config;
     std::vector<ShowPlugin> plugins;
     std::vector<Control> controls;
@@ -1325,23 +1324,52 @@ Show::Show(ShowOutput& out) : d_(std::make_unique<Impl>(out)) {}
 Show::~Show() = default;
 
 bool Show::load(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->load(config, plugins, error);
 }
 
+bool Show::reload(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error, const std::function<bool(std::string*)>& apply) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto next = std::make_unique<Impl>(d_->out);
+    if (!next->load(config, plugins, error))
+        return false;
+    if (apply && !apply(error))
+        return false;
+    const Impl& was = *d_;
+    next->preset = was.preset;
+    next->scene = was.scene;
+    next->activeChain = was.activeChain;
+    next->warmChain = was.warmChain;
+    next->manualMute = was.manualMute;
+    next->sentMute = was.sentMute;
+    std::copy(std::begin(was.sentLeds), std::end(was.sentLeds), std::begin(next->sentLeds));
+    next->sentDisplay = was.sentDisplay;
+    for (auto& k : next->controls)
+        for (const auto& old : was.controls)
+            if (same(k.name, old.name))
+                k.value = std::clamp(old.value, std::min(k.min, k.max), std::max(k.min, k.max));
+    if (next->preset >= static_cast<int>(next->presets.size()))
+        next->preset = next->presets.empty() ? -1 : 0;
+    if (next->scene >= static_cast<int>(next->scenes.size()))
+        next->scene = next->scenes.empty() ? -1 : 0;
+    d_ = std::move(next);
+    d_->refresh();
+    return true;
+}
+
 std::vector<std::string> Show::warnings() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->warnings;
 }
 
 void Show::start() {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(0);
     d_->refresh();
 }
 
 void Show::onMidi(const MidiMessage& m) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl& d = *d_;
     bool isPedal = false;
     Event e{Input::Kind::CC, m.data1, m.data2, m.channel()};
@@ -1374,7 +1402,7 @@ void Show::onMidi(const MidiMessage& m) {
 }
 
 bool Show::onKey(char key) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl& d = *d_;
     bool used = false;
     for (const auto& t : d.triggers)
@@ -1386,19 +1414,19 @@ bool Show::onKey(char key) {
 }
 
 void Show::selectPreset(int index) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(index);
     d_->refresh();
 }
 
 void Show::stepPreset(int delta) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(Impl::wrapIndex(d_->preset + delta, static_cast<int>(d_->presets.size())));
     d_->refresh();
 }
 
 bool Show::run(const std::string& action, std::string* error) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl::Action a;
     if (!d_->parseAction({action, "command"}, a, error))
         return false;
@@ -1408,44 +1436,44 @@ bool Show::run(const std::string& action, std::string* error) {
 }
 
 int Show::preset() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->preset;
 }
 
 int Show::scene() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->scene;
 }
 
 size_t Show::numPresets() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->presets.size();
 }
 
 std::string Show::presetName(int index) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return index >= 0 && index < static_cast<int>(d_->presets.size()) ? d_->presets[index].name : "";
 }
 
 double Show::value(const std::string& control) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     const int c = d_->findControl(control);
     return c < 0 ? std::numeric_limits<double>::quiet_NaN() : d_->controls[c].value;
 }
 
 std::string Show::valueText(const std::string& control) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     const int c = d_->findControl(control);
     return c < 0 ? "" : Impl::text(d_->controls[c]);
 }
 
 std::string Show::sceneName(int index) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return index >= 0 && index < static_cast<int>(d_->scenes.size()) ? d_->scenes[index].name : "";
 }
 
 std::vector<std::string> Show::controlNames() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> out;
     for (const auto& c : d_->controls)
         out.push_back(c.name);
@@ -1453,22 +1481,22 @@ std::vector<std::string> Show::controlNames() const {
 }
 
 bool Show::muted() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->currentMute();
 }
 
 bool Show::led(int pedal) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->ledFor(pedal);
 }
 
 std::string Show::display() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->displayFor();
 }
 
 std::string Show::status() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::string s = d_->preset >= 0 ? d_->presets[d_->preset].name : "-";
     if (d_->currentMute())
         s += " (muted)";
@@ -1478,7 +1506,7 @@ std::string Show::status() const {
 }
 
 std::vector<Show::ParamTie> Show::ties(int chain, size_t slot) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ParamTie> out;
     auto names = [&](const std::vector<int>& plugins) {
         for (int p : plugins)

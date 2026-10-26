@@ -8,7 +8,9 @@
 #include "app/config.h"
 #include "midi/alsa_midi.h"
 
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -46,6 +48,14 @@ public:
 
     // Compiles the mappings. Errors and warnings name the config line.
     bool load(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error);
+    // The same while it plays, after a change to the performance (a plug-in
+    // added or removed): the preset, scene, controls and mute carry on as
+    // they are. apply runs under the show's lock once the new performance
+    // compiles, so nothing the show sends crosses the change; if it returns
+    // false (with why) the show stays as it was. Then everything the
+    // mappings say is sent again where it differs.
+    bool reload(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error,
+                const std::function<bool(std::string*)>& apply = nullptr);
     std::vector<std::string> warnings() const;
 
     // Selects the first preset and sets every LED and the display.
@@ -86,6 +96,7 @@ public:
     struct Impl;
 
 private:
+    mutable std::mutex mutex_;
     std::unique_ptr<Impl> d_;
 };
 

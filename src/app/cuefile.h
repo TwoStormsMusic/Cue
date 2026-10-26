@@ -14,7 +14,8 @@
 
 namespace cue {
 
-constexpr int kCueFormat = 1;
+// 1: chains as lines; 2 (Cue 0.7): blocks and wires. Both are read.
+constexpr int kCueFormat = 2;
 
 bool isCueFile(const std::string& path);
 

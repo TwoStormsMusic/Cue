@@ -21,6 +21,7 @@
 #include "app/cuefile.h"
 #include "app/service.h"
 #include "app/doctor.h"
+#include "app/edit.h"
 #include "app/rpp.h"
 #include "control/show.h"
 #include "audio/alsa_backend.h"
@@ -262,21 +263,10 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
 }
 
 // The config's plug-in at an engine chain and slot: chains are numbered scene
-// by scene, slots line by line.
+// by scene, slots in the order of the chain's blocks.
 PluginSpec* specAt(Config& config, int chain, size_t slot) {
-    int c = 0;
-    for (auto& scene : config.scenes)
-        for (auto& cs : scene.chains) {
-            if (c++ != chain)
-                continue;
-            size_t k = 0;
-            for (auto& line : cs.lines)
-                for (auto& ps : line.plugins)
-                    if (k++ == slot)
-                        return &ps;
-            return nullptr;
-        }
-    return nullptr;
+    ChainSpec* cs = chainSpec(config, chain);
+    return cs && slot < cs->blocks.size() ? &cs->blocks[slot] : nullptr;
 }
 
 // Whether the app's DISPLAY is the engine's (":0" and ":0.0" are the same).
@@ -291,6 +281,61 @@ bool sameScreen(std::string theirs) {
             d->erase(dot);
     }
     return ours == theirs;
+}
+
+// A wire's end in a request: a plug-in by slot (from 0); "in" or the
+// chain's input by name, where a wire starts; an output by name, or out1,
+// out2..., where it ends. key: the plug-in's side-chain input.
+bool portOf(const Json& j, bool from, bool key, const Config& config, const ChainSpec& cs, Port& out, std::string* error) {
+    if (j.is_number_integer()) {
+        const long n = j.get<long>();
+        if (n < 0 || static_cast<size_t>(n) >= cs.blocks.size()) {
+            *error = "chain " + cs.name + " has no plug-in " + std::to_string(n + 1);
+            return false;
+        }
+        out = Port::block(static_cast<int>(n), !from && key);
+        return true;
+    }
+    const std::string name = j.is_string() ? lower(j.get<std::string>()) : "";
+    if (from) {
+        if (name == "in" || name == lower(config.inputs.at(cs.inputIndex))) {
+            out = Port::input();
+            return true;
+        }
+        *error = "a wire starts at the chain's input (" + config.inputs.at(cs.inputIndex) + ") or a plug-in";
+        return false;
+    }
+    for (size_t o = 0; o < config.outputs.size(); ++o)
+        if (name == lower(config.outputs[o]) || name == "out" + std::to_string(o + 1)) {
+            out = Port::output(static_cast<int>(o));
+            return true;
+        }
+    *error = "a wire ends at a plug-in or one of the outputs (" + [&] {
+        std::string all;
+        for (const auto& o : config.outputs)
+            all += (all.empty() ? "" : ", ") + o;
+        return all;
+    }() + ")";
+    return false;
+}
+
+// A wire from a request: its ends, and its gains (level_db, width and pan
+// in per cent) over those it has, or a plain wire's.
+bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec& w, std::string* error) {
+    if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
+        return false;
+    for (const WireSpec& had : cs.wires)
+        if (had.from == w.from && had.to == w.to)
+            w.gains = had.gains;
+    w.gains.levelDb = req.value("level_db", w.gains.levelDb);
+    w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
+    w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
+    if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1) {
+        *error = "a wire's width is 0 to 200 % and its pan -100 to 100";
+        return false;
+    }
+    w.where = "the app";
+    return true;
 }
 
 // A plug-in for the app: what it is, whether it is bypassed, and its
@@ -338,12 +383,16 @@ Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const std::vector<S
 
 // Each plug-in's state as it is now, for saving what is playing. On the main thread.
 void captureStates(const Rig& rig, Config& config) {
-    size_t k = 0;
+    int c = 0;
     for (auto& scene : config.scenes)
-        for (auto& chain : scene.chains)
-            for (auto& line : chain.lines)
-                for (auto& ps : line.plugins) {
-                    Processor* p = rig.plugins.at(k++).processor;
+        for (auto& chain : scene.chains) {
+            const int index = c++;
+            for (size_t slot = 0; slot < chain.blocks.size(); ++slot) {
+                    PluginSpec& ps = chain.blocks[slot];
+                    const int k = rig.find(index, slot);
+                    if (k < 0)
+                        continue;
+                    Processor* p = rig.plugins[k].processor;
                     bool ok = true;
                     if (ps.kind == "clap") {
                         std::vector<uint8_t> state;
@@ -375,7 +424,8 @@ void captureStates(const Rig& rig, Config& config) {
                         if (p->paramValue(id, now))
                             value = now;
                     }
-                }
+            }
+        }
 }
 
 // Where an xrun came from: when, how late and slow the block before it
@@ -542,6 +592,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
 
     // The windows plug-in editors open in, on the computer's own screen.
     EditorHost editors;
+    // Changes to the chains while they play.
+    LiveRig live{config, rig, show, &editors};
 
     // The control socket: the app and cue ctl.
     Service service;
@@ -682,10 +734,86 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 ps->shownSet = true;
             }
             reply["plugin"] = pluginJson(rig, k, *ps, show.ties(chain, slot), &editors);
+        } else if (cmd == "add" || cmd == "remove" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
+            const int chain = req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs)
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            std::string why;
+            bool changed = true; // the routing, not only where something is drawn
+            if (cmd == "add") {
+                // As a plugin line has it, or by its parts.
+                PluginSpec spec;
+                const Json& pj = req.at("plugin");
+                if (pj.is_string()) {
+                    if (!pluginFromText(pj.get<std::string>(), spec, &why))
+                        return refuse(why);
+                } else {
+                    std::string text = pj.value("format", std::string("clap")) + ":";
+                    if (pj.contains("args")) {
+                        for (const auto& a : pj.at("args"))
+                            text += a.get<std::string>() + " ";
+                    } else {
+                        text += pj.value("path", std::string()) + (pj.contains("id") ? "#" + pj.at("id").get<std::string>() : "");
+                    }
+                    if (!pluginFromText(text, spec, &why))
+                        return refuse(why);
+                }
+                spec.label = req.value("label", spec.label);
+                spec.bypassed = req.value("bypassed", false);
+                spec.muteOnBypass = config.muteOnBypass;
+                if (req.contains("x") || req.contains("y")) {
+                    spec.placed = true;
+                    spec.x = req.value("x", 0.0);
+                    spec.y = req.value("y", 0.0);
+                }
+                WireSpec on;
+                const bool onWire = req.contains("on");
+                if (onWire && !wireOf(req.at("on"), config, *cs, on, &why))
+                    return refuse(why);
+                size_t slot = 0;
+                if (!addPlugin(live, chain, spec, onWire ? &on : nullptr, &slot, &why))
+                    return refuse(why);
+                reply["slot"] = slot;
+            } else if (cmd == "remove") {
+                if (!removePlugin(live, chain, req.at("slot").get<size_t>(), &why))
+                    return refuse(why);
+            } else if (cmd == "wire" || cmd == "unwire") {
+                WireSpec w;
+                if (!wireOf(req, config, *cs, w, &why))
+                    return refuse(why);
+                if (!(cmd == "wire" ? setWire(live, chain, w, &why) : removeWire(live, chain, w.from, w.to, &why)))
+                    return refuse(why);
+            } else if (cmd == "wires") {
+                // The chain's wires all at once, as the performance lists them.
+                std::vector<WireSpec> wires;
+                for (const Json& wj : req.at("wires")) {
+                    WireSpec w;
+                    if (!wireOf(wj, config, *cs, w, &why))
+                        return refuse(why);
+                    wires.push_back(w);
+                }
+                if (!setWires(live, chain, wires, &why))
+                    return refuse(why);
+            } else {
+                if (!placePlugin(live, chain, req.at("slot").get<size_t>(), req.at("x").get<double>(), req.at("y").get<double>(), &why))
+                    return refuse(why);
+                changed = false;
+            }
+            // Everyone watching sees the chain as it is now.
+            std::string text;
+            if (performanceText(config, text, &why)) {
+                const Json now = Json::parse(text);
+                reply["performance"] = now;
+                if (changed)
+                    service.publish("performance", now);
+            }
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
-            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, quit, subscribe, unsubscribe)");
+            refuse("unknown command '" + cmd +
+                   "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, wire, unwire, wires, "
+                   "place, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {
@@ -719,6 +847,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         service.poll(10, editorFds);
         rig.pumpMainThread();
         editors.pump();
+        // What edits replaced, now that the audio thread is done with it.
+        engine.collect();
         EngineEvent ev;
         while (engine.nextEvent(ev)) {
         }
@@ -1100,18 +1230,9 @@ int cmdCheck(const std::string& path, bool loadPlugins) {
     int presetNo = 0;
     for (const auto& scene : config.scenes) {
         std::printf("scene %s%s\n", scene.name.c_str(), scene.pedal ? (", pedal " + std::to_string(scene.pedal)).c_str() : "");
-        for (const auto& c : scene.chains) {
-            auto where = [&](const TapSpec& t) {
-                const LineSpec& l = c.lines[t.line];
-                const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
-                return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
-            };
-            std::string feeds;
-            for (const TapSpec& t : c.out)
-                feeds += "; " + t.output + " = " + where(t);
-            std::printf("  chain %s: %zu plug-in(s)%s%s\n", c.name.c_str(), chainPlugins(c).size(),
-                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", feeds.c_str());
-        }
+        for (const auto& c : scene.chains)
+            std::printf("  chain %s: %zu plug-in(s)%s; wires %s\n", c.name.c_str(), chainPlugins(c).size(),
+                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", wireList(c, config.outputs).c_str());
         for (const auto& p : scene.presets)
             std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),
                         p.pedal ? (", pedal " + std::to_string(p.pedal)).c_str() : "", p.display.empty() ? "" : (", shows " + p.display).c_str(),

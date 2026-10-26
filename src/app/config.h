@@ -42,11 +42,25 @@ struct PluginSpec {
     // until they are picked there.
     std::vector<uint32_t> shown;
     bool shownSet = false;
+    // Where the routing board draws it, once it has been put somewhere.
+    bool placed = false;
+    double x = 0, y = 0;
     std::string text, where;         // as written, for messages
 };
 
-// A line of plug-ins in series. The chain's first line is its main line;
-// the others are branches, each taking a copy of an earlier line's signal.
+// A wire of a chain: from the chain's input or a block, to a block (its
+// input or its key) or an output, with what it does to the signal. Blocks
+// are numbered from 0 in the order of the chain's blocks; outputs are the
+// performance's, in its order.
+struct WireSpec {
+    Port from, to;
+    WireGains gains;
+    std::string where;
+};
+
+// A line of plug-ins in series, as an INI config and a version 1 .cue file
+// describe a chain. The chain's first line is its main line; the others are
+// branches, each taking a copy of an earlier line's signal.
 struct LineSpec {
     std::string name;  // empty for the main line
     int parent = -1;   // line it comes off
@@ -69,10 +83,15 @@ struct ChainSpec {
     // = the first. finishConfig finds inputIndex.
     std::string input;
     size_t inputIndex = 0;
+    // Its plug-ins, in the order of the engine's slots, and the wires
+    // between them, its input and the performance's outputs.
+    std::vector<PluginSpec> blocks;
+    std::vector<WireSpec> wires;
+    // As an INI config or a version 1 .cue file describes it: lines, and
+    // where each output is taken (an output no tap names takes the end of
+    // the main line). finishConfig makes blocks and wires of them, and
+    // leaves both empty.
     std::vector<LineSpec> lines;
-    // As written, the outputs a tap names. finishConfig makes it one per
-    // performance output, in their order; one no tap names is taken at the
-    // end of the main line.
     std::vector<TapSpec> out;
     std::string where;
 };
@@ -194,14 +213,23 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
 // inputs found and outputs tapped, controls completed.
 bool finishConfig(Config& config, std::string* error);
 
-// Every plug-in of a chain, line by line: the order of the engine's slots.
+// A plug-in as a config's plugin line names it: "clap:/path/file.clap#id",
+// "vst3:/path/file.vst3#name" or "builtin:gain 0.5".
+bool pluginFromText(const std::string& text, PluginSpec& spec, std::string* error);
+
+// Every plug-in of a chain: the order of the engine's slots.
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain);
 
-// The side-chain feeds of a chain as (slot, source slot) pairs, given each
-// slot's label. `sidechain = Gate` is the nearest Gate before the plug-in;
-// `Gate:2` is the chain's second Gate, which must come before it.
+// The side-chain feeds a chain's plug-ins name with `sidechain =`, as
+// (slot, source slot) pairs, given each slot's label. `sidechain = Gate` is
+// the nearest Gate before the plug-in; `Gate:2` is the chain's second Gate,
+// which must come before it.
 bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
                      std::string* error);
+
+// A chain's wires in short, for messages and tests: "in>0 0>1 1>FOH 0>2:key",
+// blocks by number, outputs by name, then any gains as "(-6dB w50 p-20)".
+std::string wireList(const ChainSpec& chain, const std::vector<std::string>& outputs);
 
 std::string expandPath(std::string path);
 

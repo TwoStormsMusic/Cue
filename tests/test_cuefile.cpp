@@ -153,8 +153,16 @@ TEST(cue_file_round_trips_a_whole_performance) {
     const std::string path = dir + "/perf.cue";
     std::vector<std::string> warnings;
     // The parameters the app picked for the amp, in its order.
-    ini.scenes[0].chains[0].lines[0].plugins[1].shown = {7, 2, 40};
-    ini.scenes[0].chains[0].lines[0].plugins[1].shownSet = true;
+    ChainSpec& iniPunk = ini.scenes[0].chains[0];
+    iniPunk.blocks[1].shown = {7, 2, 40};
+    iniPunk.blocks[1].shownSet = true;
+    // Routing a line cannot say: the IR merges into the Amp output too, a
+    // wire with gains, a key, and a block placed on the board.
+    iniPunk.wires.push_back({Port::block(4), Port::output(1), {-3.5f, 0.5f, -0.25f}, ""});
+    iniPunk.wires.push_back({Port::input(), Port::block(3, true), {}, ""});
+    iniPunk.blocks[2].placed = true;
+    iniPunk.blocks[2].x = 320;
+    iniPunk.blocks[2].y = -40.5;
     CHECK_MSG(saveCue(ini, path, &err, &warnings), "%s", err.c_str());
     CHECK(warnings.empty());
     // The state files are inside it: removing them changes nothing.
@@ -177,23 +185,24 @@ TEST(cue_file_round_trips_a_whole_performance) {
     CHECK(s.name == "Covers" && s.display == "CV" && s.pedal == 2);
     CHECK(s.chains.size() == 2 && s.presets.size() == 2);
     const ChainSpec& punk = s.chains[0];
-    CHECK(punk.name == "Punk" && punk.lines.size() == 2);
-    CHECK(punk.lines[1].name == "FOH" && punk.lines[1].parent == 0 && punk.lines[1].after == 2);
-    CHECK(punk.out[0].line == 1 && punk.out[0].after == 1);
-    CHECK(punk.out[1].line == 0 && punk.out[1].after == 2);
-    const PluginSpec& gain = punk.lines[0].plugins[0];
+    CHECK(punk.name == "Punk" && punk.blocks.size() == 5);
+    CHECK_MSG(wireList(punk, c.outputs) == "in>0 0>1 1>2 2>3 1>4 4>FOH 1>Amp 4>Amp(-3.5dB w50 p-25) in>3:key", "%s", wireList(punk, c.outputs).c_str());
+    if (punk.blocks.size() != 5)
+        return;
+    CHECK(punk.blocks[2].placed && punk.blocks[2].x == 320 && punk.blocks[2].y == -40.5 && !punk.blocks[1].placed);
+    const PluginSpec& gain = punk.blocks[0];
     CHECK(gain.kind == "clap" && gain.id == "com.twostorms.gainstage" && gain.path == dir + "/Gain Stage.clap");
     CHECK(gain.label == "Gain Stage" && gain.params.size() == 2 && gain.params[1].first == 3 && gain.params[1].second == -6.5);
     CHECK(gain.embeddedState && bytes(gain.state) == "TWOSTORMS gainstage 1\np 54 1\n");
     CHECK(gain.muteOnBypass); // the [switching] default, written out
-    const PluginSpec& amp = punk.lines[0].plugins[1];
+    const PluginSpec& amp = punk.blocks[1];
     CHECK(amp.kind == "vst3" && amp.state.size() == 7 && bytes(amp.controllerState) == "ctrl" && !amp.muteOnBypass);
     CHECK(amp.shownSet && amp.shown == (std::vector<uint32_t>{7, 2, 40}));
     CHECK(!gain.shownSet && gain.shown.empty());
-    const PluginSpec& echo = punk.lines[0].plugins[2];
+    const PluginSpec& echo = punk.blocks[2];
     CHECK(echo.kind == "builtin" && echo.args == (std::vector<std::string>{"delay", "300", "0.4", "0.3"}));
     CHECK(echo.bypassed && !echo.midi && echo.label == "Echo");
-    CHECK(punk.lines[0].plugins[3].sidechain == "Gain Stage");
+    CHECK(punk.blocks[3].sidechain == "Gain Stage"); // a wire once the plug-ins load and their names are known
 
     const PresetSpec& pp = s.presets[0];
     CHECK(pp.name == "Punk" && pp.chain == "Punk" && pp.pedal == 6 && pp.display == "PU" && pp.program == 4);
@@ -326,7 +335,7 @@ TEST(cue_file_reports_what_it_cannot_read) {
     // The smallest performance: one scene, one chain, defaults for the rest.
     CHECK_MSG(loadCue(zipWith("small.cue", R"({"cue": 1, "scenes": [{"name": "S", "chains": [{"name": "A", "lines": [{"plugins": []}]}]}]})"), c, &err),
               "%s", err.c_str());
-    CHECK(c.scenes[0].presets.size() == 1 && c.outputs.size() == 2 && c.scenes[0].chains[0].out[1].after == 0);
+    CHECK(c.scenes[0].presets.size() == 1 && c.outputs.size() == 2 && wireList(c.scenes[0].chains[0], c.outputs) == "in>Out 1 in>Out 2");
 }
 
 TEST(cue_file_keeps_every_input_and_output) {
@@ -370,8 +379,8 @@ tap = out2
     if (chains.size() != 2)
         return;
     CHECK(chains[0].inputIndex == 0 && chains[1].inputIndex == 1);
-    CHECK(chains[0].out.size() == 3 && chains[0].out[2].after == 1 && chains[0].out[0].after == 2);
-    CHECK(chains[1].out.size() == 3 && chains[1].out[1].line == 1 && chains[1].out[1].after == 1 && chains[1].out[0].line == 0);
+    CHECK_MSG(wireList(chains[0], c.outputs) == "in>0 0>1 1>FOH 1>Amp 0>In-ear", "%s", wireList(chains[0], c.outputs).c_str());
+    CHECK_MSG(wireList(chains[1], c.outputs) == "in>0 0>1 0>FOH 1>Amp 0>In-ear", "%s", wireList(chains[1], c.outputs).c_str());
 
     // A rig made for a performance with fewer outputs: the rest by position, with a warning.
     writeFile(dir + "/small.json", R"({"cue_rig": 1, "inputs": {"Bass": 2, "Synth": 1}, "outputs": {"FOH": 2, "Amp": 1}})");

@@ -2,6 +2,7 @@
 
 #include "core/builtin.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -23,6 +24,14 @@ bool readFile(const std::string& path, std::vector<uint8_t>& data, std::string* 
     data.assign(std::istreambuf_iterator<char>(f), {});
     return true;
 }
+
+// A state to load once its plug-in is active.
+struct PendingState {
+    Processor* plugin;
+    std::vector<uint8_t> data, controller;
+    std::string file;
+    bool vst3;
+};
 } // namespace
 
 std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* error) {
@@ -57,8 +66,10 @@ void RigOutput::setBypass(int chain, size_t slot, bool bypassed) {
 
 std::vector<ShowPlugin> Rig::showPlugins() const {
     std::vector<ShowPlugin> out;
-    for (const auto& p : plugins)
-        out.push_back({p.chain, p.slot, p.label, p.midi, p.bypassed});
+    for (size_t i = 0; i < plugins.size(); ++i) {
+        const RigPlugin& p = plugins[i];
+        out.push_back({p.chain, p.slot, p.label, p.midi, bypassedNow ? bypassedNow[i].load(std::memory_order_relaxed) : p.bypassed});
+    }
     return out;
 }
 
@@ -72,7 +83,94 @@ void RigOutput::forwardMidi(int chain, size_t slot, const MidiMessage& m) {
         p->sendMidi(m.status, m.data1, m.data2);
 }
 
-bool buildRig(const Config& config, Rig& rig, std::string* error) {
+namespace {
+
+bool loadPlugin(const PluginSpec& ps, std::unique_ptr<Processor>& out, std::vector<PendingState>& states, std::string* error) {
+    std::unique_ptr<Processor> p;
+    std::string err;
+    if (ps.kind == "builtin") {
+        p = makeBuiltin(ps, &err);
+    } else if (ps.kind == "vst3") {
+        auto vst = Vst3Processor::load(ps.path, ps.id, &err);
+        if (vst) {
+            if (ps.embeddedState) {
+                states.push_back({vst.get(), ps.state, ps.controllerState, ps.stateFile, true});
+            } else if (!ps.stateFile.empty()) {
+                PendingState st{vst.get(), {}, {}, ps.stateFile, true};
+                if (!readFile(ps.stateFile, st.data, error) ||
+                    (!ps.controllerStateFile.empty() && !readFile(ps.controllerStateFile, st.controller, error)))
+                    return false;
+                states.push_back(std::move(st));
+            }
+            p = std::move(vst);
+        }
+    } else {
+        auto clap = ClapProcessor::load(ps.path, ps.id, &err);
+        if (clap) {
+            if (ps.embeddedState) {
+                states.push_back({clap.get(), ps.state, {}, ps.stateFile, false});
+            } else if (!ps.stateFile.empty()) {
+                PendingState st{clap.get(), {}, {}, ps.stateFile, false};
+                if (!readFile(ps.stateFile, st.data, error))
+                    return false;
+                states.push_back(std::move(st));
+            }
+            p = std::move(clap);
+        }
+    }
+    if (!p) {
+        *error = ps.where + ": " + ps.text + ": " + err;
+        return false;
+    }
+    out = std::move(p);
+    return true;
+}
+
+void loadStates(const std::vector<PendingState>& states) {
+    for (const auto& s : states) {
+        const bool ok = s.vst3 ? static_cast<Vst3Processor*>(s.plugin)->loadState(s.data, s.controller)
+                               : static_cast<ClapProcessor*>(s.plugin)->loadState(s.data);
+        if (!ok)
+            std::fprintf(stderr, "warning: %s did not accept state from %s\n", s.plugin->name().c_str(), s.file.c_str());
+    }
+}
+
+void setParams(const PluginSpec& ps, Processor& p) {
+    for (auto [id, value] : ps.params)
+        if (!p.setParam(id, value))
+            std::fprintf(stderr, "warning: %s: %s did not take param %u\n", ps.where.c_str(), p.name().c_str(), id);
+}
+
+} // namespace
+
+void Rig::track(Processor* p, const PluginSpec& spec) {
+    if (spec.kind == "clap")
+        clapPlugins.push_back(static_cast<ClapProcessor*>(p));
+    else if (spec.kind == "vst3")
+        vst3Plugins.push_back(static_cast<Vst3Processor*>(p));
+}
+
+void Rig::untrack(Processor* p) {
+    clapPlugins.erase(std::remove(clapPlugins.begin(), clapPlugins.end(), static_cast<ClapProcessor*>(p)), clapPlugins.end());
+    vst3Plugins.erase(std::remove(vst3Plugins.begin(), vst3Plugins.end(), static_cast<Vst3Processor*>(p)), vst3Plugins.end());
+}
+
+bool loadLivePlugin(const PluginSpec& spec, const EngineSettings& engine, std::unique_ptr<Processor>& out, std::string* error) {
+    std::vector<PendingState> states;
+    std::unique_ptr<Processor> p;
+    if (!loadPlugin(spec, p, states, error))
+        return false;
+    if (!p->activate(engine.sampleRate, engine.maxFrames)) {
+        *error = spec.where + ": " + p->name() + " failed to activate";
+        return false;
+    }
+    loadStates(states);
+    setParams(spec, *p);
+    out = std::move(p);
+    return true;
+}
+
+bool buildRig(Config& config, Rig& rig, std::string* error) {
     EngineSettings es = config.engine;
     es.sampleRate = config.audio.rate;
     es.maxFrames = config.audio.period;
@@ -86,108 +184,60 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     rig.plugins.clear();
     rig.chainNames.clear();
 
-    struct PendingState {
-        Processor* plugin;
-        std::vector<uint8_t> data, controller;
-        std::string file;
-        bool vst3;
-    };
     std::vector<PendingState> states;
-
-    for (const SceneSpec& scene : config.scenes) {
+    for (SceneSpec& scene : config.scenes) {
         std::printf("scene '%s'\n", scene.name.c_str());
-        for (const ChainSpec& cs : scene.chains) {
+        for (ChainSpec& cs : scene.chains) {
             const int chainIndex = static_cast<int>(rig.chainNames.size());
             std::printf("  chain '%s'\n", cs.name.c_str());
-            std::vector<Line> lines;
-            std::vector<bool> initialBypass, muteOnBypass;
+            auto chain = std::make_unique<Chain>(cs.name, config.outputs.size(), config.mix);
+            chain->setInput(cs.inputIndex);
             std::vector<std::string> labels;
-            size_t slot = 0;
-            for (const LineSpec& ls : cs.lines) {
-                Line line;
-                line.parent = ls.parent;
-                line.afterSlots = ls.after;
-                if (ls.parent >= 0)
-                    std::printf("    branch '%s' after plug-in %zu of %s\n", ls.name.c_str(), ls.after,
-                                ls.parent == 0 ? "the main line" : ("branch '" + cs.lines[ls.parent].name + "'").c_str());
-                for (const PluginSpec& ps : ls.plugins) {
-                    const auto t0 = std::chrono::steady_clock::now();
-                    std::unique_ptr<Processor> p;
-                    std::string err;
-                    if (ps.kind == "builtin") {
-                        p = makeBuiltin(ps, &err);
-                    } else if (ps.kind == "vst3") {
-                        auto vst = Vst3Processor::load(ps.path, ps.id, &err);
-                        if (vst) {
-                            if (ps.embeddedState) {
-                                states.push_back({vst.get(), ps.state, ps.controllerState, ps.stateFile, true});
-                            } else if (!ps.stateFile.empty()) {
-                                PendingState st{vst.get(), {}, {}, ps.stateFile, true};
-                                if (!readFile(ps.stateFile, st.data, error) ||
-                                    (!ps.controllerStateFile.empty() && !readFile(ps.controllerStateFile, st.controller, error)))
-                                    return false;
-                                states.push_back(std::move(st));
-                            }
-                            rig.vst3Plugins.push_back(vst.get());
-                            p = std::move(vst);
-                        }
-                    } else {
-                        auto clap = ClapProcessor::load(ps.path, ps.id, &err);
-                        if (clap) {
-                            if (ps.embeddedState) {
-                                states.push_back({clap.get(), ps.state, {}, ps.stateFile, false});
-                            } else if (!ps.stateFile.empty()) {
-                                PendingState st{clap.get(), {}, {}, ps.stateFile, false};
-                                if (!readFile(ps.stateFile, st.data, error))
-                                    return false;
-                                states.push_back(std::move(st));
-                            }
-                            rig.clapPlugins.push_back(clap.get());
-                            p = std::move(clap);
-                        }
-                    }
-                    if (!p) {
-                        *error = ps.where + ": " + ps.text + ": " + err;
-                        return false;
-                    }
-                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                    RigPlugin rp;
-                    rp.chain = chainIndex;
-                    rp.slot = slot++;
-                    rp.processor = p.get();
-                    rp.label = ps.label.empty() ? p->name() : ps.label;
-                    rp.midi = ps.midi && p->acceptsMidi();
-                    rp.bypassed = ps.bypassed;
-                    std::printf("    %-34s %7.1f ms%s%s%s%s%s\n", p->name().c_str(), ms, rp.label == p->name() ? "" : ("  as '" + rp.label + "'").c_str(),
-                                ps.bypassed ? "  bypassed" : "", ps.muteOnBypass ? "  mutes when bypassed" : "", rp.midi ? "  takes MIDI" : "",
-                                ps.sidechain.empty() ? "" : ("  side-chain from '" + ps.sidechain + "'").c_str());
-                    rig.plugins.push_back(rp);
-                    initialBypass.push_back(ps.bypassed);
-                    muteOnBypass.push_back(ps.muteOnBypass);
-                    labels.push_back(rp.label);
-                    if (!ps.sidechain.empty() && !p->hasSidechain()) {
-                        *error = ps.where + ": sidechain = " + ps.sidechain + ": " + p->name() + " has no side-chain input";
-                        return false;
-                    }
-                    line.slots.push_back(std::move(p));
+            for (size_t slot = 0; slot < cs.blocks.size(); ++slot) {
+                const PluginSpec& ps = cs.blocks[slot];
+                const auto t0 = std::chrono::steady_clock::now();
+                std::unique_ptr<Processor> p;
+                if (!loadPlugin(ps, p, states, error))
+                    return false;
+                rig.track(p.get(), ps);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                RigPlugin rp;
+                rp.chain = chainIndex;
+                rp.slot = slot;
+                rp.processor = p.get();
+                rp.label = ps.label.empty() ? p->name() : ps.label;
+                rp.midi = ps.midi && p->acceptsMidi();
+                rp.bypassed = ps.bypassed;
+                std::printf("    %-34s %7.1f ms%s%s%s%s%s\n", p->name().c_str(), ms, rp.label == p->name() ? "" : ("  as '" + rp.label + "'").c_str(),
+                            ps.bypassed ? "  bypassed" : "", ps.muteOnBypass ? "  mutes when bypassed" : "", rp.midi ? "  takes MIDI" : "",
+                            ps.sidechain.empty() ? "" : ("  side-chain from '" + ps.sidechain + "'").c_str());
+                rig.plugins.push_back(rp);
+                labels.push_back(rp.label);
+                if (!ps.sidechain.empty() && !p->hasSidechain()) {
+                    *error = ps.where + ": sidechain = " + ps.sidechain + ": " + p->name() + " has no side-chain input";
+                    return false;
                 }
-                lines.push_back(std::move(line));
+                chain->addBlock(std::move(p));
+                if (ps.bypassed)
+                    chain->setInitialBypass(slot, true);
+                chain->setMuteOnBypass(slot, ps.muteOnBypass);
             }
+            // What `sidechain =` names becomes a wire into the plug-in's key.
             std::vector<std::pair<size_t, size_t>> feeds;
             if (!chainSidechains(cs, labels, feeds, error))
                 return false;
-            std::vector<OutputTap> taps;
-            for (const TapSpec& t : cs.out)
-                taps.push_back({t.line, t.after, config.mix});
-            auto chain = std::make_unique<Chain>(cs.name, std::move(lines), std::move(taps));
-            chain->setInput(cs.inputIndex);
-            for (size_t i = 0; i < initialBypass.size(); ++i) {
-                if (initialBypass[i])
-                    chain->setInitialBypass(i, true);
-                chain->setMuteOnBypass(i, muteOnBypass[i]);
+            for (auto [slot, source] : feeds) {
+                cs.wires.push_back({Port::block(static_cast<int>(source)), Port::block(static_cast<int>(slot), true), {}, cs.blocks[slot].where});
+                cs.blocks[slot].sidechain.clear();
             }
-            for (auto [slot, source] : feeds)
-                chain->setSidechain(slot, source);
+            for (const WireSpec& w : cs.wires) {
+                std::string why;
+                if (!chain->connect(w.from, w.to, w.gains, &why)) {
+                    *error = (w.where.empty() ? cs.where : w.where) + ": chain '" + cs.name + "': " + why;
+                    return false;
+                }
+            }
+            std::printf("    wires %s\n", wireList(cs, config.outputs).c_str());
             rig.engine->addChain(std::move(chain));
             rig.chainNames.push_back(cs.name);
         }
@@ -207,21 +257,12 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
 
     // State loads after activation; CLAP allows it on the main thread. Then
     // the config's param lines, which win over the state.
-    for (auto& s : states) {
-        const bool ok = s.vst3 ? static_cast<Vst3Processor*>(s.plugin)->loadState(s.data, s.controller)
-                               : static_cast<ClapProcessor*>(s.plugin)->loadState(s.data);
-        if (!ok)
-            std::fprintf(stderr, "warning: %s did not accept state from %s\n", s.plugin->name().c_str(), s.file.c_str());
-    }
+    loadStates(states);
     size_t k = 0;
     for (const SceneSpec& scene : config.scenes)
         for (const ChainSpec& cs : scene.chains)
-            for (const PluginSpec* ps : chainPlugins(cs)) {
-                Processor* p = rig.plugins[k++].processor;
-                for (auto [id, value] : ps->params)
-                    if (!p->setParam(id, value))
-                        std::fprintf(stderr, "warning: %s: %s did not take param %u\n", ps->where.c_str(), p->name().c_str(), id);
-            }
+            for (const PluginSpec* ps : chainPlugins(cs))
+                setParams(*ps, *rig.plugins[k++].processor);
 
     // First-block setup now, not on the first switch to a chain.
     const auto t1 = std::chrono::steady_clock::now();
