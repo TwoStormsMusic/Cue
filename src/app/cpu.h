@@ -20,6 +20,13 @@ std::vector<int> primaryThreads(const std::vector<int>& cpus);
 // first thread, keeping away from CPU 0, which serves most interrupts.
 int pickAudioCpu();
 
+// Moves the calling thread off the audio core (and its hyper-threading
+// sibling), onto the performance cores where the CPU has them. Threads and
+// processes started from it afterwards inherit this: plug-in helper threads
+// and yabridge's Wine hosts then never compete with the audio thread, and
+// never run a plug-in's DSP on a slow efficiency core.
+bool keepOffAudioCore(int audioCpu);
+
 std::string readFileTrimmed(const std::string& path);
 
 } // namespace cue

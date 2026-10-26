@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.1.0 LANGUAGES C CXX)
+project(cue VERSION 0.3.6 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,7 +45,8 @@ target_link_libraries(vst3_hosting PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 
 add_library(cue_core STATIC
   src/core/engine.cpp
-  src/core/scene.cpp
+  src/core/chain.cpp
+  src/core/processor.cpp
 )
 target_include_directories(cue_core PUBLIC src)
 
@@ -62,6 +63,8 @@ add_executable(cue
   src/app/main.cpp
   src/app/build.cpp
   src/app/config.cpp
+  src/app/rpp.cpp
+  src/control/show.cpp
   src/app/cpu.cpp
   src/app/doctor.cpp
   src/audio/alsa_backend.cpp
@@ -93,9 +96,10 @@ target_sources(cue_test_vst3 PRIVATE
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp src/app/config.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_clap.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp src/app/config.cpp src/app/rpp.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
+    CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"
     CUE_TEST_VST3="${TEST_VST3_BUNDLE}"
     CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>")

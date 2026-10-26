@@ -1,9 +1,12 @@
-// Test CLAP plug-ins for the host's own tests. One .clap file, four plug-ins:
+// Test CLAP plug-ins for the host's own tests. One .clap file, six plug-ins:
 //
 //   cue.test.gain   stereo gain, parameter "Gain" (0..2, default 1)
 //   cue.test.delay  feedback delay with a tail (500 ms, feedback 0.5)
 //   cue.test.burn   burns CPU per sample, parameter "Load" (0..1)
 //   cue.test.crash  passes audio through; parameter "Crash" >= 0.5 crashes it
+//   cue.test.pedal  a volume pedal: gain = MIDI CC 11 / 127 (MIDI in, starts at 1)
+//   cue.test.key    plays its side-chain input (a second stereo port), times
+//                   "Gain"; registers a 20 ms timer and counts its calls
 //
 // They also record how the host drives them (reset, start/stop processing,
 // process outside start/stop) in a few exported counters, so tests can check
@@ -21,11 +24,13 @@
 
 namespace {
 
-enum class Kind { Gain, Delay, Burn, Crash };
+enum class Kind { Gain, Delay, Burn, Crash, Pedal, Key };
 
 struct Stats {
     std::atomic<int> instances{0};
     std::atomic<long> resets{0}, starts{0}, stops{0}, processWhileStopped{0}, processCalls{0};
+    std::atomic<long> midiEvents{0}, lastCc{-1}, lastCcValue{-1};
+    std::atomic<long> timerCalls{0};
 };
 Stats g_stats;
 
@@ -39,6 +44,7 @@ struct Plugin {
     std::vector<float> line[2];
     size_t pos = 0;
     float burnAcc = 0.0f;
+    clap_id timer = CLAP_INVALID_ID;
 };
 
 Plugin* self(const clap_plugin_t* p) { return static_cast<Plugin*>(p->plugin_data); }
@@ -52,21 +58,25 @@ DESCRIPTOR(kGainDesc, "cue.test.gain", "Test Gain");
 DESCRIPTOR(kDelayDesc, "cue.test.delay", "Test Delay");
 DESCRIPTOR(kBurnDesc, "cue.test.burn", "Test Burn");
 DESCRIPTOR(kCrashDesc, "cue.test.crash", "Test Crash");
-const clap_plugin_descriptor_t* kDescs[] = {&kGainDesc, &kDelayDesc, &kBurnDesc, &kCrashDesc};
+DESCRIPTOR(kPedalDesc, "cue.test.pedal", "Test Pedal");
+DESCRIPTOR(kKeyDesc, "cue.test.key", "Test Key");
+const clap_plugin_descriptor_t* kDescs[] = {&kGainDesc, &kDelayDesc, &kBurnDesc, &kCrashDesc, &kPedalDesc, &kKeyDesc};
+constexpr uint32_t kNumDescs = 6;
 
 constexpr double kDelayMs = 500.0;
 constexpr float kFeedback = 0.5f;
 
-// ---- audio ports: one stereo in, one stereo out
+// ---- audio ports: one stereo in, one stereo out; the key plug-in has a
+// side-chain input too
 
-uint32_t portsCount(const clap_plugin_t*, bool) { return 1; }
-bool portsGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_audio_port_info_t* info) {
-    if (index != 0)
+uint32_t portsCount(const clap_plugin_t* p, bool isInput) { return isInput && self(p)->kind == Kind::Key ? 2 : 1; }
+bool portsGet(const clap_plugin_t* p, uint32_t index, bool isInput, clap_audio_port_info_t* info) {
+    if (index >= portsCount(p, isInput))
         return false;
     std::memset(info, 0, sizeof *info);
-    info->id = 0;
-    std::snprintf(info->name, sizeof info->name, "%s", isInput ? "In" : "Out");
-    info->flags = CLAP_AUDIO_PORT_IS_MAIN;
+    info->id = index;
+    std::snprintf(info->name, sizeof info->name, "%s", index == 1 ? "Sidechain" : isInput ? "In" : "Out");
+    info->flags = index == 0 ? CLAP_AUDIO_PORT_IS_MAIN : 0;
     info->channel_count = 2;
     info->port_type = CLAP_PORT_STEREO;
     info->in_place_pair = CLAP_INVALID_ID;
@@ -82,6 +92,8 @@ void paramRange(Kind kind, double& lo, double& hi, double& def, const char*& nam
     case Kind::Burn: lo = 0; hi = 1; def = 0.5; name = "Load"; break;
     case Kind::Crash: lo = 0; hi = 1; def = 0; name = "Crash"; break;
     case Kind::Delay: lo = 0; hi = 1; def = 0.5; name = "Mix"; break;
+    case Kind::Pedal: lo = 0; hi = 1; def = 1; name = "Position"; break;
+    case Kind::Key: lo = 0; hi = 2; def = 1; name = "Gain"; break;
     }
 }
 uint32_t paramsCount(const clap_plugin_t*) { return 1; }
@@ -118,6 +130,15 @@ void applyEvents(Plugin* s, const clap_input_events_t* in) {
             const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(h);
             if (ev->param_id == 0)
                 s->param = ev->value;
+        } else if (h->space_id == CLAP_CORE_EVENT_SPACE_ID && h->type == CLAP_EVENT_MIDI) {
+            const auto* ev = reinterpret_cast<const clap_event_midi_t*>(h);
+            g_stats.midiEvents++;
+            if ((ev->data[0] & 0xF0) == 0xB0) {
+                g_stats.lastCc = ev->data[1];
+                g_stats.lastCcValue = ev->data[2];
+                if (s->kind == Kind::Pedal && ev->data[1] == 11)
+                    s->param = ev->data[2] / 127.0;
+            }
         }
     }
     if (s->kind == Kind::Crash && s->param >= 0.5)
@@ -141,6 +162,21 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* in) {
 }
 const clap_plugin_state_t kState = {stateSave, stateLoad};
 
+// ---- note ports (pedal only): one MIDI input
+
+uint32_t notesCount(const clap_plugin_t*, bool isInput) { return isInput ? 1 : 0; }
+bool notesGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_note_port_info_t* info) {
+    if (index != 0 || !isInput)
+        return false;
+    std::memset(info, 0, sizeof *info);
+    info->id = 0;
+    info->supported_dialects = CLAP_NOTE_DIALECT_MIDI;
+    info->preferred_dialect = CLAP_NOTE_DIALECT_MIDI;
+    std::snprintf(info->name, sizeof info->name, "MIDI in");
+    return true;
+}
+const clap_plugin_note_ports_t kNotes = {notesCount, notesGet};
+
 // ---- tail (delay only)
 
 uint32_t tailGet(const clap_plugin_t* p) {
@@ -150,12 +186,27 @@ uint32_t tailGet(const clap_plugin_t* p) {
 }
 const clap_plugin_tail_t kTail = {tailGet};
 
+// ---- timer (key only)
+
+void onTimer(const clap_plugin_t*, clap_id) { g_stats.timerCalls++; }
+const clap_plugin_timer_support_t kTimer = {onTimer};
+
 // ---- plugin
 
-bool init(const clap_plugin_t*) { return true; }
+bool init(const clap_plugin_t* p) {
+    Plugin* s = self(p);
+    if (s->kind == Kind::Key)
+        if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
+            t->register_timer(s->host, 20, &s->timer);
+    return true;
+}
 void destroy(const clap_plugin_t* p) {
+    Plugin* s = self(p);
+    if (s->timer != CLAP_INVALID_ID)
+        if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
+            t->unregister_timer(s->host, s->timer);
     g_stats.instances--;
-    delete self(p);
+    delete s;
 }
 bool activate(const clap_plugin_t* p, double sr, uint32_t, uint32_t) {
     Plugin* s = self(p);
@@ -198,6 +249,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proc) 
 
     switch (s->kind) {
     case Kind::Gain:
+    case Kind::Pedal:
         for (int c = 0; c < 2; ++c)
             for (uint32_t n = 0; n < frames; ++n)
                 out[c][n] = in[c][n] * static_cast<float>(s->param);
@@ -233,6 +285,13 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proc) 
         for (int c = 0; c < 2; ++c)
             std::memcpy(out[c], in[c], frames * sizeof(float));
         break;
+    case Kind::Key: {
+        float* const* key = proc->audio_inputs_count > 1 ? proc->audio_inputs[1].data32 : nullptr;
+        for (int c = 0; c < 2; ++c)
+            for (uint32_t n = 0; n < frames; ++n)
+                out[c][n] = key ? key[c][n] * static_cast<float>(s->param) : 0.0f;
+        break;
+    }
     }
     return CLAP_PROCESS_CONTINUE;
 }
@@ -246,16 +305,20 @@ const void* getExtension(const clap_plugin_t* p, const char* id) {
         return &kState;
     if (!std::strcmp(id, CLAP_EXT_TAIL) && self(p)->kind == Kind::Delay)
         return &kTail;
+    if (!std::strcmp(id, CLAP_EXT_NOTE_PORTS) && self(p)->kind == Kind::Pedal)
+        return &kNotes;
+    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) && self(p)->kind == Kind::Key)
+        return &kTimer;
     return nullptr;
 }
 void onMainThread(const clap_plugin_t*) {}
 
 // ---- factory and entry
 
-uint32_t factoryCount(const clap_plugin_factory_t*) { return 4; }
-const clap_plugin_descriptor_t* factoryDesc(const clap_plugin_factory_t*, uint32_t i) { return i < 4 ? kDescs[i] : nullptr; }
+uint32_t factoryCount(const clap_plugin_factory_t*) { return kNumDescs; }
+const clap_plugin_descriptor_t* factoryDesc(const clap_plugin_factory_t*, uint32_t i) { return i < kNumDescs ? kDescs[i] : nullptr; }
 const clap_plugin_t* factoryCreate(const clap_plugin_factory_t*, const clap_host_t* host, const char* id) {
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < kNumDescs; ++i) {
         if (std::strcmp(id, kDescs[i]->id) != 0)
             continue;
         auto* s = new Plugin();
@@ -291,6 +354,10 @@ CLAP_EXPORT long cue_test_stat(const char* name) {
     if (!std::strcmp(name, "stops")) return g_stats.stops;
     if (!std::strcmp(name, "process_while_stopped")) return g_stats.processWhileStopped;
     if (!std::strcmp(name, "process_calls")) return g_stats.processCalls;
+    if (!std::strcmp(name, "midi_events")) return g_stats.midiEvents;
+    if (!std::strcmp(name, "last_cc")) return g_stats.lastCc;
+    if (!std::strcmp(name, "last_cc_value")) return g_stats.lastCcValue;
+    if (!std::strcmp(name, "timer_calls")) return g_stats.timerCalls;
     return -1;
 }
 }

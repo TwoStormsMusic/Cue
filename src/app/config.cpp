@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -24,25 +25,60 @@ std::string lower(std::string s) {
     return s;
 }
 
-// Expands a leading ~ and $HOME.
-std::string expandPath(std::string p) {
-    const char* home = std::getenv("HOME");
-    if (!home)
-        return p;
-    if (!p.empty() && p[0] == '~')
-        p = std::string(home) + p.substr(1);
-    const auto pos = p.find("$HOME");
-    if (pos != std::string::npos)
-        p.replace(pos, 5, home);
-    return p;
-}
-
-bool parseBool(const std::string& v) {
+bool parseBool(const std::string& v, bool& out) {
     const std::string l = lower(v);
-    return l == "yes" || l == "true" || l == "on" || l == "1";
+    if (l == "yes" || l == "true" || l == "on" || l == "1")
+        out = true;
+    else if (l == "no" || l == "false" || l == "off" || l == "0")
+        out = false;
+    else
+        return false;
+    return true;
 }
 
-bool parsePlugin(const std::string& value, PluginSpec& spec, std::string* error) {
+// thru (the input passes untouched) or mute (nothing passes): out = mute.
+bool parseBypassMode(const std::string& v, bool& mute) {
+    const std::string l = lower(v);
+    if (l == "thru" || l == "through")
+        mute = false;
+    else if (l == "mute")
+        mute = true;
+    else
+        return false;
+    return true;
+}
+
+bool parseNumber(const std::string& v, double& out) {
+    if (v.empty())
+        return false;
+    char* end = nullptr;
+    out = std::strtod(v.c_str(), &end);
+    return end && *end == '\0';
+}
+
+std::vector<std::string> splitList(const std::string& v) {
+    std::vector<std::string> out;
+    std::stringstream ss(v);
+    std::string item;
+    while (std::getline(ss, item, ','))
+        if (!trim(item).empty())
+            out.push_back(trim(item));
+    return out;
+}
+
+std::string dirOf(const std::string& path) {
+    const auto slash = path.rfind('/');
+    return slash == std::string::npos ? "." : path.substr(0, slash);
+}
+
+std::string resolve(const std::string& dir, std::string path) {
+    path = expandPath(path);
+    if (!path.empty() && path[0] != '/')
+        path = dir + "/" + path;
+    return path;
+}
+
+bool parsePlugin(const std::string& value, const std::string& dir, PluginSpec& spec, std::string* error) {
     spec.text = value;
     const auto colon = value.find(':');
     if (colon == std::string::npos) {
@@ -53,7 +89,7 @@ bool parsePlugin(const std::string& value, PluginSpec& spec, std::string* error)
     const std::string rest = trim(value.substr(colon + 1));
     if (spec.kind == "clap" || spec.kind == "vst3") {
         const auto hash = rest.rfind('#');
-        spec.path = expandPath(trim(hash == std::string::npos ? rest : rest.substr(0, hash)));
+        spec.path = resolve(dir, trim(hash == std::string::npos ? rest : rest.substr(0, hash)));
         if (hash != std::string::npos)
             spec.id = trim(rest.substr(hash + 1));
         return true;
@@ -69,11 +105,662 @@ bool parsePlugin(const std::string& value, PluginSpec& spec, std::string* error)
         }
         return true;
     }
-    *error = "unknown plug-in kind '" + spec.kind + "'";
+    *error = "unknown plug-in kind '" + spec.kind + "' (clap, vst3 or builtin)";
     return false;
 }
 
+// "0..10", "0 to 10" or "-12, 12".
+bool parseRange(const std::string& v, double& a, double& b) {
+    for (const char* sep : {"..", " to ", ","}) {
+        const auto pos = v.find(sep);
+        if (pos != std::string::npos)
+            return parseNumber(trim(v.substr(0, pos)), a) && parseNumber(trim(v.substr(pos + std::strlen(sep))), b);
+    }
+    return false;
+}
+
+enum class Section { None, Audio, Switching, Midi, Performance, Scene, Chain, Branch, Preset, Control, Trigger, Group, Fcb };
+
+struct Parser {
+    Config& config;
+    std::string* error;
+    int depth = 0;
+
+    Section section = Section::None;
+    // Where lines go: indexes, since the vectors grow.
+    int scene = -1, chain = -1, line = -1, preset = -1, control = -1, trigger = -1, group = -1;
+    bool sceneHasOwnChain = false; // an old-style [scene] with plugin lines
+
+    std::string where; // file:line of the line being parsed
+
+    bool fail(const std::string& what) {
+        *error = where + ": " + what;
+        return false;
+    }
+
+    SceneSpec* currentScene() { return scene >= 0 ? &config.scenes[scene] : nullptr; }
+    ChainSpec* currentChain() { return scene >= 0 && chain >= 0 ? &config.scenes[scene].chains[chain] : nullptr; }
+    LineSpec* currentLine() {
+        ChainSpec* c = currentChain();
+        return c && line >= 0 ? &c->lines[line] : nullptr;
+    }
+
+    SceneSpec& ensureScene() {
+        if (scene < 0) {
+            config.scenes.emplace_back();
+            scene = static_cast<int>(config.scenes.size()) - 1;
+            config.scenes.back().name = "Scene 1";
+            config.scenes.back().where = where;
+        }
+        return config.scenes[scene];
+    }
+
+    bool header(const std::string& text) {
+        const std::string h = trim(text);
+        const auto space = h.find_first_of(" \t");
+        const std::string kind = lower(space == std::string::npos ? h : h.substr(0, space));
+        const std::string name = space == std::string::npos ? "" : trim(h.substr(space + 1));
+        line = -1;
+        preset = control = trigger = group = -1;
+
+        if (kind == "audio") section = Section::Audio;
+        else if (kind == "switching") section = Section::Switching;
+        else if (kind == "midi") section = Section::Midi;
+        else if (kind == "fcb") section = Section::Fcb;
+        else if (kind == "performance") {
+            section = Section::Performance;
+            config.performance = name;
+        } else if (kind == "scene") {
+            section = Section::Scene;
+            config.scenes.emplace_back();
+            scene = static_cast<int>(config.scenes.size()) - 1;
+            chain = -1;
+            sceneHasOwnChain = false;
+            SceneSpec& s = config.scenes.back();
+            s.name = name.empty() ? "Scene " + std::to_string(config.scenes.size()) : name;
+            s.where = where;
+        } else if (kind == "chain") {
+            section = Section::Chain;
+            SceneSpec& s = ensureScene();
+            if (sceneHasOwnChain)
+                return fail("scene '" + s.name + "' already has plugin lines of its own; put every chain in a [chain] section");
+            s.chains.emplace_back();
+            chain = static_cast<int>(s.chains.size()) - 1;
+            ChainSpec& c = s.chains.back();
+            c.name = name.empty() ? s.name + " " + std::to_string(s.chains.size()) : name;
+            c.where = where;
+            c.lines.emplace_back();
+            line = 0;
+        } else if (kind == "branch") {
+            section = Section::Branch;
+            ChainSpec* c = currentChain();
+            if (!c)
+                return fail("[branch] must follow a [chain]");
+            for (size_t i = 1; i < c->lines.size(); ++i)
+                if (lower(c->lines[i].name) == lower(name))
+                    line = static_cast<int>(i);
+            if (line < 0)
+                return fail("no 'branch = " + name + "' line in chain '" + c->name + "' says where this branch leaves");
+        } else if (kind == "preset") {
+            section = Section::Preset;
+            SceneSpec& s = ensureScene();
+            s.presets.emplace_back();
+            preset = static_cast<int>(s.presets.size()) - 1;
+            s.presets.back().name = name.empty() ? "Preset " + std::to_string(s.presets.size()) : name;
+            s.presets.back().where = where;
+        } else if (kind == "control") {
+            section = Section::Control;
+            if (name.empty())
+                return fail("a control needs a name: [control Wah]");
+            config.controls.emplace_back();
+            control = static_cast<int>(config.controls.size()) - 1;
+            config.controls.back().name = name;
+            config.controls.back().where = where;
+        } else if (kind == "trigger") {
+            section = Section::Trigger;
+            config.triggers.emplace_back();
+            trigger = static_cast<int>(config.triggers.size()) - 1;
+            config.triggers.back().name = name.empty() ? "trigger " + std::to_string(config.triggers.size()) : name;
+            config.triggers.back().where = where;
+        } else if (kind == "group") {
+            section = Section::Group;
+            if (name.empty())
+                return fail("a group needs a name: [group Reset effects]");
+            config.groups.emplace_back();
+            group = static_cast<int>(config.groups.size()) - 1;
+            config.groups.back().name = name;
+            config.groups.back().where = where;
+        } else {
+            return fail("unknown section [" + kind + "]");
+        }
+        return true;
+    }
+
+    bool audio(const std::string& key, const std::string& value) {
+        double n = 0;
+        const bool isNum = parseNumber(value, n);
+        if (key == "device") config.audio.device = value;
+        else if (key == "rate" && isNum) config.audio.rate = static_cast<unsigned>(n);
+        else if (key == "period" && isNum) config.audio.period = static_cast<unsigned>(n);
+        else if (key == "periods" && isNum) config.audio.periods = static_cast<unsigned>(n);
+        else if (key == "input" && isNum && n >= 1) config.audio.inputChannel = static_cast<unsigned>(n) - 1;
+        else if (key == "out1" && isNum && n >= 1) config.audio.outputChannels.at(0) = static_cast<unsigned>(n) - 1;
+        else if (key == "out2" && isNum && n >= 1) config.audio.outputChannels.at(1) = static_cast<unsigned>(n) - 1;
+        else if (key == "priority" && isNum) config.audio.rtPriority = static_cast<int>(n);
+        else if (key == "workers" && isNum && n >= 0 && n <= 8) config.workers = static_cast<int>(n);
+        else if (key == "cpu") {
+            if (lower(value) == "auto") config.cpuAuto = true;
+            else if (lower(value) == "none") { config.cpuAuto = false; config.audio.cpu = -1; }
+            else if (isNum) { config.cpuAuto = false; config.audio.cpu = static_cast<int>(n); }
+            else return fail("cpu must be auto, none or a CPU number");
+        } else if (key == "mix") {
+            const std::string v = lower(value);
+            if (v != "left" && v != "right" && v != "sum")
+                return fail("mix must be left, right or sum");
+            config.mix = v == "left" ? OutputMix::Left : v == "right" ? OutputMix::Right : OutputMix::Sum;
+        } else return fail("unknown or invalid audio setting '" + key + "'");
+        return true;
+    }
+
+    bool switching(const std::string& key, const std::string& value) {
+        double n = 0;
+        const bool isNum = parseNumber(value, n);
+        bool b = false;
+        if (key == "preroll_ms" && isNum) config.engine.prerollMs = static_cast<float>(n);
+        else if (key == "crossfade_ms" && isNum) config.engine.crossfadeMs = static_cast<float>(n);
+        else if (key == "tail_cap_ms" && isNum) config.engine.tailCapMs = static_cast<float>(n);
+        else if (key == "tail_hold_ms" && isNum) config.engine.tailHoldMs = static_cast<float>(n);
+        else if (key == "tail_quiet_db" && isNum) config.engine.tailQuietDb = static_cast<float>(n);
+        else if (key == "bypass_fade_ms" && isNum) config.engine.bypassFadeMs = static_cast<float>(n);
+        else if (key == "mute_fade_ms" && isNum) config.engine.muteFadeMs = static_cast<float>(n);
+        else if (key == "reset_tails_on_warm" && parseBool(value, b)) config.engine.resetTailsOnWarmSwitch = b;
+        else if (key == "bypass_mode") {
+            if (!parseBypassMode(value, b))
+                return fail("bypass_mode is thru or mute");
+            config.muteOnBypass = b;
+        }
+        else if (key == "warm") {
+            config.warm = lower(value);
+            if (config.warm != "none" && config.warm != "next")
+                return fail("warm must be none or next");
+        } else return fail("unknown or invalid switching setting '" + key + "'");
+        return true;
+    }
+
+    bool midi(const std::string& key, const std::string& value) {
+        double n = 0;
+        bool b = false;
+        if (key == "enabled" && parseBool(value, b)) config.midi.enabled = b;
+        else if (key == "in") config.midi.in = value;
+        else if (key == "out") config.midi.out = value;
+        else if (key == "profile") {
+            config.midi.profile = lower(value);
+            if (config.midi.profile != "eurekaprom" && config.midi.profile != "none")
+                return fail("profile must be eurekaprom or none");
+        } else if (key == "channel" && parseNumber(value, n) && n >= 1 && n <= 16) config.midi.channel = static_cast<uint8_t>(n - 1);
+        else if (key == "forward" && parseBool(value, b)) config.midi.forward = b;
+        else return fail("unknown or invalid midi setting '" + key + "'");
+        return true;
+    }
+
+    // plugin, param, state, name, bypass, midi, branch, tap: lines of a chain.
+    bool chainLine(const std::string& key, const std::string& value, const std::string& dir) {
+        if (section == Section::Scene && !sceneHasOwnChain) {
+            // An old-style scene: one chain of the same name.
+            SceneSpec& s = config.scenes[scene];
+            if (!s.chains.empty())
+                return fail("plugin lines belong in a [chain] section");
+            s.chains.emplace_back();
+            s.chains.back().name = s.name;
+            s.chains.back().where = s.where;
+            s.chains.back().lines.emplace_back();
+            chain = 0;
+            line = 0;
+            sceneHasOwnChain = true;
+        }
+        LineSpec* l = currentLine();
+        if (!l)
+            return fail("'" + key + "' belongs in a [chain] or [branch] section");
+        ChainSpec& c = *currentChain();
+        PluginSpec* last = l->plugins.empty() ? nullptr : &l->plugins.back();
+        auto needPlugin = [&](const char* what) {
+            if (!last)
+                fail(std::string(what) + " must follow a plugin line");
+            return last != nullptr;
+        };
+        bool b = false;
+        if (key == "plugin") {
+            PluginSpec spec;
+            std::string err;
+            if (!parsePlugin(value, dir, spec, &err))
+                return fail(err);
+            spec.where = where;
+            l->plugins.push_back(spec);
+        } else if (key == "param") {
+            if (!needPlugin("param"))
+                return false;
+            const auto sep = value.find_first_of(":=");
+            double id = 0, v = 0;
+            if (sep == std::string::npos || !parseNumber(trim(value.substr(0, sep)), id) || !parseNumber(trim(value.substr(sep + 1)), v) || id < 0)
+                return fail("param is id:value, like param = 54:1 (cue params lists the ids)");
+            last->params.push_back({static_cast<uint32_t>(id), v});
+        } else if (key == "state") {
+            if (!needPlugin("state"))
+                return false;
+            last->stateFile = resolve(dir, value);
+        } else if (key == "controller_state") {
+            if (!needPlugin("controller_state"))
+                return false;
+            last->controllerStateFile = resolve(dir, value);
+        } else if (key == "name") {
+            if (!needPlugin("name"))
+                return false;
+            last->label = value;
+        } else if (key == "bypass") {
+            if (!needPlugin("bypass"))
+                return false;
+            if (!parseBool(value, b))
+                return fail("bypass is yes or no");
+            last->bypassed = b;
+        } else if (key == "bypass_mode") {
+            if (!needPlugin("bypass_mode"))
+                return false;
+            if (!parseBypassMode(value, b))
+                return fail("bypass_mode is thru or mute");
+            last->muteOnBypass = b;
+            last->bypassModeSet = true;
+        } else if (key == "sidechain") {
+            if (!needPlugin("sidechain"))
+                return false;
+            if (value.empty())
+                return fail("sidechain names an earlier plug-in of the chain, like sidechain = TwoStorms Gate");
+            last->sidechain = value;
+        } else if (key == "midi") {
+            if (!needPlugin("midi"))
+                return false;
+            if (!parseBool(value, b))
+                return fail("midi is yes or no");
+            last->midi = b;
+        } else if (key == "branch") {
+            if (value.empty())
+                return fail("branch needs a name");
+            for (const auto& other : c.lines)
+                if (lower(other.name) == lower(value))
+                    return fail("chain '" + c.name + "' already has a branch named " + value);
+            LineSpec branch;
+            branch.name = value;
+            branch.parent = line;
+            branch.after = l->plugins.size();
+            c.lines.push_back(branch); // l may now dangle
+        } else if (key == "tap") {
+            const std::string v = lower(value);
+            if (v != "out1" && v != "out2")
+                return fail("tap must be out1 or out2");
+            TapSpec& t = c.out[v == "out1" ? 0 : 1];
+            t.line = line;
+            t.after = l->plugins.size();
+            t.set = true;
+        } else {
+            return fail("unknown chain setting '" + key + "'");
+        }
+        return true;
+    }
+
+    bool sceneLine(const std::string& key, const std::string& value, const std::string& dir) {
+        SceneSpec& s = config.scenes[scene];
+        double n = 0;
+        if (key == "display") s.display = value;
+        else if (key == "pedal" && parseNumber(value, n) && n >= 1 && n <= 12) s.pedal = static_cast<int>(n);
+        else if (key == "program" && parseNumber(value, n) && n >= 0 && n <= 127) s.program = static_cast<int>(n);
+        else return chainLine(key, value, dir);
+        return true;
+    }
+
+    bool presetLine(const std::string& key, const std::string& value) {
+        PresetSpec& p = config.scenes[scene].presets[preset];
+        double n = 0;
+        if (key == "chain") p.chain = value;
+        else if (key == "display") p.display = value;
+        else if (key == "pedal" && parseNumber(value, n) && n >= 1 && n <= 12) p.pedal = static_cast<int>(n);
+        else if (key == "program" && parseNumber(value, n) && n >= 0 && n <= 127) p.program = static_cast<int>(n);
+        else if (key == "do") p.actions.push_back({value, where});
+        else return fail("unknown or invalid preset setting '" + key + "'");
+        return true;
+    }
+
+    bool controlLine(const std::string& key, const std::string& value) {
+        ControlSpec& c = config.controls[control];
+        double n = 0, a = 0, b = 0;
+        bool flag = false;
+        if (key == "type") {
+            const std::string v = lower(value);
+            if (v == "toggle") c.type = ControlSpec::Type::Toggle;
+            else if (v == "discrete") c.type = ControlSpec::Type::Discrete;
+            else if (v == "continuous") c.type = ControlSpec::Type::Continuous;
+            else return fail("type is toggle, discrete or continuous");
+            c.typeSet = true;
+        } else if (key == "values") {
+            c.labels = splitList(value);
+            if (c.labels.size() < 2)
+                return fail("values lists at least two names: values = Off, Pedal, Auto");
+        } else if (key == "range") {
+            if (!parseRange(value, a, b) || a == b)
+                return fail("range is low..high, like range = 0..10");
+            c.min = std::min(a, b);
+            c.max = std::max(a, b);
+            c.rangeSet = true;
+        } else if (key == "min" && parseNumber(value, n)) { c.min = n; c.rangeSet = true; }
+        else if (key == "max" && parseNumber(value, n)) { c.max = n; c.rangeSet = true; }
+        else if (key == "step" && parseNumber(value, n) && n > 0) { c.step = n; c.stepSet = true; }
+        else if (key == "default") {
+            // A number, or one of the values' names, resolved when the control is finished.
+            if (parseNumber(value, n))
+                c.def = n;
+            else
+                c.defText = value;
+            c.defSet = true;
+        } else if (key == "wrap" && parseBool(value, flag)) c.wrap = flag;
+        else if (key == "pedal" && parseNumber(value, n) && n >= 1 && n <= 12) c.pedal = static_cast<int>(n);
+        else if (key == "follows") c.follows = {value, where};
+        else if (key == "enable") c.enables.push_back({value, where});
+        else if (key == "drive") c.drives.push_back({value, where});
+        else if (key == "mute") c.mutes.push_back({value, where});
+        else return fail("unknown or invalid control setting '" + key + "'");
+        return true;
+    }
+
+    bool triggerLine(const std::string& key, const std::string& value) {
+        TriggerSpec& t = config.triggers[trigger];
+        if (key == "on") t.inputs.push_back({value, where});
+        else if (key == "do") t.actions.push_back({value, where});
+        else if (key == "when") t.when = {value, where};
+        else if (key == "scene") t.scene = value;
+        else return fail("unknown trigger setting '" + key + "' (on, do, when, scene)");
+        return true;
+    }
+
+    // "4" (pedal 4), "18" or "value 1": EurekaPROM's LED numbers past the
+    // pedals, or their names. 0 if none.
+    static int fcbLed(const std::string& text) {
+        static const char* names[] = {"expr a", "expr b", "sw1", "sw2", "bank", "select", "number",
+                                      "value 1", "value 2", "dir sel", "midi fn", "midi ch", "config"};
+        double n = 0;
+        if (parseNumber(text, n))
+            return n >= 1 && n <= 23 && n == static_cast<int>(n) ? static_cast<int>(n) : 0;
+        std::string t;
+        for (char c : lower(text))
+            if (c != ' ' && c != '-' && c != '_')
+                t += c;
+        for (int i = 0; i < 13; ++i) {
+            std::string name;
+            for (const char* c = names[i]; *c; ++c)
+                if (*c != ' ')
+                    name += *c;
+            if (t == name)
+                return 11 + i;
+        }
+        return 0;
+    }
+
+    bool fcbLine(const std::string& key, const std::string& value) {
+        if (key.rfind("led", 0) == 0) {
+            const int led = fcbLed(trim(key.substr(3)));
+            if (!led)
+                return fail("unknown LED '" + trim(key.substr(3)) + "' (a pedal 1-10, 11-23, or expr a, expr b, sw1, sw2, bank, select, number, value 1, value 2, dir sel, midi fn, midi ch, config)");
+            config.fcb.leds.push_back({led, {value, where}});
+        } else if (key == "display")
+            config.fcb.displays.push_back({value, where});
+        else
+            return fail("unknown fcb setting '" + key + "' (led 1 .. led 10, led value 1, display)");
+        return true;
+    }
+
+    bool parse(const std::string& text, const std::string& path) {
+        const std::string dir = dirOf(path);
+        std::istringstream in(text);
+        std::string raw;
+        int lineNo = 0;
+        while (std::getline(in, raw)) {
+            ++lineNo;
+            where = path + ":" + std::to_string(lineNo);
+            // ';' starts a comment anywhere, '#' only at the start of a line
+            // (it separates a plug-in file from the id inside it).
+            std::string l = raw;
+            const auto semi = l.find(';');
+            if (semi != std::string::npos)
+                l = l.substr(0, semi);
+            l = trim(l);
+            if (l.empty() || l[0] == '#')
+                continue;
+            if (l.front() == '[') {
+                if (l.back() != ']')
+                    return fail("unclosed section header");
+                if (!header(l.substr(1, l.size() - 2)))
+                    return false;
+                continue;
+            }
+            const auto eq = l.find('=');
+            if (eq == std::string::npos)
+                return fail("expected key = value");
+            const std::string key = lower(trim(l.substr(0, eq)));
+            const std::string value = trim(l.substr(eq + 1));
+            if (key == "include") {
+                if (!include(resolve(dir, value)))
+                    return false;
+                where = path + ":" + std::to_string(lineNo);
+                continue;
+            }
+            bool ok = true;
+            switch (section) {
+            case Section::None: ok = fail("setting outside a section"); break;
+            case Section::Audio: ok = audio(key, value); break;
+            case Section::Switching: ok = switching(key, value); break;
+            case Section::Midi: ok = midi(key, value); break;
+            case Section::Performance: ok = fail("unknown performance setting '" + key + "'"); break;
+            case Section::Scene: ok = sceneLine(key, value, dir); break;
+            case Section::Chain:
+            case Section::Branch: ok = chainLine(key, value, dir); break;
+            case Section::Preset: ok = presetLine(key, value); break;
+            case Section::Control: ok = controlLine(key, value); break;
+            case Section::Trigger: ok = triggerLine(key, value); break;
+            case Section::Group:
+                if (key == "do") config.groups[group].actions.push_back({value, where});
+                else ok = fail("a group only has do = lines");
+                break;
+            case Section::Fcb: ok = fcbLine(key, value); break;
+            }
+            if (!ok)
+                return false;
+        }
+        return true;
+    }
+
+    bool include(const std::string& path) {
+        if (depth >= 8)
+            return fail("includes nested too deeply (is a file including itself?)");
+        std::ifstream f(path);
+        if (!f)
+            return fail("cannot open included file " + path);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        ++depth;
+        const bool ok = parse(ss.str(), path);
+        --depth;
+        return ok;
+    }
+};
+
+bool finishControl(ControlSpec& c, std::string* error) {
+    const std::string& defLabel = c.defText;
+    auto fail = [&](const std::string& what) {
+        *error = c.where + ": control '" + c.name + "': " + what;
+        return false;
+    };
+    if (!c.labels.empty()) {
+        if (!c.typeSet || c.type == ControlSpec::Type::Toggle)
+            c.type = ControlSpec::Type::Discrete;
+        if (c.type == ControlSpec::Type::Continuous)
+            return fail("a continuous control cannot have named values");
+        c.min = 0;
+        c.max = static_cast<double>(c.labels.size() - 1);
+        c.step = 1;
+    } else if (c.type == ControlSpec::Type::Toggle || (!c.typeSet && !c.rangeSet)) {
+        // No range and no values: an on/off switch.
+        c.type = ControlSpec::Type::Toggle;
+        c.min = 0;
+        c.max = 1;
+        c.step = 1;
+        c.labels = {"off", "on"};
+    } else {
+        if (c.min >= c.max)
+            return fail("min must be below max");
+        if (c.type == ControlSpec::Type::Continuous && !c.stepSet)
+            c.step = (c.max - c.min) / 10.0;
+    }
+    if (!defLabel.empty()) {
+        bool found = false;
+        for (size_t i = 0; i < c.labels.size(); ++i)
+            if (lower(c.labels[i]) == lower(defLabel)) {
+                c.def = c.min + static_cast<double>(i) * c.step;
+                found = true;
+            }
+        if (!found)
+            return fail("default '" + defLabel + "' is not one of its values");
+        c.defText.clear();
+    } else if (!c.defSet) {
+        c.def = c.min;
+    }
+    if (c.def < c.min || c.def > c.max)
+        return fail("default is outside its range");
+    return true;
+}
+
 } // namespace
+
+std::string expandPath(std::string p) {
+    const char* home = std::getenv("HOME");
+    if (!home)
+        return p;
+    if (!p.empty() && p[0] == '~')
+        p = std::string(home) + p.substr(1);
+    const auto pos = p.find("$HOME");
+    if (pos != std::string::npos)
+        p.replace(pos, 5, home);
+    return p;
+}
+
+std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain) {
+    std::vector<const PluginSpec*> out;
+    for (const auto& l : chain.lines)
+        for (const auto& p : l.plugins)
+            out.push_back(&p);
+    return out;
+}
+
+bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
+                     std::string* error) {
+    feeds.clear();
+    const auto plugins = chainPlugins(chain);
+    for (size_t slot = 0; slot < plugins.size() && slot < labels.size(); ++slot) {
+        const PluginSpec& ps = *plugins[slot];
+        if (ps.sidechain.empty())
+            continue;
+        std::string label = trim(ps.sidechain);
+        int nth = 0;
+        double n = 0;
+        const auto colon = label.rfind(':');
+        if (colon != std::string::npos && parseNumber(trim(label.substr(colon + 1)), n) && n >= 1) {
+            nth = static_cast<int>(n);
+            label = trim(label.substr(0, colon));
+        }
+        int source = -1, count = 0;
+        for (size_t i = 0; i < labels.size(); ++i) {
+            if (lower(labels[i]) != lower(label))
+                continue;
+            ++count;
+            if (nth ? count == nth : i < slot)
+                source = static_cast<int>(i);
+            if (nth && count == nth)
+                break;
+        }
+        const std::string where = ps.where + ": sidechain = " + ps.sidechain + ": ";
+        if (source < 0) {
+            *error = where + "no plug-in named '" + label + "'" + (nth ? " (number " + std::to_string(nth) + ")" : " before it") + " in chain " + chain.name;
+            return false;
+        }
+        if (static_cast<size_t>(source) >= slot) {
+            *error = where + "it comes after the plug-in it would feed; a side-chain comes from an earlier plug-in (main line first, then each branch)";
+            return false;
+        }
+        feeds.push_back({slot, static_cast<size_t>(source)});
+    }
+    return true;
+}
+
+bool parseConfigText(const std::string& text, const std::string& path, Config& config, std::string* error) {
+    Parser parser{config, error};
+    if (!parser.parse(text, path))
+        return false;
+    config.path = path;
+
+    if (config.scenes.empty()) {
+        *error = path + ": no [scene] or [chain] sections";
+        return false;
+    }
+    for (auto& s : config.scenes) {
+        if (s.chains.empty()) {
+            *error = s.where + ": scene '" + s.name + "' has no chains";
+            return false;
+        }
+        // A scene without presets gets one per chain.
+        if (s.presets.empty())
+            for (const auto& c : s.chains) {
+                PresetSpec p;
+                p.name = c.name;
+                p.chain = c.name;
+                p.where = c.where;
+                s.presets.push_back(p);
+            }
+        for (auto& p : s.presets) {
+            if (p.chain.empty()) {
+                // The chain of the same name, or the scene's first chain.
+                p.chain = s.chains.front().name;
+                bool named = false;
+                for (const auto& c : s.chains)
+                    if (lower(c.name) == lower(p.name)) {
+                        p.chain = c.name;
+                        named = true;
+                    }
+                if (!named && s.chains.size() > 1)
+                    config.warnings.push_back(p.where + ": preset '" + p.name + "' has no 'chain =' line and no chain of its name, so it plays the first chain, " + p.chain);
+            }
+            bool found = false;
+            for (const auto& c : s.chains)
+                found = found || lower(c.name) == lower(p.chain);
+            if (!found) {
+                *error = p.where + ": preset '" + p.name + "': scene '" + s.name + "' has no chain named " + p.chain;
+                return false;
+            }
+        }
+        for (auto& c : s.chains) {
+            for (int o = 0; o < 2; ++o)
+                if (!c.out[o].set) {
+                    c.out[o].line = 0;
+                    c.out[o].after = c.lines[0].plugins.size();
+                }
+            for (auto& l : c.lines)
+                for (auto& p : l.plugins)
+                    if (!p.bypassModeSet)
+                        p.muteOnBypass = config.muteOnBypass;
+        }
+    }
+    for (auto& c : config.controls)
+        if (!finishControl(c, error))
+            return false;
+    if (config.midi.out.empty() && lower(config.midi.in) != "any")
+        config.midi.out = config.midi.in;
+    return true;
+}
 
 bool loadConfig(const std::string& path, Config& config, std::string* error) {
     std::ifstream f(path);
@@ -81,143 +768,9 @@ bool loadConfig(const std::string& path, Config& config, std::string* error) {
         *error = "cannot open " + path;
         return false;
     }
-    std::string section;
-    SceneSpec* scene = nullptr;
-    std::string line;
-    int lineNo = 0;
-    auto fail = [&](const std::string& what) {
-        *error = path + ":" + std::to_string(lineNo) + ": " + what;
-        return false;
-    };
-
-    while (std::getline(f, line)) {
-        ++lineNo;
-        const auto comment = line.find_first_of(";#");
-        // A '#' inside a clap plug-in id is not a comment: only treat ';' and
-        // a '#' at the start of the line as comments.
-        if (comment != std::string::npos && (line[comment] == ';' || trim(line.substr(0, comment)).empty()))
-            line = line.substr(0, comment);
-        line = trim(line);
-        if (line.empty())
-            continue;
-
-        if (line.front() == '[') {
-            if (line.back() != ']')
-                return fail("unclosed section header");
-            const std::string header = trim(line.substr(1, line.size() - 2));
-            const std::string lh = lower(header);
-            if (lh.rfind("scene", 0) == 0) {
-                section = "scene";
-                config.scenes.emplace_back();
-                scene = &config.scenes.back();
-                scene->name = trim(header.substr(5));
-                if (scene->name.empty())
-                    scene->name = "Scene " + std::to_string(config.scenes.size());
-            } else {
-                section = lh;
-                scene = nullptr;
-            }
-            continue;
-        }
-
-        const auto eq = line.find('=');
-        if (eq == std::string::npos)
-            return fail("expected key = value");
-        const std::string key = lower(trim(line.substr(0, eq)));
-        const std::string value = trim(line.substr(eq + 1));
-        auto num = [&](double& out) {
-            char* end = nullptr;
-            out = std::strtod(value.c_str(), &end);
-            return end && *end == '\0';
-        };
-        double n = 0;
-
-        if (section == "audio") {
-            if (key == "device") config.audio.device = value;
-            else if (key == "rate" && num(n)) config.audio.rate = static_cast<unsigned>(n);
-            else if (key == "period" && num(n)) config.audio.period = static_cast<unsigned>(n);
-            else if (key == "periods" && num(n)) config.audio.periods = static_cast<unsigned>(n);
-            else if (key == "input" && num(n) && n >= 1) config.audio.inputChannel = static_cast<unsigned>(n) - 1;
-            else if (key == "out1" && num(n) && n >= 1) config.audio.outputChannels.at(0) = static_cast<unsigned>(n) - 1;
-            else if (key == "out2" && num(n) && n >= 1) config.audio.outputChannels.at(1) = static_cast<unsigned>(n) - 1;
-            else if (key == "priority" && num(n)) config.audio.rtPriority = static_cast<int>(n);
-            else if (key == "cpu") {
-                if (lower(value) == "auto") config.cpuAuto = true;
-                else if (lower(value) == "none") { config.cpuAuto = false; config.audio.cpu = -1; }
-                else if (num(n)) { config.cpuAuto = false; config.audio.cpu = static_cast<int>(n); }
-                else return fail("cpu must be auto, none or a CPU number");
-            } else if (key == "mix") {
-                const std::string v = lower(value);
-                config.mix = v == "left" ? OutputMix::Left : v == "right" ? OutputMix::Right : OutputMix::Sum;
-            } else return fail("unknown or invalid audio setting '" + key + "'");
-        } else if (section == "switching") {
-            if (key == "preroll_ms" && num(n)) config.engine.prerollMs = static_cast<float>(n);
-            else if (key == "crossfade_ms" && num(n)) config.engine.crossfadeMs = static_cast<float>(n);
-            else if (key == "tail_cap_ms" && num(n)) config.engine.tailCapMs = static_cast<float>(n);
-            else if (key == "tail_hold_ms" && num(n)) config.engine.tailHoldMs = static_cast<float>(n);
-            else if (key == "tail_quiet_db" && num(n)) config.engine.tailQuietDb = static_cast<float>(n);
-            else if (key == "reset_tails_on_warm") config.engine.resetTailsOnWarmSwitch = parseBool(value);
-            else if (key == "warm") {
-                config.warm = lower(value);
-                if (config.warm != "none" && config.warm != "next")
-                    return fail("warm must be none or next");
-            } else return fail("unknown or invalid switching setting '" + key + "'");
-        } else if (section == "midi") {
-            if (key == "enabled") config.midi.enabled = parseBool(value);
-            else if (key == "in") config.midi.in = value;
-            else if (key == "out") config.midi.out = value;
-            else if (key == "profile") config.midi.profile = lower(value);
-            else if (key == "channel" && num(n) && n >= 1 && n <= 16) config.midi.channel = static_cast<uint8_t>(n - 1);
-            else return fail("unknown or invalid midi setting '" + key + "'");
-        } else if (section == "scene" && scene) {
-            if (key == "pedal" && num(n)) scene->pedal = static_cast<int>(n);
-            else if (key == "program" && num(n)) scene->program = static_cast<int>(n);
-            else if (key == "plugin") {
-                PluginSpec spec;
-                std::string err;
-                if (!parsePlugin(value, spec, &err))
-                    return fail(err);
-                scene->chain.push_back(spec);
-            } else if (key == "param") {
-                if (scene->chain.empty())
-                    return fail("param must follow a plugin line");
-                const auto sep = value.find_first_of(":=");
-                if (sep == std::string::npos)
-                    return fail("param is id:value");
-                scene->chain.back().params.push_back({static_cast<uint32_t>(std::strtoul(value.substr(0, sep).c_str(), nullptr, 10)),
-                                                      std::strtod(value.substr(sep + 1).c_str(), nullptr)});
-            } else if (key == "state") {
-                if (scene->chain.empty())
-                    return fail("state must follow a plugin line");
-                scene->chain.back().stateFile = expandPath(value);
-            } else if (key == "tap") {
-                // The tap takes the signal at this point in the chain.
-                const std::string v = lower(value);
-                if (v == "out1") scene->out1After = scene->chain.size();
-                else if (v == "out2") scene->out2After = scene->chain.size();
-                else return fail("tap must be out1 or out2");
-            } else return fail("unknown or invalid scene setting '" + key + "'");
-        } else {
-            return fail("setting outside a known section");
-        }
-    }
-    if (config.scenes.empty()) {
-        *error = path + ": no [scene ...] sections";
-        return false;
-    }
-    if (config.midi.out.empty() && config.midi.in != "any")
-        config.midi.out = config.midi.in;
-    // Relative plug-in and state paths are relative to the config file.
-    const auto slash = path.rfind('/');
-    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
-    for (auto& s : config.scenes)
-        for (auto& p : s.chain) {
-            if (!p.path.empty() && p.path[0] != '/')
-                p.path = dir + "/" + p.path;
-            if (!p.stateFile.empty() && p.stateFile[0] != '/')
-                p.stateFile = dir + "/" + p.stateFile;
-        }
-    return true;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return parseConfigText(ss.str(), path, config, error);
 }
 
 } // namespace cue

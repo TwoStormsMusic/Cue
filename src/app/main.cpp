@@ -1,10 +1,14 @@
 // cue: the live plug-in host prototype.
 //
 //   cue run <config>             play live: ALSA audio, FCB1010 switching
-//   cue bench <config> [opts]    offline: measure CPU per scene and render a WAV
+//   cue bench <config> [opts]    offline: measure CPU per chain and render a WAV
 //   cue doctor [--device M2]     check real-time settings
 //   cue devices                  list sound cards and MIDI ports
+//   cue check <config>           load everything, check the mappings, print the performance
+//                                (--no-load: check without loading plug-ins)
 //   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
+//   cue params <file>[#id]       list a plug-in's parameters and their ids
+//   cue import-rpp <file.rpp>    make a config from a REAPER project
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
@@ -12,6 +16,8 @@
 #include "app/config.h"
 #include "app/cpu.h"
 #include "app/doctor.h"
+#include "app/rpp.h"
+#include "control/show.h"
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
@@ -21,6 +27,7 @@
 
 #include <alsa/asoundlib.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <termios.h>
 #include <unistd.h>
@@ -32,8 +39,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -46,88 +55,29 @@ namespace {
 std::atomic<bool> g_quit{false};
 void onSignal(int) { g_quit = true; }
 
-// ------------------------------------------------------------ controller
+// ------------------------------------------------------------ MIDI out
 
-// Turns MIDI into scene switches and engine events into LEDs. MIDI is read
-// and written on one thread; other threads queue outgoing messages.
-class Controller {
+// Messages for the controller (LEDs, display), queued by any thread and
+// sent by the MIDI thread.
+class MidiOutQueue {
 public:
-    Controller(Engine& engine, const Config& config) : engine_(engine), config_(config) {}
-
-    void attach(AlsaMidi* midi) { midi_ = midi; }
-
-    void onMidi(const MidiMessage& m) {
-        if (config_.midi.profile == "eurekaprom") {
-            const auto in = eurekaprom::decode(m);
-            if (in.kind == eurekaprom::Input::Kind::Press) {
-                if (in.pedal == eurekaprom::kUp)
-                    step(+1);
-                else if (in.pedal == eurekaprom::kDown)
-                    step(-1);
-                else
-                    for (size_t i = 0; i < config_.scenes.size(); ++i)
-                        if (config_.scenes[i].pedal == in.pedal)
-                            engine_.switchTo(static_cast<int>(i));
-                return;
-            }
-            if (in.kind != eurekaprom::Input::Kind::None)
-                return;
-        }
-        if (m.type() == 0xC0)
-            for (size_t i = 0; i < config_.scenes.size(); ++i)
-                if (config_.scenes[i].program == m.data1)
-                    engine_.switchTo(static_cast<int>(i));
+    void push(const MidiMessage& m) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.push_back(m);
     }
-
-    void step(int delta) {
-        const int n = static_cast<int>(engine_.numScenes());
-        const int cur = active_.load();
-        engine_.switchTo(((cur < 0 ? 0 : cur) + delta + n) % n);
-    }
-
-    void onEvent(const EngineEvent& ev) {
-        if (ev.type != EngineEvent::Type::SceneActive)
-            return;
-        const int previous = active_.exchange(ev.scene);
-        if (config_.warm == "next" && engine_.numScenes() > 1)
-            engine_.setWarm((ev.scene + 1) % static_cast<int>(engine_.numScenes()));
-        if (config_.midi.profile == "eurekaprom") {
-            const uint8_t ch = config_.midi.channel;
-            if (previous >= 0 && config_.scenes[previous].pedal >= 1 && config_.scenes[previous].pedal <= 10)
-                queue(eurekaprom::led(ch, config_.scenes[previous].pedal, false));
-            const int pedal = config_.scenes[ev.scene].pedal;
-            if (pedal >= 1 && pedal <= 10)
-                queue(eurekaprom::led(ch, pedal, true));
-            queue(eurekaprom::displayNumber(ch, ev.scene + 1));
-        }
-    }
-
-    int active() const { return active_.load(); }
-
-    void queue(const MidiMessage& m) {
-        std::lock_guard<std::mutex> lock(outMutex_);
-        out_.push_back(m);
-    }
-
-    // MIDI thread.
-    void flushOut() {
-        std::vector<MidiMessage> pending;
+    void flush(AlsaMidi& midi) {
+        std::vector<MidiMessage> out;
         {
-            std::lock_guard<std::mutex> lock(outMutex_);
-            pending.swap(out_);
+            std::lock_guard<std::mutex> lock(mutex_);
+            out.swap(pending_);
         }
-        if (midi_)
-            for (const auto& m : pending)
-                midi_->send(m);
+        for (const auto& m : out)
+            midi.send(m);
     }
 
 private:
-    Engine& engine_;
-    const Config& config_;
-    AlsaMidi* midi_ = nullptr;
-    std::atomic<int> active_{-1};
-    std::mutex outMutex_;
-    std::vector<MidiMessage> out_;
+    std::mutex mutex_;
+    std::vector<MidiMessage> pending_;
 };
 
 // ------------------------------------------------------------ status
@@ -136,22 +86,51 @@ struct SceneSample {
     uint64_t ns = 0, blocks = 0;
 };
 
-std::string sceneStatus(Engine& engine, std::vector<SceneSample>& last, double periodUs) {
+// The chains that are running, with their CPU use since the last call.
+std::string chainStatus(Engine& engine, const Rig& rig, std::vector<SceneSample>& last) {
     std::string s;
     char buf[160];
-    for (size_t i = 0; i < engine.numScenes(); ++i) {
-        SceneStats& st = engine.stats(i);
+    for (size_t i = 0; i < engine.numChains(); ++i) {
+        ChainStats& st = engine.stats(i);
         const uint64_t ns = st.processNs.load(), blocks = st.processBlocks.load();
         const uint64_t dNs = ns - last[i].ns, dBlocks = blocks - last[i].blocks;
         last[i] = {ns, blocks};
         const double avgUs = dBlocks ? dNs / 1000.0 / dBlocks : 0.0;
         const double maxUs = st.maxBlockNs.exchange(0) / 1000.0;
-        const auto state = static_cast<SceneState>(st.state.load());
-        std::snprintf(buf, sizeof buf, "%s%zu:%s %.0f/%.0fus", s.empty() ? "" : "  ", i + 1, toString(state), avgUs, maxUs);
+        const auto state = static_cast<ChainState>(st.state.load());
+        if (state == ChainState::Idle)
+            continue;
+        std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), avgUs, maxUs);
         s += buf;
     }
-    (void)periodUs;
     return s;
+}
+
+// Where an xrun came from: when, how late and slow the block before it
+// was, and what the slowest block around it was doing.
+std::string describeXrun(uint64_t xruns, const AlsaStats& st, const BlockReport& r, const Rig& rig, double periodUs, unsigned rate) {
+    char buf[200];
+    const uint32_t ms = st.lastXrunMs.load();
+    std::snprintf(buf, sizeof buf, "xrun%s at %u:%04.1f, %s: the block before took %.2f ms and started %.2f ms late (the period is %.2f ms)",
+                  xruns > 1 ? (" x" + std::to_string(xruns)).c_str() : "", ms / 60000, (ms % 60000) / 1000.0,
+                  st.lastXrunPlayback ? "playback ran dry" : "capture overflowed", st.lastXrunBlockNs.load() / 1e6,
+                  1000.0 * st.lastXrunLateFrames.load() / rate, periodUs / 1000.0);
+    std::string s = buf;
+    std::snprintf(buf, sizeof buf, "; the slowest block around it took %.2f ms:", r.ns / 1e6);
+    s += buf;
+    for (size_t k = 0; k < r.count; ++k) {
+        const auto& c = r.chains[k];
+        std::snprintf(buf, sizeof buf, "%s %s %s %.2f ms%s", k ? "," : "", rig.chainNames[c.chain].c_str(), toString(c.state), c.ns / 1e6,
+                      c.background ? " (background)" : c.helper ? " (helper)" : "");
+        s += buf;
+    }
+    return s;
+}
+
+// Columns of the terminal, or 0 when it is not one.
+size_t terminalWidth() {
+    winsize w{};
+    return ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 ? w.ws_col : 0;
 }
 
 // ------------------------------------------------------------ keyboard
@@ -192,6 +171,8 @@ bool load(const std::string& path, Config& config) {
     }
     if (config.cpuAuto)
         config.audio.cpu = pickAudioCpu();
+    // Before any plug-in loads: what it starts inherits this.
+    keepOffAudioCore(config.audio.cpu);
     return true;
 }
 
@@ -217,7 +198,16 @@ int cmdRun(const std::string& path) {
     }
     std::printf("audio: %s\n", audio.describe().c_str());
 
-    Controller controller(engine, config);
+    MidiOutQueue midiOut;
+    RigOutput output(rig, [&](const MidiMessage& m) { midiOut.push(m); });
+    Show show(output);
+    if (!show.load(config, rig.showPlugins(), &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    for (const auto& w : show.warnings())
+        std::fprintf(stderr, "warning: %s\n", w.c_str());
+
     AlsaMidi midi;
     std::thread midiThread;
     std::atomic<bool> midiRun{true};
@@ -227,13 +217,14 @@ int cmdRun(const std::string& path) {
             const int outs = config.midi.out.empty() ? 0 : midi.connectOutputTo(config.midi.out);
             std::printf("midi: input from %d port(s) matching '%s', output to %d port(s) matching '%s', profile %s\n", ins,
                         config.midi.in.c_str(), outs, config.midi.out.c_str(), config.midi.profile.c_str());
-            controller.attach(&midi);
+            if (ins == 0)
+                std::fprintf(stderr, "warning: no MIDI input matches '%s' (cue devices lists the ports)\n", config.midi.in.c_str());
             midiThread = std::thread([&] {
                 MidiMessage m;
                 while (midiRun) {
                     if (midi.read(m, 5))
-                        controller.onMidi(m);
-                    controller.flushOut();
+                        show.onMidi(m);
+                    midiOut.flush(midi);
                 }
             });
         } else {
@@ -252,31 +243,34 @@ int cmdRun(const std::string& path) {
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
-    engine.switchTo(0);
-    std::printf("keys: 1-9 select scene, n/p next/previous, q quit\n");
+    show.start();
+    std::printf("keys: 1-9 select preset, n/p next/previous, q quit\n");
 
     RawTerminal term;
-    std::vector<SceneSample> last(engine.numScenes());
+    std::vector<SceneSample> last(engine.numChains());
     uint64_t lastCycles = 0, lastNs = 0;
     auto nextStatus = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
+    uint64_t reportedXruns = 0, reportedStartup = 0;
 
     while (!g_quit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         rig.pumpMainThread();
         EngineEvent ev;
-        while (engine.nextEvent(ev))
-            controller.onEvent(ev);
+        while (engine.nextEvent(ev)) {
+        }
         const int k = term.key();
-        if (k == 'q')
-            break;
-        if (k >= '1' && k <= '9')
-            engine.switchTo(k - '1');
-        if (k == 'n')
-            controller.step(+1);
-        if (k == 'p')
-            controller.step(-1);
+        if (k > 0 && !show.onKey(static_cast<char>(k))) {
+            if (k == 'q')
+                break;
+            if (k >= '1' && k <= '9')
+                show.selectPreset(k - '1');
+            if (k == 'n')
+                show.stepPreset(+1);
+            if (k == 'p')
+                show.stepPreset(-1);
+        }
 
         auto& st = const_cast<AlsaStats&>(audio.stats());
         if (st.failed) {
@@ -285,8 +279,25 @@ int cmdRun(const std::string& path) {
         }
         if (!reportedSched && st.cycles > 0) {
             reportedSched = true;
-            std::printf("audio thread: %s, %s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
-                        st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned");
+            std::printf("audio thread: %s, %s; %zu helper thread(s)%s\n", st.realtime ? "real-time" : "NOT real-time (see cue doctor)",
+                        st.pinned ? ("pinned to CPU " + std::to_string(config.audio.cpu)).c_str() : "not pinned", engine.numWorkers(),
+                        engine.numWorkers() == 0 ? "" : engine.realtimeWorkers() == static_cast<int>(engine.numWorkers()) ? ", real-time" : ", NOT real-time");
+        }
+        if (st.startupXruns.load() > reportedStartup) {
+            reportedStartup = st.startupXruns.load();
+            std::printf("%sstart-up: the sound card stalled as it started (%s at block %llu), before anything was heard; not counted as an xrun\n",
+                        term.active ? "\r\033[K" : "", st.lastXrunPlayback ? "playback ran dry" : "capture overflowed",
+                        static_cast<unsigned long long>(st.lastXrunCycle.load()));
+        }
+        // Each xrun gets its own line, with the slowest block around it.
+        BlockReport report;
+        while (engine.nextBlockReport(report)) {
+            const uint64_t xruns = st.xruns.load();
+            if (xruns > reportedXruns) {
+                std::printf("%s%s\n", term.active ? "\r\033[K" : "",
+                            describeXrun(xruns - reportedXruns, st, report, rig, periodUs, config.audio.rate).c_str());
+                reportedXruns = xruns;
+            }
         }
         if (Clock::now() >= nextStatus) {
             nextStatus += std::chrono::milliseconds(500);
@@ -295,11 +306,31 @@ int cmdRun(const std::string& path) {
             lastCycles = cycles;
             lastNs = ns;
             const double maxUs = st.maxCycleNs.exchange(0) / 1000.0;
-            const int a = controller.active();
-            std::printf("%s[%s] dsp %3.0f%% (max %3.0f%%) xruns %llu | %s   %s",
-                        term.active ? "\r" : "", a >= 0 ? config.scenes[a].name.c_str() : "-", 100.0 * avgUs / periodUs,
-                        100.0 * maxUs / periodUs, static_cast<unsigned long long>(st.xruns.load()),
-                        sceneStatus(engine, last, periodUs).c_str(), term.active ? "" : "\n");
+            engine.requestBlockReport();
+            // The numbers first, and no wider than the terminal: a line that
+            // wraps cannot be redrawn in place.
+            // Margin: the least audio left to play when a block was written.
+            const int32_t queued = st.minQueuedFrames.exchange(INT32_MAX);
+            char margin[32] = "-";
+            if (queued != INT32_MAX)
+                std::snprintf(margin, sizeof margin, "%.2f ms", 1000.0 * std::max(0, queued) / config.audio.rate);
+            char head[128];
+            std::snprintf(head, sizeof head, "dsp %3.0f%% (max %3.0f%%) margin %s xruns %llu | ", 100.0 * avgUs / periodUs, 100.0 * maxUs / periodUs,
+                          margin, static_cast<unsigned long long>(st.xruns.load()));
+            std::string line = head + show.status() + " | " + chainStatus(engine, rig, last);
+            const size_t width = term.active ? terminalWidth() : 0;
+            if (width > 1 && line.size() > width - 1)
+                line.resize(width - 1);
+            std::printf("%s%s\033[K%s", term.active ? "\r" : "", line.c_str(), term.active ? "" : "\n");
+            // A plug-in that took most of a period in one block gets its own
+            // line, so a click can be traced to what caused it.
+            for (size_t i = 0; i < engine.numChains(); ++i) {
+                size_t slot = 0;
+                uint32_t slotNs = 0;
+                if (engine.chain(i).takeSlowest(slot, slotNs) && slotNs / 1000.0 > 0.8 * periodUs)
+                    std::printf("%sslow block: %s / %s took %.1f ms (the period is %.2f ms)\n", term.active ? "\n" : "",
+                                rig.chainNames[i].c_str(), engine.chain(i).slot(slot).name().c_str(), slotNs / 1e6, periodUs / 1000.0);
+            }
             std::fflush(stdout);
         }
     }
@@ -350,10 +381,13 @@ void writeWav(const std::string& path, const std::vector<float>& a, const std::v
     }
 }
 
-int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm) {
+int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm,
+             int workers) {
     Config config;
     if (!load(path, config))
         return 2;
+    if (workers >= 0)
+        config.workers = workers;
     Rig rig;
     std::string err;
     if (!buildRig(config, rig, &err)) {
@@ -373,6 +407,7 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     uint64_t othersProcessed = 0;
     std::vector<float> wav1, wav2;
     bool realtime = false, pinned = false;
+    std::atomic<bool> done{false};
     std::thread worker([&] {
         enableFlushToZero();
         markClapAudioThread();
@@ -390,8 +425,8 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
         float* outs[2] = {o1.data(), o2.data()};
         const size_t blocksPerSwitch = std::max<size_t>(1, static_cast<size_t>(switchSeconds * config.audio.rate / frames));
         const size_t total = static_cast<size_t>(totalSeconds * config.audio.rate / frames);
-        // Phase 1: scene 1 alone, nothing warm, to show what one scene costs
-        // with every other scene loaded but idle.
+        // Phase 1: chain 1 alone, nothing warm, to show what one chain costs
+        // with every other chain loaded but idle.
         const size_t aloneBlocks = std::min(total, static_cast<size_t>(3.0 * config.audio.rate / frames));
         // Paced like live audio: one block per period. Unpaced, a real-time
         // thread that never sleeps is throttled by the kernel (sched_rt_runtime_us),
@@ -427,26 +462,32 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             while (engine.nextEvent(ev)) {
             }
         }
-        for (size_t i = 0; i < engine.numScenes(); ++i)
+        for (size_t i = 0; i < engine.numChains(); ++i)
             othersProcessed += i == 0 ? 0 : engine.stats(i).processBlocks.load();
 
-        // Phase 2: switch through every scene, with the warm setting from the config.
-        if (config.warm == "next" && engine.numScenes() > 1)
+        // Phase 2: switch through every chain, with the warm setting from the config.
+        if (config.warm == "next" && engine.numChains() > 1)
             engine.setWarm(1);
         int next = 1;
         for (size_t b = 0; b + aloneBlocks < total && !g_quit; ++b) {
-            if (b % blocksPerSwitch == 0 && engine.numScenes() > 1) {
+            if (b % blocksPerSwitch == 0 && engine.numChains() > 1) {
                 engine.switchTo(next);
-                next = (next + 1) % static_cast<int>(engine.numScenes());
+                next = (next + 1) % static_cast<int>(engine.numChains());
             }
             runBlock(blockUs);
             // Events are drained on this thread here; live, the main thread does it.
             EngineEvent ev;
             while (engine.nextEvent(ev))
-                if (ev.type == EngineEvent::Type::SceneActive && config.warm == "next" && engine.numScenes() > 1)
-                    engine.setWarm((ev.scene + 1) % static_cast<int>(engine.numScenes()));
+                if (ev.type == EngineEvent::Type::ChainActive && config.warm == "next" && engine.numChains() > 1)
+                    engine.setWarm((ev.chain + 1) % static_cast<int>(engine.numChains()));
         }
+        done = true;
     });
+    // Plug-in callbacks and timers, as cue run services them.
+    while (!done) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        rig.pumpMainThread();
+    }
     worker.join();
 
     auto stats = [&](std::vector<double> v, const char* what) {
@@ -458,22 +499,27 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
                     pct(0.5), 100 * pct(0.5) / periodUs, pct(0.99), 100 * pct(0.99) / periodUs, pct(0.999), 100 * pct(0.999) / periodUs,
                     v.back(), 100 * v.back() / periodUs);
     };
-    std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s\n", frames, periodUs, realtime ? "real-time" : "not real-time",
-                pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned");
-    stats(aloneUs, ("scene 1 alone, " + std::to_string(engine.numScenes() - 1) + " others idle:").c_str());
-    std::printf("%-34s %llu blocks processed by the idle scenes (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
+    std::printf("\nbench: %u-frame blocks (budget %.0f us), %s, %s, %zu helper thread(s)\n", frames, periodUs, realtime ? "real-time" : "not real-time",
+                pinned ? ("CPU " + std::to_string(config.audio.cpu)).c_str() : "unpinned", engine.numWorkers());
+    stats(aloneUs, ("chain 1 alone, " + std::to_string(engine.numChains() - 1) + " others idle:").c_str());
+    std::printf("%-34s %llu blocks processed by the idle chains (should be 0)\n", "", static_cast<unsigned long long>(othersProcessed));
     char what[96];
     std::snprintf(what, sizeof what, "switching every %.1f s, warm %s:", switchSeconds, config.warm.c_str());
     stats(blockUs, what);
     const uint64_t totalBlocks = aloneUs.size() + blockUs.size();
-    std::printf("\n%-24s %10s %12s %12s %10s\n", "scene", "blocks", "avg us/blk", "worst us", "share");
-    for (size_t i = 0; i < engine.numScenes(); ++i) {
-        SceneStats& st = engine.stats(i);
+    std::printf("\n%-24s %10s %12s %12s %10s  %s\n", "chain", "blocks", "avg us/blk", "worst us", "share", "slowest plug-in in one block");
+    for (size_t i = 0; i < engine.numChains(); ++i) {
+        ChainStats& st = engine.stats(i);
         const uint64_t blocks = st.processBlocks.load();
-        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%\n", config.scenes[i].name.c_str(), static_cast<unsigned long long>(blocks),
-                    blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks);
+        size_t slot = 0;
+        uint32_t slotNs = 0;
+        char slowest[96] = "";
+        if (engine.chain(i).takeSlowest(slot, slotNs))
+            std::snprintf(slowest, sizeof slowest, "%s %.0f us", engine.chain(i).slot(slot).name().c_str(), slotNs / 1000.0);
+        std::printf("%-24s %10llu %12.1f %12.1f %9.0f%%  %s\n", rig.chainNames[i].c_str(), static_cast<unsigned long long>(blocks),
+                    blocks ? st.processNs.load() / 1000.0 / blocks : 0.0, st.maxBlockNs.load() / 1000.0, 100.0 * blocks / totalBlocks, slowest);
     }
-    std::printf("\n'share' is the fraction of blocks in which the scene was processed at all. Idle scenes cost nothing.\n");
+    std::printf("\n'share' is the fraction of blocks in which the chain was processed at all. Idle chains cost nothing.\n");
     if (worstUs > periodUs)
         std::printf("WARNING: the worst block took longer than the period; live, that would be a dropout.\n");
     if (!wavPath.empty()) {
@@ -506,6 +552,178 @@ int cmdDevices() {
         std::printf("  %3d:%-2d  %-28s %-28s %s%s\n", p.client, p.port, p.clientName.c_str(), p.portName.c_str(), p.canRead ? "in " : "",
                     p.canWrite ? "out" : "");
     return 0;
+}
+
+// Loads the config and every plug-in, compiles the mappings, and prints
+// what the performance holds. No audio or MIDI is opened.
+int cmdCheck(const std::string& path, bool loadPlugins) {
+    Config config;
+    if (!load(path, config))
+        return 2;
+    Rig rig;
+    std::string err;
+    std::vector<ShowPlugin> plugins;
+    size_t chains = 0;
+    if (loadPlugins) {
+        if (!buildRig(config, rig, &err)) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        plugins = rig.showPlugins();
+        chains = rig.chainNames.size();
+    } else {
+        // Plug-ins named by their name = lines, or their file name.
+        for (const auto& scene : config.scenes)
+            for (const auto& c : scene.chains) {
+                size_t slot = 0;
+                std::vector<std::string> labels;
+                for (const PluginSpec* ps : chainPlugins(c)) {
+                    std::string label = ps->label;
+                    if (label.empty())
+                        label = ps->kind == "builtin" ? ps->args[0] : std::filesystem::path(ps->path).stem().string();
+                    plugins.push_back({static_cast<int>(chains), slot++, label, ps->midi, ps->bypassed});
+                    labels.push_back(label);
+                }
+                std::vector<std::pair<size_t, size_t>> feeds;
+                if (!chainSidechains(c, labels, feeds, &err)) {
+                    std::fprintf(stderr, "config: %s\n", err.c_str());
+                    return 2;
+                }
+                ++chains;
+            }
+    }
+    struct NoOutput : ShowOutput {
+        void switchTo(int) override {}
+        void setWarm(int) override {}
+        void setBypass(int, size_t, bool) override {}
+        void setParam(int, size_t, uint32_t, double) override {}
+        void setMute(bool) override {}
+        void sendMidi(const MidiMessage&) override {}
+        void forwardMidi(int, size_t, const MidiMessage&) override {}
+    } none;
+    Show show(none);
+    if (!show.load(config, plugins, &err)) {
+        std::fprintf(stderr, "config: %s\n", err.c_str());
+        return 2;
+    }
+    show.start(); // values as the first preset leaves them
+    std::printf("\nperformance%s%s: %zu scene(s), %zu chain(s), %zu preset(s)\n", config.performance.empty() ? "" : " ",
+                config.performance.c_str(), config.scenes.size(), chains, show.numPresets());
+    int presetNo = 0;
+    for (const auto& scene : config.scenes) {
+        std::printf("scene %s%s\n", scene.name.c_str(), scene.pedal ? (", pedal " + std::to_string(scene.pedal)).c_str() : "");
+        for (const auto& c : scene.chains) {
+            auto where = [&](const TapSpec& t) {
+                const LineSpec& l = c.lines[t.line];
+                const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
+                return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
+            };
+            std::printf("  chain %s: %zu plug-in(s); out 1 = %s, out 2 = %s\n", c.name.c_str(), chainPlugins(c).size(), where(c.out[0]).c_str(),
+                        where(c.out[1]).c_str());
+        }
+        for (const auto& p : scene.presets)
+            std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),
+                        p.pedal ? (", pedal " + std::to_string(p.pedal)).c_str() : "", p.display.empty() ? "" : (", shows " + p.display).c_str(),
+                        p.actions.size());
+    }
+    for (const auto& c : config.controls) {
+        std::string values;
+        for (const auto& l : c.labels)
+            values += (values.empty() ? "" : ", ") + l;
+        if (values.empty()) {
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%g to %g", c.min, c.max);
+            values = buf;
+        }
+        std::printf("control %s: %s, starts at %s%s\n", c.name.c_str(), values.c_str(), show.valueText(c.name).c_str(),
+                    c.pedal ? (", pedal " + std::to_string(c.pedal)).c_str() : "");
+    }
+    for (const auto& t : config.triggers)
+        std::printf("trigger %s: %zu input(s), %zu action(s)\n", t.name.c_str(), t.inputs.size(), t.actions.size());
+    for (const auto& g : config.groups)
+        std::printf("group %s: %zu action(s)\n", g.name.c_str(), g.actions.size());
+    for (const auto& w : show.warnings())
+        std::printf("warning: %s\n", w.c_str());
+    std::printf(loadPlugins ? "config OK\n" : "config OK (plug-ins not loaded)\n");
+    return 0;
+}
+
+int cmdParams(const std::string& spec) {
+    const auto hash = spec.rfind('#');
+    const std::string path = hash == std::string::npos ? spec : spec.substr(0, hash);
+    const std::string id = hash == std::string::npos ? "" : spec.substr(hash + 1);
+    std::string err;
+    std::unique_ptr<Processor> p;
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0)
+        p = Vst3Processor::load(path, id, &err);
+    else
+        p = ClapProcessor::load(path, id, &err);
+    if (!p || !p->activate(48000, 64)) {
+        std::fprintf(stderr, "%s: %s\n", spec.c_str(), err.empty() ? "could not activate" : err.c_str());
+        return 1;
+    }
+    const auto params = p->params();
+    std::printf("%s: %zu parameter(s)%s\n", p->name().c_str(), params.size(),
+                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "");
+    std::printf("%10s  %-32s %10s %10s %10s\n", "id", "name", "min", "max", "default");
+    for (const auto& i : params)
+        std::printf("%10u  %-32s %10g %10g %10g%s\n", i.id, i.name.c_str(), i.min, i.max, i.def,
+                    i.steps > 0 ? ("  " + std::to_string(i.steps + 1) + " steps").c_str() : "");
+    p->deactivate();
+    return 0;
+}
+
+int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vector<std::string>& search, std::string mapping, bool scan) {
+    namespace fs = std::filesystem;
+    std::ifstream f(rppPath);
+    if (!f) {
+        std::fprintf(stderr, "cannot open %s\n", rppPath.c_str());
+        return 1;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string project = fs::path(rppPath).stem().string();
+    if (outDir.empty())
+        outDir = expandPath("~/cue/" + project);
+    if (!mapping.empty()) {
+        std::error_code ec;
+        const auto abs = fs::absolute(mapping, ec);
+        if (!fs::exists(abs, ec)) {
+            std::fprintf(stderr, "mapping file %s not found\n", mapping.c_str());
+            return 1;
+        }
+        mapping = abs.string();
+    }
+    std::printf("looking for plug-ins%s...\n", scan ? " (opening native .clap files if needed)" : "");
+    SystemLocator locator(search, "~/.config/REAPER", scan);
+    Import result;
+    std::string err;
+    if (!convertRpp(ss.str(), project, locator, mapping, result, &err)) {
+        std::fprintf(stderr, "%s: %s\n", rppPath.c_str(), err.c_str());
+        return 1;
+    }
+    std::error_code ec;
+    fs::create_directories(fs::path(outDir) / "states", ec);
+    if (ec) {
+        std::fprintf(stderr, "cannot create %s: %s\n", outDir.c_str(), ec.message().c_str());
+        return 1;
+    }
+    for (const auto& file : result.files) {
+        std::ofstream o(fs::path(outDir) / file.path, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(file.data.data()), static_cast<std::streamsize>(file.data.size()));
+    }
+    const fs::path configPath = fs::path(outDir) / (project + ".ini");
+    if (fs::exists(configPath, ec)) {
+        fs::copy_file(configPath, configPath.string() + ".bak", fs::copy_options::overwrite_existing, ec);
+        std::printf("kept the previous config as %s.bak\n", configPath.c_str());
+    }
+    std::ofstream(configPath) << result.config;
+    std::printf("\nwrote %s\n  %d chain(s), %d plug-in(s), %zu state file(s); %d left out, %d not found\n", configPath.c_str(), result.chains,
+                result.plugins, result.files.size(), result.skipped, result.missing);
+    for (const auto& n : result.notes)
+        std::printf("  - %s\n", n.c_str());
+    std::printf("\nnext: cue check \"%s\"\n", configPath.c_str());
+    return result.missing ? 3 : 0;
 }
 
 int cmdScan(const std::string& path) {
@@ -585,10 +803,13 @@ int usage() {
     std::fprintf(stderr,
                  "usage:\n"
                  "  cue run <config.ini>\n"
-                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--fast yes]\n"
+                 "  cue bench <config.ini> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
+                 "  cue check <config.ini> [--no-load]\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
+                 "  cue params <file.clap|bundle.vst3>[#id]\n"
+                 "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
                  "  cue midi-monitor [port-match]\n"
                  "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -610,7 +831,8 @@ int main(int argc, char** argv) {
         return cmdRun(argv[2]);
     if (cmd == "bench" && argc >= 3)
         return cmdBench(argv[2], std::stod(opt("--switch-every", "2")), std::stod(opt("--seconds", "30")), opt("--wav", ""),
-                        opt("--fast", "no") == "no", opt("--warm", ""));
+                        opt("--fast", "no") == "no", opt("--warm", ""),
+                        std::stoi(opt("--workers", "-1")));
     if (cmd == "doctor") {
         DoctorOptions o;
         o.deviceMatch = opt("--device", "M2");
@@ -619,6 +841,24 @@ int main(int argc, char** argv) {
     }
     if (cmd == "devices")
         return cmdDevices();
+    if (cmd == "import-rpp" && argc >= 3) {
+        std::vector<std::string> search;
+        for (int i = 3; i + 1 < argc; ++i)
+            if (std::strcmp(argv[i], "--search") == 0)
+                search.push_back(argv[i + 1]);
+        bool scan = true;
+        for (int i = 3; i < argc; ++i)
+            scan = scan && std::strcmp(argv[i], "--no-scan") != 0;
+        return cmdImportRpp(argv[2], opt("--out", ""), search, opt("--mapping", ""), scan);
+    }
+    if (cmd == "check" && argc >= 3) {
+        bool loadPlugins = true;
+        for (int i = 3; i < argc; ++i)
+            loadPlugins = loadPlugins && std::strcmp(argv[i], "--no-load") != 0;
+        return cmdCheck(argv[2], loadPlugins);
+    }
+    if (cmd == "params" && argc >= 3)
+        return cmdParams(argv[2]);
     if (cmd == "scan" && argc >= 3)
         return cmdScan(argv[2]);
     if (cmd == "midi-monitor")

@@ -37,15 +37,15 @@ std::unique_ptr<Vst3Processor> load() {
     return p;
 }
 
-std::unique_ptr<Scene> sceneOf(std::unique_ptr<Processor> p) {
+std::unique_ptr<Chain> chainOf(std::unique_ptr<Processor> p) {
     std::vector<std::unique_ptr<Processor>> chain;
     chain.push_back(std::move(p));
-    return std::make_unique<Scene>("vst3", std::move(chain), std::vector<OutputTap>{{1, OutputMix::Sum}, {1, OutputMix::Sum}});
+    return std::make_unique<Chain>("vst3", std::move(chain), std::vector<OutputTap>{{0, 1, OutputMix::Sum}, {0, 1, OutputMix::Sum}});
 }
 
-std::unique_ptr<Scene> silentScene() {
-    return std::make_unique<Scene>("silent", std::vector<std::unique_ptr<Processor>>{},
-                                   std::vector<OutputTap>{{0, OutputMix::Sum}, {0, OutputMix::Sum}});
+std::unique_ptr<Chain> silentChain() {
+    return std::make_unique<Chain>("silent", std::vector<std::unique_ptr<Processor>>{},
+                                   std::vector<OutputTap>{{0, 0, OutputMix::Sum}, {0, 0, OutputMix::Sum}});
 }
 
 EngineSettings settings() {
@@ -80,12 +80,15 @@ TEST(vst3_delay_runs_rings_out_and_follows_lifecycle) {
     if (!p)
         return;
     Engine e(settings());
-    e.addScene(sceneOf(std::move(p)));
-    e.addScene(silentScene());
+    e.addChain(chainOf(std::move(p)));
+    e.addChain(silentChain());
+    const long onBefore = vstat("processing_on"), offBefore = vstat("processing_off");
     CHECK(e.activate());
-    CHECK(e.scene(0).slot(0).tailSamples() == 16 * 250 * 48);
+    CHECK(e.chain(0).slot(0).tailSamples() == 16 * 250 * 48);
+    // Processing goes on once, at activation: with yabridge each call is a
+    // round trip to Wine, so none happen on the audio thread at a switch.
+    CHECK(vstat("processing_on") == onBefore + 1);
 
-    const long onBefore = vstat("processing_on");
     e.switchTo(0);
     std::vector<float> out;
     run(e, 0.25f, 400, &out); // DC in: dry 0.25 plus echoes at mix 0.5
@@ -100,16 +103,18 @@ TEST(vst3_delay_runs_rings_out_and_follows_lifecycle) {
         echo = std::max(echo, std::fabs(out[n]));
     CHECK_MSG(echo > 0.05f, "echo after switch %.4f", echo);
     run(e, 0.0f, 3000);
-    CHECK(e.state(0) == SceneState::Idle);
-    CHECK(vstat("processing_off") >= 1);
+    CHECK(e.state(0) == ChainState::Idle);
+    CHECK(vstat("processing_off") == offBefore); // idle, but nothing called
     CHECK(vstat("process_while_off") == 0);
+    e.deactivate();
+    CHECK(vstat("processing_off") == offBefore + 1);
 }
 
 TEST(vst3_param_change_reaches_the_processor) {
     auto p = load();
     Vst3Processor* v = p.get();
     Engine e(settings());
-    e.addScene(sceneOf(std::move(p)));
+    e.addChain(chainOf(std::move(p)));
     CHECK(e.activate());
     e.switchTo(0);
     run(e, 0.0f, 100);

@@ -1,5 +1,6 @@
 #include "cpu.h"
 
+#include <sched.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -68,6 +69,28 @@ int pickAudioCpu() {
     if (cores.empty())
         return -1;
     return cores.back();
+}
+
+bool keepOffAudioCore(int audioCpu) {
+    if (audioCpu < 0)
+        return false;
+    std::vector<int> cpus = performanceCpus();
+    if (cpus.empty()) {
+        const long n = sysconf(_SC_NPROCESSORS_ONLN);
+        for (int c = 0; c < n; ++c)
+            cpus.push_back(c);
+    }
+    std::vector<int> avoid = parseCpuList(readFileTrimmed("/sys/devices/system/cpu/cpu" + std::to_string(audioCpu) + "/topology/thread_siblings_list"));
+    avoid.push_back(audioCpu);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int count = 0;
+    for (int c : cpus)
+        if (c >= 0 && c < CPU_SETSIZE && std::find(avoid.begin(), avoid.end(), c) == avoid.end()) {
+            CPU_SET(c, &set);
+            ++count;
+        }
+    return count > 0 && sched_setaffinity(0, sizeof set, &set) == 0;
 }
 
 } // namespace cue

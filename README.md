@@ -2,23 +2,33 @@
 
 A live plug-in host for a Linux bass rig, built to replace REAPER + ReaLearn on stage. This is the **prototype**: it exists to prove one claim on the real mini PC before anything else is built.
 
-> Every scene stays loaded, only the scene you hear is processed, and switching is instant and pop-free: the new scene is reset and pre-rolled on live input while muted, then crossfaded in, while the old scene's delays and reverbs ring out.
+> Every chain stays loaded, only the chain you hear is processed, and switching is instant and pop-free: the new chain is reset and pre-rolled on live input while muted, then crossfaded in, while the old chain's delays and reverbs ring out.
 
 Cue is the working name, after the repository.
+
+## Words
+
+A **performance** is the whole config: **scenes** in the order you play them. A scene is one routing grid: **chains** of plug-ins (with **branches**, such as an IR loader only FOH gets) and **presets** that pick which chain plays and what is switched on. Named **controls** (Wah: Off, Auto, Pedal) are moved by pedals and MIDI and switch plug-ins, move parameters, mute and light LEDs. A **trigger** is one input and everything it does; a **group** is a named list of actions any trigger or preset can run. `docs/config.md` explains every line.
 
 ## What is in the prototype
 
 | Part | State |
 | --- | --- |
-| Scene engine: pre-roll, crossfade, tail ring-out, warm next scene | done, tested offline |
-| CLAP hosting (in process, one library instance per file) | done, tested with test plug-ins |
+| Engine: pre-roll, crossfade, tail ring-out, warm next chain | done, tested offline |
+| Branches, outputs tapped anywhere, plug-in bypass and output mute with short fades | done, tested offline |
+| Bypass mode per plug-in: thru (passes its input) or mute (passes nothing); bypassed plug-ins ring out, then cost nothing | done, tested offline |
+| Side-chains: a plug-in's key input fed from an earlier plug-in (the Djent keyed gate) | done, tested with test plug-ins |
+| Switches never wait on a plug-in: resets run on a helper thread while a chain is idle, every plug-in is primed at load | done, benched with the TwoStorms plug-ins |
+| CLAP hosting (in process, one library instance per file), MIDI into plug-ins | done, tested with test plug-ins |
 | VST3 hosting (native and yabridge-bridged) | done, tested with a test plug-in |
+| Performance, scenes, presets | done, tested offline |
+| Mapping: named controls (on/off, steps, continuous with range and wrap), triggers with many actions, groups, conditions | done, tested offline |
+| FCB1010 with EurekaPROM 3.0: pedals, expression, LEDs and display follow the state | done, needs the FCB to test |
+| Import from REAPER: tracks become chains with plug-in settings, routing and side-chains; TwoStorms IRs embedded from their files | done, tested offline on Cue Template.RPP and Cue Template 2S.RPP |
 | ALSA direct audio, real-time thread pinned to a performance core | done, needs the M2 to test |
-| FCB1010 with EurekaPROM 3.0: pedals switch scenes, LEDs and display follow | done, needs the FCB to test |
-| Out 2 tapped anywhere in a chain (for example before the IR loader) | done |
 | `doctor` real-time settings check | done |
 | Per-plug-in process isolation | **not yet**: next step, after we know the in-process numbers |
-| Stage UI, routing grid, mapping system, setlist, looper, LV2, JACK, PipeWire | later |
+| Stage UI, routing grid, looper, built-in tuner, LV2, JACK, PipeWire | later |
 
 Everything runs in one process for now. That is deliberate: the first measurement is what your chains cost in process, and isolation is then added where it is worth its cost.
 
@@ -40,45 +50,75 @@ All third-party code is vendored under `third_party/`: the CLAP headers (MIT) an
 ```sh
 cue doctor                       # real-time settings: priority, governor, IRQs, USB, sound servers
 cue devices                      # sound cards and MIDI ports
-cue scan "<file.clap or bundle.vst3>"   # what is inside a plug-in file
-cue midi-monitor FCB             # print what the FCB sends, decoded
-cue fcb-test FCB --channel 1     # walk the FCB's LEDs and display
-cue bench configs/my-rig.ini --wav out.wav   # offline: CPU per scene + a WAV of the switching
-cue run configs/my-rig.ini       # live
+cue scan "<file.clap or bundle.vst3>"     # what is inside a plug-in file
+cue params "<file.clap or bundle.vst3>"   # a plug-in's parameters and their ids
+cue import-rpp "Cue Template.RPP" --mapping configs/cue-template-mapping.ini
+cue check <config.ini>           # load everything and print what Cue understood
+cue check <config.ini> --no-load # the same without loading plug-ins
+cue midi-monitor M2              # print what the FCB sends, decoded
+cue fcb-test M2 --channel 1      # walk the FCB's LEDs and display
+cue bench <config.ini> --wav out.wav   # offline: CPU per chain + a WAV of the switching
+cue run <config.ini>             # live
 ```
 
-While `run` is going: keys `1`-`9` pick a scene, `n`/`p` step, `q` quits. The status line shows the active scene, DSP load as a share of the period, xruns, and each scene's state and cost (`avg/max` microseconds per block).
+While `run` is going: keys `1`-`9` pick a preset, `n`/`p` step, `q` quits; `key` triggers in the config add more. The status line shows DSP load as a share of the period, the margin (the least audio still queued for playback when a block was written; at zero the sound card runs dry), xruns, the preset and controls, and the cost of each chain that is running (`avg/max` microseconds per block), cut to the terminal's width. Each xrun also gets a line of its own: when it happened, how long the block before it took and how late it started, and the slowest block around it with the chains that played in it.
 
 ## Config
 
-An INI file with `[audio]`, `[switching]`, `[midi]` and one `[scene Name]` per scene. Use `;` for comments after a value. See `configs/builtin-demo.ini` (no plug-ins needed), `configs/test-plugins.ini` (bundled test plug-ins) and `configs/my-rig.ini` (a template for your chains).
+An INI file; `docs/config.md` is the full reference. See `configs/builtin-demo.ini` (no plug-ins needed), `configs/test-plugins.ini` (bundled test plug-ins), `configs/my-rig.ini` (a hand-written template) and `configs/cue-template-mapping.ini` (your ReaLearn pedals).
 
 ```ini
-[scene Verse]
-pedal = 2                                   ; FCB pedal 1-10
-plugin = clap:~/.clap/TwoStorms Gain Stage.clap
-plugin = vst3:~/.vst3/yabridge/Archetype Nolly X.vst3
-tap = out2                                  ; out 2 takes the signal here
-plugin = clap:~/.clap/TwoStorms IR Loader.clap
-```
+[scene Covers]
 
-Plug-in lines are `clap:<file>[#plugin id]`, `vst3:<bundle>[#effect name]` or `builtin:<name> <numbers>` (gain, drive, lowpass, delay, burn). `param = id:value` after a plug-in sets a parameter (CLAP: plain value, VST3: normalised 0-1). `state = file` loads a saved plug-in state.
+[chain Punk]
+plugin = clap:~/.clap/TwoStorms Gain Stage.clap
+plugin = vst3:~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3
+state = states/punk-ultra.vst3state
+plugin = clap:~/.clap/TwoStorms Wah.clap
+name = Wah
+bypass = yes
+branch = FOH                 ; out 1 gets the IR, out 2 does not
+tap = out2
+
+[branch FOH]
+plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms IR Loader.clap
+bypass_mode = mute           ; bypassing the IR silences FOH instead of sending it the raw amp sim
+tap = out1
+
+[preset Punk]
+pedal = 6
+display = PU
+do = Wah = Off
+
+[control Wah]
+values = Off, Auto, Pedal
+pedal = 4
+enable = Wah when Auto
+```
 
 ## How switching works
 
-1. A switch request arrives (FCB pedal, program change or key).
-2. If the target scene is idle, its plug-ins are reset and it starts processing live input, muted, for `preroll_ms`. Its input is faded in, so a delay line never starts on an abrupt edge that would echo back as a click.
-3. The new scene's output fades in over `crossfade_ms` (linear: the scenes share one input, so their signals are correlated). At the same time the old scene's **input** fades out in dB; its output stays up, so its delays and reverbs ring out naturally.
-4. The old scene keeps processing silence until it is below `tail_quiet_db` for `tail_hold_ms`, or until `tail_cap_ms`, then fades to nothing and stops costing CPU.
-5. With `warm = next`, the scene after the active one keeps processing in the background, muted, so switching to it skips the pre-roll. Its delays are cleared at the switch so it does not replay notes from before.
+Presets switch chains; two presets on the same chain switch without a crossfade, by their actions alone.
 
-Idle scenes are never processed. Parameter changes still reach idle CLAP plug-ins (flushed every 5 ms); idle VST3 plug-ins receive them when their scene starts, during pre-roll.
+1. A switch request arrives (FCB pedal, program change or key).
+2. If the target chain is idle, it starts processing live input, muted, for `preroll_ms`. Its input is faded in, so a delay line never starts on an abrupt edge that would echo back as a click. The chain is already clean: a chain whose tail rang out to silence needs nothing, and one that was cut off is cleared by a helper thread while it sits idle, so a slow plug-in reset (a delay clearing seconds of buffer) never lands in an audio block.
+3. The new chain's output fades in over `crossfade_ms` (linear: the chains share one input, so their signals are correlated). At the same time the old chain's **input** fades out in dB; its output stays up, so its delays and reverbs ring out naturally.
+4. The old chain keeps processing silence until it is below `tail_quiet_db` for `tail_hold_ms`, or until `tail_cap_ms`, then fades to nothing and stops costing CPU.
+5. With `warm = next`, the chain of the next preset keeps processing in the background, muted, so switching to it skips the pre-roll. Its delays and reverbs hear silence until the switch, so it never replays notes from before and has nothing to clear.
+
+A bypassed plug-in, with `bypass_mode = thru` (the default), passes its input on; with `mute` it passes nothing, so whatever follows it goes quiet. Either way it is fed silence until its tail dies away, then no longer processed, so bringing a delay back starts it clean.
+
+Idle chains are never processed. Parameter changes still reach idle CLAP plug-ins (flushed every 5 ms); idle VST3 plug-ins receive them when their chain starts, during pre-roll.
 
 ## Known limits of the prototype
 
-- **VST3 reset.** VST3 has no real reset call. The host toggles processing off and on, which the spec suggests plug-ins use to clear buffers, but not all do. If a VST3 delay replays an old tail when its scene comes back, that plug-in needs a deeper reset (deactivate and reactivate while idle), which is planned.
+- **VST3 reset.** VST3 has no real reset call. Processing stays on while a plug-in is loaded (with yabridge every call is a round trip to Wine, too slow for a switch), and an idle chain's VST3 plug-ins are reset by toggling processing off and on from the helper thread, which the spec suggests plug-ins use to clear buffers, but not all do.
+- **yabridge timing.** A bridged plug-in's block takes a round trip to its Wine process, which adds jitter. Cue keeps its other threads, and the Wine hosts it starts, off the audio core and on the performance cores. Chains that play at the same time (the old one ringing out, the new one, the warm one) are processed side by side on the audio thread and `workers` helper threads, as REAPER spreads its tracks over cores, so a switch costs about as much as its slowest chain. Chains not heard yet (the warm one, one pre-rolling) may finish while the next block starts, so a heavy or cold-starting one never holds up the chain being played. Plug-ins in series in one chain still have to fit in one period together; for two heavy amp sims in one chain use `periods = 3` or `period = 128`. If xruns remain at 64 frames, `periods = 3` in `[audio]` gives each block an extra period of slack for 1.3 ms more latency.
 - **No isolation yet.** A plug-in crash takes the host down. Isolation is the next milestone.
-- **Plug-in GUIs** are not shown. Set sounds up in REAPER and load the saved state, or set parameters in the config.
+- **Plug-in GUIs** are not shown. Set sounds up in REAPER and import the project, or set parameters in the config.
+- **Tuner.** The TwoStorms Tuner only measures while its window is open, so the Tuner pedal mutes and shows TU for now. A tuner on the FCB display is planned.
+- **VST2** plug-ins (ReaEQ, ReaGate, ReaXcomp) are not hosted and are left out of an import. `Cue Template 2S` replaces them, and the LSP and FabFilter plug-ins, with TwoStorms ones.
+- **Side-chains** come from an earlier plug-in of the same chain (main line first, then each branch), not from another input.
 - **Bench numbers in a virtual machine** are noisy; only numbers from the mini PC count.
 
 See `TESTING.md` for the test procedure on the rig.

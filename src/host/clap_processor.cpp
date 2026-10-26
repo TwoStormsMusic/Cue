@@ -16,7 +16,6 @@ namespace cue {
 namespace {
 std::thread::id g_mainThread;
 std::once_flag g_mainThreadOnce;
-thread_local bool t_isAudioThread = false;
 std::atomic<uint64_t> g_droppedAudioThreadLogs{0};
 
 void noteMainThread() {
@@ -24,7 +23,7 @@ void noteMainThread() {
 }
 } // namespace
 
-void markClapAudioThread() { t_isAudioThread = true; }
+void markClapAudioThread() { markAudioThread(); }
 
 // ---------------------------------------------------------------- library
 
@@ -110,7 +109,7 @@ namespace {
 ClapProcessor* owner(const clap_host_t* host) { return static_cast<ClapProcessor*>(host->host_data); }
 
 bool hostIsMainThread(const clap_host_t*) { return std::this_thread::get_id() == g_mainThread; }
-bool hostIsAudioThread(const clap_host_t*) { return t_isAudioThread; }
+bool hostIsAudioThread(const clap_host_t*) { return isAudioThread(); }
 const clap_host_thread_check_t kThreadCheck = {hostIsMainThread, hostIsAudioThread};
 
 void hostLog(const clap_host_t* host, clap_log_severity severity, const char* msg) { owner(host)->onLog(severity, msg); }
@@ -132,6 +131,10 @@ const clap_host_tail_t kTailHost = {hostTailChanged};
 void hostStateMarkDirty(const clap_host_t*) {}
 const clap_host_state_t kStateHost = {hostStateMarkDirty};
 
+bool hostRegisterTimer(const clap_host_t* host, uint32_t periodMs, clap_id* id) { return owner(host)->onRegisterTimer(periodMs, id); }
+bool hostUnregisterTimer(const clap_host_t* host, clap_id id) { return owner(host)->onUnregisterTimer(id); }
+const clap_host_timer_support_t kTimerSupport = {hostRegisterTimer, hostUnregisterTimer};
+
 const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &kThreadCheck;
     if (!std::strcmp(id, CLAP_EXT_LOG)) return &kLog;
@@ -139,6 +142,7 @@ const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &kLatencyHost;
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTailHost;
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kStateHost;
+    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &kTimerSupport;
     return nullptr;
 }
 void hostRequestRestart(const clap_host_t* host) { owner(host)->onRequestRestart(); }
@@ -163,11 +167,29 @@ struct ClapProcessor::InputEvents {
 
 void ClapProcessor::onLog(int severity, const char* msg) const {
     // Printing can block; logs from the audio thread are counted, not printed.
-    if (t_isAudioThread) {
+    if (isAudioThread()) {
         g_droppedAudioThreadLogs++;
         return;
     }
     std::fprintf(stderr, "[%s] log(%d): %s\n", name_.c_str(), severity, msg ? msg : "");
+}
+
+bool ClapProcessor::onRegisterTimer(uint32_t periodMs, clap_id* id) {
+    if (!id || std::this_thread::get_id() != g_mainThread)
+        return false;
+    // Serviced every few milliseconds; faster timers run at that rate.
+    const auto period = std::chrono::milliseconds(std::max<uint32_t>(periodMs, 1));
+    *id = nextTimerId_++;
+    timers_.push_back({*id, period, std::chrono::steady_clock::now() + period});
+    return true;
+}
+
+bool ClapProcessor::onUnregisterTimer(clap_id id) {
+    const auto it = std::find_if(timers_.begin(), timers_.end(), [&](const Timer& t) { return t.id == id; });
+    if (it == timers_.end())
+        return false;
+    timers_.erase(it);
+    return true;
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -219,12 +241,22 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->state_ = static_cast<const clap_plugin_state_t*>(ext(CLAP_EXT_STATE));
     p->latency_ = static_cast<const clap_plugin_latency_t*>(ext(CLAP_EXT_LATENCY));
     p->tail_ = static_cast<const clap_plugin_tail_t*>(ext(CLAP_EXT_TAIL));
+    p->timerExt_ = static_cast<const clap_plugin_timer_support_t*>(ext(CLAP_EXT_TIMER_SUPPORT));
+    if (const auto* notes = static_cast<const clap_plugin_note_ports_t*>(ext(CLAP_EXT_NOTE_PORTS))) {
+        for (uint32_t i = 0, n = notes->count(p->plugin_, true); i < n; ++i) {
+            clap_note_port_info_t info{};
+            if (notes->get(p->plugin_, i, true, &info) && (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI)) {
+                p->midiPort_ = static_cast<int>(i);
+                break;
+            }
+        }
+    }
 
     p->inEvents_ = std::make_unique<InputEvents>();
     p->inEvents_->list = {p->inEvents_.get(), InputEvents::size, InputEvents::get};
     p->inEvents_->self = p.get();
     p->outEvents_ = {nullptr, outTryPush};
-    p->events_.resize(512);
+    p->events_.resize(1024);
     return p;
 }
 
@@ -316,6 +348,18 @@ void ClapProcessor::deactivate() {
 void ClapProcessor::pumpMainThread() {
     if (callbackRequested_.exchange(false))
         plugin_->on_main_thread(plugin_);
+    if (timerExt_ && !timers_.empty()) {
+        // A timer callback may register or unregister timers: collect first.
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<clap_id> due;
+        for (auto& t : timers_)
+            if (now >= t.due) {
+                due.push_back(t.id);
+                t.due = std::max(t.due + t.period, now);
+            }
+        for (clap_id id : due)
+            timerExt_->on_timer(plugin_, id);
+    }
     if (activated_ && latencyDirty_.exchange(false))
         cachedLatency_ = latency_ ? latency_->get(plugin_) : 0;
     if (tailDirty_.exchange(false))
@@ -331,8 +375,11 @@ std::vector<ParamInfo> ClapProcessor::params() const {
         return out;
     for (uint32_t i = 0, n = paramsExt_->count(plugin_); i < n; ++i) {
         clap_param_info_t info{};
-        if (paramsExt_->get_info(plugin_, i, &info))
-            out.push_back({info.id, info.name, info.module, info.min_value, info.max_value, info.default_value});
+        if (!paramsExt_->get_info(plugin_, i, &info))
+            continue;
+        const bool stepped = info.flags & CLAP_PARAM_IS_STEPPED;
+        out.push_back({info.id, info.name, info.module, info.min_value, info.max_value, info.default_value,
+                       stepped ? static_cast<int>(info.max_value - info.min_value) : 0});
     }
     return out;
 }
@@ -383,7 +430,7 @@ void ClapProcessor::drainParams(uint32_t maxEvents) {
         auto change = paramQueue_.pop();
         if (!change)
             break;
-        clap_event_param_value_t& ev = events_[n++];
+        clap_event_param_value_t& ev = events_[n++].param;
         ev = {};
         ev.header.size = sizeof ev;
         ev.header.time = 0;
@@ -436,9 +483,11 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
         return;
     }
     if (paramsPending_.load(std::memory_order_acquire))
-        drainParams(static_cast<uint32_t>(events_.size()));
+        drainParams(static_cast<uint32_t>(events_.size() / 2));
     else
         inEvents_->count = 0;
+    if (midiPending_.load(std::memory_order_acquire))
+        drainMidi();
 
     float* monoIn = scratch_.data() + scratch_.size() - 2 * static_cast<size_t>(maxFrames_);
     float* monoOut = monoIn + maxFrames_;
@@ -454,10 +503,15 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
             for (uint32_t c = 0; c < ch; ++c)
                 inBuffers_[0].data32[c] = const_cast<float*>(in[std::min<uint32_t>(c, kChainChannels - 1)]);
         }
-        // Spare inputs (side-chains) get silence.
+        // The second port is the side-chain: the key signal if the chain
+        // feeds one. Other spare inputs get silence.
         for (size_t p = 1; p < inBuffers_.size(); ++p)
-            for (uint32_t c = 0; c < inPortChannels_[p]; ++c)
-                std::memset(inBuffers_[p].data32[c], 0, frames * sizeof(float));
+            for (uint32_t c = 0; c < inPortChannels_[p]; ++c) {
+                if (p == 1 && key_[0])
+                    std::memcpy(inBuffers_[p].data32[c], key_[std::min<uint32_t>(c, kChainChannels - 1)], frames * sizeof(float));
+                else
+                    std::memset(inBuffers_[p].data32[c], 0, frames * sizeof(float));
+            }
     }
     // Main output port.
     const uint32_t outCh = outPortChannels_[0];
@@ -493,6 +547,97 @@ void ClapProcessor::process(const float* const* in, float* const* out, uint32_t 
         for (int c = 0; c < kChainChannels; ++c)
             std::memset(out[c], 0, frames * sizeof(float));
     }
+}
+
+void ClapProcessor::sendMidi(uint8_t status, uint8_t data1, uint8_t data2) {
+    if (midiPort_ < 0 || status < 0x80)
+        return;
+    const uint8_t type = status & 0xF0, ch = status & 0x0F;
+    if (type == 0xB0) {
+        const size_t i = ch * 128u + (data1 & 0x7F);
+        ccValue_[i].store(data2 & 0x7F, std::memory_order_relaxed);
+        ccDirty_[i / 64].fetch_or(uint64_t{1} << (i % 64), std::memory_order_release);
+    } else if (type == 0xE0) {
+        bendValue_[ch].store(static_cast<uint16_t>((data2 & 0x7F) << 7 | (data1 & 0x7F)), std::memory_order_relaxed);
+        bendDirty_.fetch_or(1u << ch, std::memory_order_release);
+    } else if (!midiQueue_.push({{status, data1, data2}})) {
+        return; // the plug-in's chain is idle and the queue is full: drop
+    }
+    midiPending_.store(true, std::memory_order_release);
+}
+
+void ClapProcessor::pushMidiEvent(uint8_t s, uint8_t d1, uint8_t d2) {
+    clap_event_midi_t& ev = events_[inEvents_->count++].midi;
+    ev = {};
+    ev.header.size = sizeof ev;
+    ev.header.time = 0;
+    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    ev.header.type = CLAP_EVENT_MIDI;
+    ev.header.flags = 0;
+    ev.port_index = static_cast<uint16_t>(midiPort_);
+    ev.data[0] = s;
+    ev.data[1] = d1;
+    ev.data[2] = d2;
+}
+
+void ClapProcessor::drainMidi() {
+    midiPending_.store(false, std::memory_order_relaxed);
+    const uint32_t capacity = static_cast<uint32_t>(events_.size());
+    bool more = false;
+    for (size_t w = 0; w < 16 * 128 / 64; ++w) {
+        uint64_t bits = ccDirty_[w].exchange(0, std::memory_order_acquire);
+        while (bits) {
+            const int b = __builtin_ctzll(bits);
+            bits &= bits - 1;
+            const size_t i = w * 64 + b;
+            if (inEvents_->count >= capacity) {
+                ccDirty_[w].fetch_or(uint64_t{1} << b, std::memory_order_relaxed);
+                more = true;
+                continue;
+            }
+            pushMidiEvent(static_cast<uint8_t>(0xB0 | (i / 128)), static_cast<uint8_t>(i % 128),
+                          ccValue_[i].load(std::memory_order_relaxed));
+        }
+    }
+    uint32_t bends = bendDirty_.exchange(0, std::memory_order_acquire);
+    while (bends) {
+        const int ch = __builtin_ctz(bends);
+        bends &= bends - 1;
+        if (inEvents_->count >= capacity) {
+            bendDirty_.fetch_or(1u << ch, std::memory_order_relaxed);
+            more = true;
+            continue;
+        }
+        const uint16_t v = bendValue_[ch].load(std::memory_order_relaxed);
+        pushMidiEvent(static_cast<uint8_t>(0xE0 | ch), static_cast<uint8_t>(v & 0x7F), static_cast<uint8_t>(v >> 7));
+    }
+    while (inEvents_->count < capacity) {
+        auto m = midiQueue_.pop();
+        if (!m)
+            break;
+        pushMidiEvent(m->data[0], m->data[1], m->data[2]);
+    }
+    if (inEvents_->count >= capacity)
+        more = true; // the queue may still hold messages
+    if (more)
+        midiPending_.store(true, std::memory_order_relaxed);
+}
+
+bool ClapProcessor::hasSidechain() const {
+    if (!ports_ || ports_->count(plugin_, true) < 2)
+        return false;
+    // The port after the main one.
+    for (uint32_t i = 0, n = ports_->count(plugin_, true); i < n; ++i) {
+        clap_audio_port_info_t info{};
+        if (ports_->get(plugin_, i, true, &info) && !(info.flags & CLAP_AUDIO_PORT_IS_MAIN) && info.channel_count > 0)
+            return true;
+    }
+    return false;
+}
+
+void ClapProcessor::setSidechain(const float* const* key) {
+    for (int c = 0; c < kChainChannels; ++c)
+        key_[c] = key ? key[c] : nullptr;
 }
 
 uint32_t ClapProcessor::latencySamples() const { return cachedLatency_.load(std::memory_order_relaxed); }
