@@ -53,6 +53,8 @@ cue devices                      # sound cards and MIDI ports
 cue scan "<file.clap or bundle.vst3>"     # what is inside a plug-in file
 cue params "<file.clap or bundle.vst3>"   # a plug-in's parameters and their ids
 cue import-rpp "Cue Template.RPP" --mapping configs/cue-template-mapping.ini
+cue export-rpp show.cue                     # a performance as a REAPER project (docs/converter.md)
+cue-convert                                 # the converter's window: drop a .RPP or .cue on it
 cue convert <config.ini> [out.cue] [--rig rig.json]  # save it as one .cue file (and this machine's settings as a rig profile)
 cue check <config.ini|file.cue>  # load everything and print what Cue understood
 cue check <config.ini> --no-load # the same without loading plug-ins

@@ -254,7 +254,7 @@ The LEDs past the pedals are numbered as EurekaPROM numbers them: 11 `expr a`, 1
 cue import-rpp "Cue Template.RPP" [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]
 ```
 
-Writes `DIR/<project>.ini` (default `~/cue/<project>/`) and the plug-ins' settings in `DIR/states/`. Every track that plays to a hardware output becomes a chain of one scene named after the project:
+Writes `DIR/<project>.ini` (default `~/cue/<project>/`) and the plug-ins' settings in `DIR/states/`. Every track that plays to a hardware output becomes a chain; a REAPER folder of tracks is a scene, and tracks outside folders make one scene named after the project:
 
 - CLAP and VST3 plug-ins keep their settings, bypass state and REAPER name; VST2, JS and LV2 are left out and listed.
 - A plug-in that writes other channels than the main pair (an IR loader writing channels 3-4 for FOH) starts a branch, and each output is tapped where REAPER's hardware send took its channel. A plug-in whose side-chain pins (3-4) read channels an earlier plug-in wrote gets a `sidechain` line.
@@ -262,3 +262,5 @@ Writes `DIR/<project>.ini` (default `~/cue/<project>/`) and the plug-ins' settin
 - Plug-ins are found through REAPER's plug-in caches and paths, `~/.clap`, `~/.vst3` (including yabridge's folders), `/usr/lib` and any `--search` folder; as a last resort native `.clap` files are opened to read their ids (`--no-scan` skips that). Anything not found is written with a guessed path and marked `NOT FOUND`.
 - With `--mapping FILE`, that file is included after the chains instead of a generated preset per chain, so its `[preset]` sections pick the imported chains by name. `configs/cue-template-mapping.ini` is the one for the Cue Template project.
 - Re-running the import refreshes the states; the previous config is kept as `.bak`.
+- Simple ReaLearn mappings become triggers: a pedal or controller that switches a plug-in, selects a track or sends MIDI. Mappings built on ReaLearn parameters and conditions, and its LED and display feedback, are listed instead.
+- A project that Cue Converter wrote carries its performance's pedals, names and settings in its notes, and the import takes them from there, so a performance comes back as it was. [converter.md](converter.md) has the details.
