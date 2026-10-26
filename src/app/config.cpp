@@ -66,6 +66,34 @@ std::vector<std::string> splitList(const std::string& v) {
     return out;
 }
 
+// "out3" with prefix "out": 3. 0 when it is not the prefix and a number from 1.
+size_t numbered(const std::string& key, const std::string& prefix) {
+    if (key.size() <= prefix.size() || key.compare(0, prefix.size(), prefix) != 0)
+        return 0;
+    size_t n = 0;
+    for (size_t i = prefix.size(); i < key.size(); ++i) {
+        if (key[i] < '0' || key[i] > '9' || n > 1000)
+            return 0;
+        n = n * 10 + static_cast<size_t>(key[i] - '0');
+    }
+    return n;
+}
+
+// Sets the channel of the index-th input or output, the ones before it
+// taking the channel of their position.
+void setChannel(std::vector<unsigned>& channels, size_t index, unsigned channel) {
+    while (channels.size() <= index)
+        channels.push_back(static_cast<unsigned>(channels.size()));
+    channels[index] = channel;
+}
+
+std::string joined(const std::vector<std::string>& names) {
+    std::string out;
+    for (const auto& n : names)
+        out += (out.empty() ? "" : ", ") + n;
+    return out;
+}
+
 std::string dirOf(const std::string& path) {
     const auto slash = path.rfind('/');
     return slash == std::string::npos ? "." : path.substr(0, slash);
@@ -132,6 +160,10 @@ struct Parser {
     bool sceneHasOwnChain = false; // an old-style [scene] with plugin lines
 
     std::string where; // file:line of the line being parsed
+    // The highest inN and outN of [audio], checked against the performance's
+    // inputs and outputs once they are all read.
+    size_t audioIns = 0, audioOuts = 0;
+    std::string audioInsWhere, audioOutsWhere;
 
     bool fail(const std::string& what) {
         *error = where + ": " + what;
@@ -243,9 +275,17 @@ struct Parser {
         else if (key == "rate" && isNum) config.audio.rate = static_cast<unsigned>(n);
         else if (key == "period" && isNum) config.audio.period = static_cast<unsigned>(n);
         else if (key == "periods" && isNum) config.audio.periods = static_cast<unsigned>(n);
-        else if (key == "input" && isNum && n >= 1) config.audio.inputChannel = static_cast<unsigned>(n) - 1;
-        else if (key == "out1" && isNum && n >= 1) config.audio.outputChannels.at(0) = static_cast<unsigned>(n) - 1;
-        else if (key == "out2" && isNum && n >= 1) config.audio.outputChannels.at(1) = static_cast<unsigned>(n) - 1;
+        else if ((key == "input" || numbered(key, "in")) && isNum && n >= 1) {
+            const size_t k = key == "input" ? 1 : numbered(key, "in");
+            setChannel(config.audio.inputChannels, k - 1, static_cast<unsigned>(n) - 1);
+            if (k > audioIns)
+                audioIns = k, audioInsWhere = where;
+        } else if (numbered(key, "out") && isNum && n >= 1) {
+            const size_t k = numbered(key, "out");
+            setChannel(config.audio.outputChannels, k - 1, static_cast<unsigned>(n) - 1);
+            if (k > audioOuts)
+                audioOuts = k, audioOutsWhere = where;
+        }
         else if (key == "priority" && isNum) config.audio.rtPriority = static_cast<int>(n);
         else if (key == "workers" && isNum && n >= 0 && n <= 8) config.workers = static_cast<int>(n);
         else if (key == "cpu") {
@@ -393,13 +433,19 @@ struct Parser {
             branch.after = l->plugins.size();
             c.lines.push_back(branch); // l may now dangle
         } else if (key == "tap") {
-            const std::string v = lower(value);
-            if (v != "out1" && v != "out2")
-                return fail("tap must be out1 or out2");
-            TapSpec& t = c.out[v == "out1" ? 0 : 1];
+            if (value.empty())
+                return fail("tap names an output: tap = out2, or the output's name");
+            TapSpec t;
+            t.output = value;
             t.line = line;
             t.after = l->plugins.size();
             t.set = true;
+            t.where = where;
+            c.out.push_back(t);
+        } else if (key == "input") {
+            if (value.empty())
+                return fail("input names one of the performance's inputs: input = in2, or its name");
+            c.input = value;
         } else {
             return fail("unknown chain setting '" + key + "'");
         }
@@ -713,6 +759,16 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
     Parser parser{config, error};
     if (!parser.parse(text, path))
         return false;
+    if (parser.audioIns > config.inputs.size()) {
+        *error = parser.audioInsWhere + ": in" + std::to_string(parser.audioIns) + ": the performance has " + std::to_string(config.inputs.size()) +
+                 " input(s); [performance] inputs = names them";
+        return false;
+    }
+    if (parser.audioOuts > config.outputs.size()) {
+        *error = parser.audioOutsWhere + ": out" + std::to_string(parser.audioOuts) + ": the performance has " + std::to_string(config.outputs.size()) +
+                 " output(s); [performance] outputs = names them";
+        return false;
+    }
     config.path = path;
     if (config.scenes.empty()) {
         *error = path + ": no [scene] or [chain] sections";
@@ -722,11 +778,41 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
 }
 
 bool finishConfig(Config& config, std::string* error) {
-    if (config.inputs.size() != 1 || config.outputs.size() != 2) {
-        *error = config.path + ": Cue plays one input and two outputs for now (this performance has " + std::to_string(config.inputs.size()) +
-                 " and " + std::to_string(config.outputs.size()) + ")";
-        return false;
+    // Inputs and outputs: at least one of each, each name once, and a
+    // channel for each (the ones not given take the channel of their place).
+    for (const auto* names : {&config.inputs, &config.outputs}) {
+        const std::string what = names == &config.inputs ? "input" : "output";
+        if (names->empty()) {
+            *error = config.path + ": a performance needs at least one " + what;
+            return false;
+        }
+        if (names->size() > kMaxPorts) {
+            *error = config.path + ": " + std::to_string(names->size()) + " " + what + "s; Cue plays at most " + std::to_string(kMaxPorts);
+            return false;
+        }
+        for (size_t i = 0; i < names->size(); ++i)
+            for (size_t k = 0; k < i; ++k)
+                if (lower((*names)[i]) == lower((*names)[k])) {
+                    *error = config.path + ": two " + what + "s are named " + (*names)[i];
+                    return false;
+                }
     }
+    auto fit = [](std::vector<unsigned>& channels, size_t n) {
+        if (channels.size() > n)
+            channels.resize(n);
+        while (channels.size() < n)
+            channels.push_back(static_cast<unsigned>(channels.size()));
+    };
+    fit(config.audio.inputChannels, config.inputs.size());
+    fit(config.audio.outputChannels, config.outputs.size());
+    // An input or output by name, or as in2 / out2.
+    auto port = [](const std::vector<std::string>& names, const std::string& text, const char* prefix) {
+        for (size_t k = 0; k < names.size(); ++k)
+            if (lower(names[k]) == lower(text))
+                return static_cast<int>(k);
+        const size_t n = numbered(lower(text), prefix);
+        return n >= 1 && n <= names.size() ? static_cast<int>(n) - 1 : -1;
+    };
     if (config.scenes.empty()) {
         *error = config.path + ": no scenes";
         return false;
@@ -773,11 +859,38 @@ bool finishConfig(Config& config, std::string* error) {
             }
         }
         for (auto& c : s.chains) {
-            for (int o = 0; o < 2; ++o)
-                if (!c.out[o].set) {
-                    c.out[o].line = 0;
-                    c.out[o].after = c.lines[0].plugins.size();
+            c.inputIndex = 0;
+            if (!c.input.empty()) {
+                const int i = port(config.inputs, c.input, "in");
+                if (i < 0) {
+                    *error = c.where + ": chain '" + c.name + "': input = " + c.input + ": the performance has no such input (inputs: " +
+                             joined(config.inputs) + ")";
+                    return false;
                 }
+                c.inputIndex = static_cast<size_t>(i);
+                c.input = config.inputs[c.inputIndex];
+            }
+            std::vector<TapSpec> taps(config.outputs.size());
+            for (size_t o = 0; o < taps.size(); ++o) {
+                taps[o].output = config.outputs[o];
+                taps[o].after = c.lines[0].plugins.size();
+            }
+            for (const TapSpec& t : c.out) {
+                const int o = port(config.outputs, t.output, "out");
+                if (o < 0) {
+                    *error = (t.where.empty() ? c.where : t.where) + ": chain '" + c.name + "': tap = " + t.output +
+                             ": the performance has no such output (outputs: " + joined(config.outputs) + ")";
+                    return false;
+                }
+                TapSpec& to = taps[static_cast<size_t>(o)];
+                to = t;
+                to.output = config.outputs[static_cast<size_t>(o)];
+                to.set = true;
+                if (to.line < 0 || static_cast<size_t>(to.line) >= c.lines.size())
+                    to.line = 0;
+                to.after = std::min(to.after, c.lines[static_cast<size_t>(to.line)].plugins.size());
+            }
+            c.out = std::move(taps);
             for (auto& l : c.lines)
                 for (auto& p : l.plugins)
                     if (!p.bypassModeSet)

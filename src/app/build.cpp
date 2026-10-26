@@ -64,7 +64,8 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
     EngineSettings es = config.engine;
     es.sampleRate = config.audio.rate;
     es.maxFrames = config.audio.period;
-    es.numOutputs = 2;
+    es.numInputs = config.inputs.size();
+    es.numOutputs = config.outputs.size();
     es.workers = config.workers;
     es.workerPriority = config.audio.rtPriority;
     rig.engine = std::make_unique<Engine>(es);
@@ -167,6 +168,7 @@ bool buildRig(const Config& config, Rig& rig, std::string* error) {
             for (const TapSpec& t : cs.out)
                 taps.push_back({t.line, t.after, config.mix});
             auto chain = std::make_unique<Chain>(cs.name, std::move(lines), std::move(taps));
+            chain->setInput(cs.inputIndex);
             for (size_t i = 0; i < initialBypass.size(); ++i) {
                 if (initialBypass[i])
                     chain->setInitialBypass(i, true);

@@ -15,6 +15,7 @@ namespace cue {
 struct EngineSettings {
     double sampleRate = 48000.0;
     uint32_t maxFrames = 64;
+    size_t numInputs = 1;
     size_t numOutputs = 2;
 
     float prerollMs = 50.0f;     // new chain runs on live input, muted, before it is heard
@@ -131,7 +132,10 @@ public:
     // Helper threads that got real-time priority.
     int realtimeWorkers() const { return realtimeWorkers_.load(); }
 
-    // Audio thread. in: one mono input. outs: settings.numOutputs buffers.
+    // Audio thread. ins: settings.numInputs mono buffers. outs:
+    // settings.numOutputs buffers.
+    void process(const float* const* ins, float* const* outs, uint32_t frames);
+    // The same with one input (any others hear silence).
     void process(const float* in, float* const* outs, uint32_t frames);
 
     // Audio-thread view, also readable from tests between process() calls.
@@ -181,7 +185,7 @@ private:
     void setState(int index, ChainState state);
     void emit(EngineEvent::Type type, int chain);
     void advance(int index, uint32_t frames, float peak);
-    void runChains(const float* in, uint32_t frames, size_t heard, size_t background, bool flushIdle);
+    void runChains(const float* const* ins, uint32_t frames, size_t heard, size_t background, bool flushIdle);
     void finishBackground();
     void takeJobs(uint32_t generation, uint32_t limit);
     void runChain(int index, bool helper);
@@ -207,7 +211,8 @@ private:
     // generation << 32 | count << 16 | next. Background chains may still be
     // running when process() returns; the next block waits for them first.
     std::vector<int> jobs_;
-    std::vector<float> jobIn_; // the input, kept for background chains
+    std::vector<float> jobIn_; // the inputs, one after another, kept for background chains
+    std::vector<const float*> oneInput_; // process(in): in, then silence
     uint32_t jobFrames_ = 0;
     uint32_t generation_ = 0;
     size_t heardJobs_ = 0, backgroundJobs_ = 0;

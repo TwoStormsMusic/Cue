@@ -59,7 +59,7 @@ plugin = builtin:delay 300 0.4 0.3
     std::string err;
     CHECK_MSG(loadConfig(path, c, &err), "%s", err.c_str());
     std::remove(path.c_str());
-    CHECK(c.audio.device == "hw:M2" && c.audio.period == 64 && c.audio.inputChannel == 0);
+    CHECK(c.audio.device == "hw:M2" && c.audio.period == 64 && c.audio.inputChannels == std::vector<unsigned>{0});
     CHECK(c.audio.outputChannels[1] == 1 && c.audio.cpu == 7 && !c.cpuAuto);
     CHECK(c.workers == 1 && Config{}.workers == 2);
     CHECK(c.engine.prerollMs == 40.0f && c.warm == "none");
@@ -230,6 +230,67 @@ TEST(config_includes_files_relative_to_the_including_file) {
         CHECK(c.scenes[0].chains[0].lines[0].plugins[0].path == "/tmp/a.clap");
         CHECK(c.scenes[0].presets.size() == 1 && c.scenes[0].presets[0].chain == "B");
     }
+}
+
+TEST(config_reads_any_number_of_inputs_and_outputs) {
+    Config c;
+    std::string err;
+    CHECK_MSG(parse(R"(
+[performance Duo]
+inputs = Bass, Synth
+outputs = FOH, Amp, In-ear
+
+[audio]
+in2 = 3
+out3 = 5
+
+[chain Clean]
+plugin = builtin:gain 1
+tap = in-ear
+plugin = builtin:gain 0.5
+tap = out1
+
+[chain Keys]
+input = Synth
+plugin = builtin:gain 1
+tap = Amp
+
+[chain Fuzz]
+input = in1
+plugin = builtin:gain 2
+)", c, err), "%s", err.c_str());
+    CHECK(c.inputs.size() == 2 && c.outputs.size() == 3);
+    CHECK(c.audio.inputChannels == (std::vector<unsigned>{0, 2}));
+    CHECK(c.audio.outputChannels == (std::vector<unsigned>{0, 1, 4}));
+    const auto& chains = c.scenes.at(0).chains;
+    CHECK(chains.size() == 3);
+    if (chains.size() != 3)
+        return;
+    CHECK(chains[0].inputIndex == 0 && chains[1].inputIndex == 1 && chains[2].inputIndex == 0);
+    CHECK(chains[1].input == "Synth");
+    // One tap per output, in the performance's order; the ones no tap names at the end of the main line.
+    for (const auto& ch : chains)
+        CHECK(ch.out.size() == 3 && ch.out[0].output == "FOH" && ch.out[1].output == "Amp" && ch.out[2].output == "In-ear");
+    CHECK(chains[0].out[0].after == 2 && chains[0].out[1].after == 2 && chains[0].out[2].after == 1 && chains[0].out[2].set);
+    CHECK(chains[1].out[1].after == 1 && chains[1].out[1].set && !chains[1].out[0].set);
+
+    // Mistakes, with where they are.
+    Config d;
+    CHECK(!parse("[chain A]\nplugin = builtin:gain 1\ntap = Monitor\n", d, err));
+    CHECK_MSG(err.find("test.ini:3") != std::string::npos && err.find("no such output") != std::string::npos && err.find("Out 1, Out 2") != std::string::npos,
+              "%s", err.c_str());
+    Config e;
+    CHECK(!parse("[chain A]\ninput = Mic\nplugin = builtin:gain 1\n", e, err));
+    CHECK_MSG(err.find("no such input") != std::string::npos, "%s", err.c_str());
+    Config f;
+    CHECK(!parse("[audio]\nout3 = 3\n[chain A]\nplugin = builtin:gain 1\n", f, err));
+    CHECK_MSG(err.find("test.ini:2") != std::string::npos && err.find("2 output(s)") != std::string::npos, "%s", err.c_str());
+    Config g;
+    CHECK(!parse("[performance]\noutputs = FOH, foh\n[chain A]\nplugin = builtin:gain 1\n", g, err));
+    CHECK_MSG(err.find("two outputs are named") != std::string::npos, "%s", err.c_str());
+    // tap = out3 of a performance with two outputs.
+    Config h;
+    CHECK(!parse("[chain A]\nplugin = builtin:gain 1\ntap = out3\n", h, err));
 }
 
 TEST(config_reports_the_line_of_a_mistake) {

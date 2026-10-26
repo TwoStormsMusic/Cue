@@ -10,6 +10,9 @@
 
 namespace cue {
 
+// The most inputs, and the most outputs, a performance may have.
+constexpr size_t kMaxPorts = 64;
+
 // A value from the config with the place it came from, for error messages.
 struct ConfigText {
     std::string text;
@@ -46,16 +49,26 @@ struct LineSpec {
     std::vector<PluginSpec> plugins;
 };
 
+// Where a chain's signal is taken for one output.
 struct TapSpec {
+    std::string output;      // the output: its name, or out1, out2...
     int line = 0;
     size_t after = SIZE_MAX; // SIZE_MAX = end of the line
     bool set = false;
+    std::string where;
 };
 
 struct ChainSpec {
     std::string name;
+    // The performance input that feeds it: its name, or in1, in2...; empty
+    // = the first. finishConfig finds inputIndex.
+    std::string input;
+    size_t inputIndex = 0;
     std::vector<LineSpec> lines;
-    TapSpec out[2];
+    // As written, the outputs a tap names. finishConfig makes it one per
+    // performance output, in their order; one no tap names is taken at the
+    // end of the main line.
+    std::vector<TapSpec> out;
     std::string where;
 };
 
@@ -145,8 +158,9 @@ struct Config {
     bool muteOnBypass = false; // [switching] bypass_mode: what plug-ins without their own do
     MidiSettings midi;
     std::string performance;   // the performance's name
-    // What the performance calls its input and outputs. A machine's rig
-    // profile says which sound card channel each one is.
+    // What the performance calls its inputs and outputs. A machine's rig
+    // profile says which sound card channel each one is (audio.inputChannels
+    // and outputChannels, in the same order).
     std::vector<std::string> inputs = {"In 1"};
     std::vector<std::string> outputs = {"Out 1", "Out 2"};
     std::vector<SceneSpec> scenes;
@@ -161,8 +175,9 @@ struct Config {
 // Parses the INI-style config described in docs/config.md.
 bool loadConfig(const std::string& path, Config& config, std::string* error);
 bool parseConfigText(const std::string& text, const std::string& path, Config& config, std::string* error);
-// What every loaded performance goes through: presets for scenes without
-// any, presets matched to chains, outputs tapped, controls completed.
+// What every loaded performance goes through: a channel for each input and
+// output, presets for scenes without any, presets matched to chains, chains'
+// inputs found and outputs tapped, controls completed.
 bool finishConfig(Config& config, std::string* error);
 
 // Every plug-in of a chain, line by line: the order of the engine's slots.

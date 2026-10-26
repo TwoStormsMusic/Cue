@@ -77,6 +77,8 @@ A `.cue` file is a zip:
   plug-ins. **outputs** says where each of the performance's outputs is taken,
   by line and number of plug-ins before it; an output a chain leaves out takes
   the end of the main line.
+- **input** is the performance input a chain plays. It is written only when
+  the performance has more than one; without it, a chain plays the first.
 - **Plug-ins** are found by `path`. Paths under your home folder are written
   with `~`, so they work for another user name. `label` is what the mappings
   call the plug-in. `params` are set after the state, by parameter id
@@ -114,10 +116,8 @@ needs them.
 ```
 
 `inputs` and `outputs` give the sound card channel (from 1) of each name a
-performance uses. A performance whose names the rig does not list plays its
-first input from channel 1 and its outputs on channels 1, 2, and so on, and
-`cue check` says which names it could not find. Every setting can be left out;
-what is missing keeps its default (`[audio]` and `[midi]` in
-[config.md](config.md) describe each one).
-
-For now a performance has one input and two outputs, as the engine does.
+performance uses. An input or output the rig does not list takes the channel
+of its place (the second output plays on channel 2), and `cue check` says
+which names it could not find. Two outputs cannot share a channel. Every
+setting can be left out; what is missing keeps its default (`[audio]` and
+`[midi]` in [config.md](config.md) describe each one).

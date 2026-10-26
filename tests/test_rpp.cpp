@@ -172,7 +172,7 @@ TEST(rpp_import_makes_chains_branches_and_states) {
     CHECK(delay.label == "Slapback"); // REAPER's own name for it
     CHECK(delay.path.find(".clap/CLAP Plugins Linux/TwoStorms Delay.clap") != std::string::npos); // not found: where TwoStorms installs
     CHECK(imp.config.find("NOT FOUND") != std::string::npos);
-    CHECK(c.audio.inputChannel == 0 && c.mix == OutputMix::Left && c.midi.in == "M2");
+    CHECK(c.audio.inputChannels == std::vector<unsigned>{0} && c.mix == OutputMix::Left && c.midi.in == "M2");
     CHECK(c.audio.periods == 3); // as REAPER on the M2
 
     // State files: the CLAP state as saved, the VST3 split in two.

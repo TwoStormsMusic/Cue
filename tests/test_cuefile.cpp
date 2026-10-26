@@ -278,7 +278,7 @@ TEST(cue_file_rig_profile_names_the_channels) {
     CHECK_MSG(loadPerformance(dir + "/perf.cue", dir + "/rig.json", c, &err), "%s", err.c_str());
     CHECK(c.audio.device == "hw:Test" && c.audio.period == 128 && c.audio.periods == 3);
     CHECK(!c.cpuAuto && c.audio.cpu == -1 && c.workers == 1);
-    CHECK(c.audio.inputChannel == 1);
+    CHECK(c.audio.inputChannels == std::vector<unsigned>{1});
     CHECK(c.audio.outputChannels.size() == 2 && c.audio.outputChannels[0] == 3 && c.audio.outputChannels[1] == 2);
     CHECK(c.midi.in == "FCB" && c.midi.out == "FCB");
     CHECK(c.warnings.empty());
@@ -322,4 +322,57 @@ TEST(cue_file_reports_what_it_cannot_read) {
     CHECK_MSG(loadCue(zipWith("small.cue", R"({"cue": 1, "scenes": [{"name": "S", "chains": [{"name": "A", "lines": [{"plugins": []}]}]}]})"), c, &err),
               "%s", err.c_str());
     CHECK(c.scenes[0].presets.size() == 1 && c.outputs.size() == 2 && c.scenes[0].chains[0].out[1].after == 0);
+}
+
+TEST(cue_file_keeps_every_input_and_output) {
+    const std::string dir = tempDir();
+    Config ini;
+    std::string err;
+    CHECK_MSG(parseConfigText(R"(
+[performance Duo]
+inputs = Bass, Synth
+outputs = FOH, Amp, In-ear
+[audio]
+device = hw:Test
+in2 = 4
+out1 = 3
+out2 = 4
+out3 = 7
+[chain Clean]
+plugin = builtin:gain 1
+tap = In-ear
+plugin = builtin:gain 0.5
+[chain Keys]
+input = Synth
+plugin = builtin:gain 1
+branch = Wet
+[branch Wet]
+plugin = builtin:gain 0.3
+tap = out2
+)", dir + "/duo.ini", ini, &err), "%s", err.c_str());
+    CHECK_MSG(saveCue(ini, dir + "/duo.cue", &err), "%s", err.c_str());
+    CHECK_MSG(saveRig(ini, dir + "/rig.json", &err), "%s", err.c_str());
+
+    Config c;
+    CHECK_MSG(loadPerformance(dir + "/duo.cue", dir + "/rig.json", c, &err), "%s", err.c_str());
+    CHECK((c.inputs == std::vector<std::string>{"Bass", "Synth"}));
+    CHECK((c.outputs == std::vector<std::string>{"FOH", "Amp", "In-ear"}));
+    CHECK(c.audio.inputChannels == (std::vector<unsigned>{0, 3}));
+    CHECK(c.audio.outputChannels == (std::vector<unsigned>{2, 3, 6}));
+    CHECK(c.warnings.empty());
+    const auto& chains = c.scenes.at(0).chains;
+    CHECK(chains.size() == 2);
+    if (chains.size() != 2)
+        return;
+    CHECK(chains[0].inputIndex == 0 && chains[1].inputIndex == 1);
+    CHECK(chains[0].out.size() == 3 && chains[0].out[2].after == 1 && chains[0].out[0].after == 2);
+    CHECK(chains[1].out.size() == 3 && chains[1].out[1].line == 1 && chains[1].out[1].after == 1 && chains[1].out[0].line == 0);
+
+    // A rig made for a performance with fewer outputs: the rest by position, with a warning.
+    writeFile(dir + "/small.json", R"({"cue_rig": 1, "inputs": {"Bass": 2, "Synth": 1}, "outputs": {"FOH": 2, "Amp": 1}})");
+    Config s;
+    CHECK_MSG(loadPerformance(dir + "/duo.cue", dir + "/small.json", s, &err), "%s", err.c_str());
+    CHECK(s.audio.inputChannels == (std::vector<unsigned>{1, 0}));
+    CHECK(s.audio.outputChannels == (std::vector<unsigned>{1, 0, 2}));
+    CHECK(s.warnings.size() == 1 && s.warnings[0].find("In-ear") != std::string::npos);
 }

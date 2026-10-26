@@ -370,12 +370,12 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     }
 
     std::atomic<bool> marked{false};
-    audio->start([&](const float* in, float* const* outs, uint32_t frames) {
+    audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
         if (!marked.load(std::memory_order_relaxed)) {
             markClapAudioThread();
             marked.store(true, std::memory_order_relaxed);
         }
-        engine.process(in, outs, frames);
+        engine.process(ins, outs, frames);
     }, &err);
 
     std::signal(SIGINT, onSignal);
@@ -590,27 +590,28 @@ struct BassInput {
     }
 };
 
-void writeWav(const std::string& path, const std::vector<float>& a, const std::vector<float>& b, unsigned rate) {
+// One WAV channel per output.
+void writeWav(const std::string& path, const std::vector<std::vector<float>>& channels, unsigned rate) {
     std::ofstream f(path, std::ios::binary);
     auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
     auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
-    const uint32_t frames = static_cast<uint32_t>(a.size());
+    const uint32_t frames = static_cast<uint32_t>(channels.at(0).size());
+    const uint32_t n = static_cast<uint32_t>(channels.size());
     f.write("RIFF", 4);
-    u32(36 + frames * 8);
+    u32(36 + frames * 4 * n);
     f.write("WAVEfmt ", 8);
     u32(16);
     u16(3); // IEEE float
-    u16(2);
+    u16(static_cast<uint16_t>(n));
     u32(rate);
-    u32(rate * 8);
-    u16(8);
+    u32(rate * 4 * n);
+    u16(static_cast<uint16_t>(4 * n));
     u16(32);
     f.write("data", 4);
-    u32(frames * 8);
-    for (uint32_t i = 0; i < frames; ++i) {
-        f.write(reinterpret_cast<const char*>(&a[i]), 4);
-        f.write(reinterpret_cast<const char*>(&b[i]), 4);
-    }
+    u32(frames * 4 * n);
+    for (uint32_t i = 0; i < frames; ++i)
+        for (const auto& c : channels)
+            f.write(reinterpret_cast<const char*>(&c[i]), 4);
 }
 
 int cmdBench(const std::string& path, double switchSeconds, double totalSeconds, const std::string& wavPath, bool paced, const std::string& warm,
@@ -637,7 +638,7 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     double worstUs = 0;
     std::vector<double> aloneUs, blockUs;
     uint64_t othersProcessed = 0;
-    std::vector<float> wav1, wav2;
+    std::vector<std::vector<float>> wav(config.outputs.size());
     bool realtime = false, pinned = false;
     std::atomic<bool> done{false};
     std::thread worker([&] {
@@ -653,8 +654,13 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             pinned = pthread_setaffinity_np(pthread_self(), sizeof set, &set) == 0;
         }
         BassInput input{static_cast<double>(config.audio.rate)};
-        std::vector<float> in(frames), o1(frames), o2(frames);
-        float* outs[2] = {o1.data(), o2.data()};
+        // Every input hears the same bass.
+        std::vector<float> in(frames);
+        std::vector<const float*> ins(config.inputs.size(), in.data());
+        std::vector<std::vector<float>> o(config.outputs.size(), std::vector<float>(frames));
+        std::vector<float*> outs;
+        for (auto& b : o)
+            outs.push_back(b.data());
         const size_t blocksPerSwitch = std::max<size_t>(1, static_cast<size_t>(switchSeconds * config.audio.rate / frames));
         const size_t total = static_cast<size_t>(totalSeconds * config.audio.rate / frames);
         // Phase 1: chain 1 alone, nothing warm, to show what one chain costs
@@ -678,14 +684,13 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
             for (auto& v : in)
                 v = input();
             const auto t0 = Clock::now();
-            engine.process(in.data(), outs, frames);
+            engine.process(ins.data(), outs.data(), frames);
             const double us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
             times.push_back(us);
             worstUs = std::max(worstUs, us);
-            if (!wavPath.empty()) {
-                wav1.insert(wav1.end(), o1.begin(), o1.end());
-                wav2.insert(wav2.end(), o2.begin(), o2.end());
-            }
+            if (!wavPath.empty())
+                for (size_t k = 0; k < o.size(); ++k)
+                    wav[k].insert(wav[k].end(), o[k].begin(), o[k].end());
         };
         engine.switchTo(0);
         for (size_t b = 0; b < aloneBlocks && !g_quit; ++b) {
@@ -755,8 +760,11 @@ int cmdBench(const std::string& path, double switchSeconds, double totalSeconds,
     if (worstUs > periodUs)
         std::printf("WARNING: the worst block took longer than the period; live, that would be a dropout.\n");
     if (!wavPath.empty()) {
-        writeWav(wavPath, wav1, wav2, config.audio.rate);
-        std::printf("wrote %s (left = out 1, right = out 2)\n", wavPath.c_str());
+        writeWav(wavPath, wav, config.audio.rate);
+        std::string order;
+        for (size_t k = 0; k < config.outputs.size(); ++k)
+            order += (k ? ", " : "") + config.outputs[k];
+        std::printf("wrote %s (a channel per output: %s)\n", wavPath.c_str(), order.c_str());
     }
     return 0;
 }
@@ -850,8 +858,11 @@ int cmdCheck(const std::string& path, bool loadPlugins) {
                 const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
                 return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
             };
-            std::printf("  chain %s: %zu plug-in(s); out 1 = %s, out 2 = %s\n", c.name.c_str(), chainPlugins(c).size(), where(c.out[0]).c_str(),
-                        where(c.out[1]).c_str());
+            std::string feeds;
+            for (const TapSpec& t : c.out)
+                feeds += "; " + t.output + " = " + where(t);
+            std::printf("  chain %s: %zu plug-in(s)%s%s\n", c.name.c_str(), chainPlugins(c).size(),
+                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", feeds.c_str());
         }
         for (const auto& p : scene.presets)
             std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),

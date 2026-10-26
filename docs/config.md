@@ -14,7 +14,7 @@ include = more.ini      ; anywhere: reads that file here, relative to this one
 | --- | --- |
 | **performance** | The whole file: scenes in order. |
 | **scene** | One routing grid: the chains that can play, and the presets that pick between them. |
-| **chain** | Plug-ins in series from the input to the two outputs, with optional branches. Only the chain you hear is processed; the others cost nothing. |
+| **chain** | Plug-ins in series from one input to every output, with optional branches. Only the chain you hear is processed; the others cost nothing. |
 | **branch** | A copy of a chain's signal from one point, with its own plug-ins: for example the IR loader that only FOH gets. |
 | **preset** | Which chain plays, and what to set when it is selected. |
 | **control** | A named value you move with pedals and MIDI, which switches plug-ins, moves their parameters, mutes the outputs and lights LEDs. |
@@ -29,9 +29,9 @@ device = hw:M2      ; ALSA device; cue devices lists them
 rate = 48000
 period = 64         ; frames per block
 periods = 2         ; 3 adds a period of latency (1.3 ms at 64) and lets a late block catch up; the import writes 3, as REAPER uses on the M2
-input = 1           ; the input carrying the bass
-out1 = 1            ; FOH
-out2 = 2            ; amp
+input = 1           ; the sound card channel of the performance's first input (the bass); in2 = 3 for a second, and so on
+out1 = 1            ; the channel of its first output (FOH)
+out2 = 2            ; ...of its second (amp); out3 = 5 for a third, and so on
 cpu = auto          ; auto (last performance core), none, or a CPU number
 priority = 80       ; real-time priority of the audio thread (and its helpers)
 workers = 2         ; helper threads: chains playing at once (a switch, the warm chain) are processed side by side, and the warm chain never holds up the one heard. 0 = all on the audio thread
@@ -61,7 +61,7 @@ forward = yes       ; pass incoming MIDI on to plug-ins that take MIDI (a wah's 
 
 ```ini
 [performance Friday]          ; optional: names the performance
-inputs = Bass                 ; optional: what it calls its input and outputs (default In 1; Out 1, Out 2),
+inputs = Bass                 ; optional: its inputs and outputs, in order (default In 1; Out 1, Out 2),
 outputs = FOH, Amp            ; the names a .cue keeps and a machine's rig profile gives channels to
 
 [scene Covers]
@@ -70,6 +70,7 @@ pedal = 1                     ; optional: a pedal that selects the scene (its fi
 program = 0                   ; optional: a program change that does the same
 
 [chain Punk]                  ; a chain of the scene above
+input = Bass                  ; optional: the input it plays, by name or as in1, in2... (default: the first)
 plugin = clap:~/.clap/TwoStorms Gain Stage.clap#com.twostorms.gainstage
 name = Gain Stage             ; what mappings call this plug-in
 param = 54:1                  ; parameter id : value (cue params lists the ids)
@@ -81,7 +82,7 @@ name = Wah
 bypass = yes                  ; loaded, but off until a mapping switches it on
 midi = no                     ; do not pass MIDI to this one
 branch = FOH                  ; the branch called FOH leaves here
-tap = out2                    ; out 2 takes the signal here
+tap = Amp                     ; the Amp output takes the signal here (by name, or as out1, out2...)
 plugin = clap:~/.clap/TwoStorms Delay.clap
 plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms Gate.clap
 sidechain = TwoStorms Gain Stage ; its key input hears the signal after that earlier plug-in
@@ -89,12 +90,12 @@ sidechain = TwoStorms Gain Stage ; its key input hears the signal after that ear
 [branch FOH]                  ; a branch of the chain above
 plugin = clap:~/.clap/CLAP Plugins Linux/TwoStorms IR Loader.clap
 bypass_mode = mute            ; bypassed, it passes nothing instead of its input
-tap = out1                    ; out 1 takes the end of this branch
+tap = FOH                     ; FOH takes the end of this branch
 ```
 
 - **Plug-ins**: `clap:<file>[#id]`, `vst3:<bundle>[#name or class id]`, or `builtin:<name> <numbers>` (gain, drive, lowpass, delay, burn). Paths may start with `~`; relative paths are relative to the file they are written in.
 - **param** values are the plug-in's own values for CLAP, and 0 to 1 for VST3. They are applied after `state`.
-- **Outputs**: each output takes the end of the main line unless a `tap` line says otherwise. A tap can sit on the main line or on a branch, after any plug-in.
+- **Inputs and outputs**: a performance has any number of each (up to 64), named in `[performance]`. `[audio]` gives each a sound card channel, `in1`/`input`, `in2`... and `out1`, `out2`... by their order; one without a line takes the channel of its place, and two outputs cannot share a channel. A chain plays one input. Every chain feeds every output: each output takes the end of the main line unless a `tap` line says otherwise. A tap can sit on the main line or on a branch, after any plug-in.
 - Branches can leave a branch too. A chain's plug-ins are all loaded at start; a bypassed plug-in costs nothing once its tail has died away.
 - **bypass_mode** is `thru` or `mute`: whether a bypassed plug-in passes its input on, or silence. Either way it fades over `bypass_fade_ms`. Without it, the `[switching]` default applies (thru unless set).
 - **sidechain** feeds the plug-in's side-chain input (its second input, like a gate's key) with the signal after an earlier plug-in of the same chain, named as mappings name it: `Gate` is the nearest Gate before this one, `Gate:2` the chain's second Gate. Earlier means on the main line before it, or for a plug-in on a branch, anywhere on the main line or an earlier branch. `cue check` reports a plug-in with no side-chain input.
@@ -138,13 +139,13 @@ drive = TwoStorms Delay param 12 from 0 to 100
 
 [control Tuner]
 pedal = 5
-mute = on                     ; both outputs are muted while this holds
+mute = on                     ; every output is muted while this holds
 ```
 
 - **Stepping** goes value by value; when a step would pass the end, the control first lands on the end, and the next step wraps to the start (or stays, with `wrap = no`). Going down works the same way.
 - **enable = \<plug-ins> [when \<condition>]**: those plug-ins run while the condition holds and are bypassed otherwise, with a short crossfade. Without `when`, while the control is not at its first value. A plug-in named by several enables runs if any of them holds. Do not also switch it with `bypass`/`enable` actions: the control decides.
 - **drive = \<plug-ins> param \<id> [from \<a> to \<b>]**: sets that parameter whenever the control changes, mapping the control's range onto a..b (default: the control's own value).
-- **mute = \<condition>**: mutes both outputs while it holds.
+- **mute = \<condition>**: mutes every output while it holds.
 - Inside a control, a bare value is a condition on that control: `when Auto` means "when this control is Auto", `mute = on` means "when this control is on".
 
 ## Naming plug-ins
@@ -201,7 +202,7 @@ do = preset next
 | `scene Covers`, `scene next`, `scene previous` | selects a scene's first preset |
 | `bypass Delay`, `enable Delay`, `toggle Delay` | switches plug-ins directly |
 | `param Delay 12 = 40` | sets a plug-in parameter |
-| `mute on`, `mute off`, `mute toggle` | mutes both outputs |
+| `mute on`, `mute off`, `mute toggle` | mutes every output |
 | `midi B0 6D 0F` | sends a MIDI message (hex) to the controller |
 
 ## Groups

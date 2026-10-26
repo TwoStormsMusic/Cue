@@ -175,8 +175,7 @@ struct Writer {
         return true;
     }
 
-    bool chain(const ChainSpec& c, const PresetSpec& p, const std::string& defaultWarm, const std::vector<std::string>& outputs,
-               const std::string& stateDir, json& j) {
+    bool chain(const ChainSpec& c, const PresetSpec& p, const Config& config, const std::string& stateDir, json& j) {
         j["name"] = c.name;
         if (!p.display.empty())
             j["display"] = p.display;
@@ -185,7 +184,9 @@ struct Writer {
         if (p.program >= 0)
             j["program"] = p.program;
         j["on_select"] = texts(p.actions);
-        j["warm"] = p.warm.empty() ? defaultWarm : p.warm;
+        j["warm"] = p.warm.empty() ? config.warm : p.warm;
+        if (config.inputs.size() > 1)
+            j["input"] = config.inputs.at(c.inputIndex);
         json lines = json::array();
         size_t slot = 0;
         for (const LineSpec& l : c.lines) {
@@ -207,10 +208,10 @@ struct Writer {
         }
         j["lines"] = lines;
         json taps = json::object();
-        for (size_t o = 0; o < outputs.size() && o < 2; ++o) {
+        for (size_t o = 0; o < config.outputs.size() && o < c.out.size(); ++o) {
             const TapSpec& t = c.out[o];
             const LineSpec& l = c.lines.at(t.line);
-            taps[outputs[o]] = {{"line", l.name}, {"after", std::min(t.after, l.plugins.size())}};
+            taps[config.outputs[o]] = {{"line", l.name}, {"after", std::min(t.after, l.plugins.size())}};
         }
         j["outputs"] = taps;
         return true;
@@ -245,7 +246,7 @@ struct Writer {
             for (size_t k = 0; k < sc.chains.size(); ++k) {
                 json cj;
                 const std::string dir = "states/" + number(s + 1) + " " + fileName(sc.name) + "/" + number(k + 1) + " " + fileName(sc.chains[k].name);
-                if (!chain(sc.chains[k], sc.presets.at(k), c.warm, c.outputs, dir, cj))
+                if (!chain(sc.chains[k], sc.presets.at(k), c, dir, cj))
                     return false;
                 chains.push_back(cj);
             }
@@ -440,21 +441,24 @@ struct Reader {
             }
             c.lines.push_back(std::move(l));
         }
+        c.input = j.value("input", "");
         if (j.contains("outputs"))
             for (const auto& [name, tj] : j.at("outputs").items()) {
-                int o = -1;
-                for (size_t k = 0; k < config.outputs.size(); ++k)
-                    if (same(config.outputs[k], name))
-                        o = static_cast<int>(k);
-                if (o < 0 || o > 1)
+                bool known = false;
+                for (const auto& o : config.outputs)
+                    known = known || same(o, name);
+                if (!known)
                     throw std::runtime_error("chain '" + c.name + "' feeds output '" + name + "', which the performance does not have");
-                TapSpec& t = c.out[o];
+                TapSpec t;
+                t.output = name;
+                t.where = c.where;
                 t.line = lineIndex(c, tj.value("line", ""), c.lines.size());
                 if (t.line < 0)
                     throw std::runtime_error("chain '" + c.name + "': output '" + name + "' is taken from line '" + tj.value("line", "") +
                                              "', which the chain does not have");
                 t.after = std::min(tj.value("after", SIZE_MAX), c.lines[t.line].plugins.size());
                 t.set = true;
+                c.out.push_back(t);
             }
 
         p.name = c.name;
@@ -736,7 +740,7 @@ bool saveRig(const Config& c, const std::string& path, std::string* error) {
         j["audio"]["cpu"] = c.audio.cpu;
     json ins = json::object(), outs = json::object();
     for (size_t i = 0; i < c.inputs.size(); ++i)
-        ins[c.inputs[i]] = i == 0 ? c.audio.inputChannel + 1 : i + 1;
+        ins[c.inputs[i]] = i < c.audio.inputChannels.size() ? c.audio.inputChannels[i] + 1 : i + 1;
     for (size_t o = 0; o < c.outputs.size(); ++o)
         outs[c.outputs[o]] = o < c.audio.outputChannels.size() ? c.audio.outputChannels[o] + 1 : o + 1;
     j["inputs"] = ins;
@@ -808,8 +812,9 @@ bool loadRig(const std::string& path, Config& c, std::string* error) {
                                  std::to_string(position + 1));
             return static_cast<unsigned>(position);
         };
-        if (!c.inputs.empty())
-            c.audio.inputChannel = channel("inputs", c.inputs[0], 0);
+        c.audio.inputChannels.clear();
+        for (size_t i = 0; i < c.inputs.size(); ++i)
+            c.audio.inputChannels.push_back(channel("inputs", c.inputs[i], i));
         c.audio.outputChannels.clear();
         for (size_t o = 0; o < c.outputs.size(); ++o)
             c.audio.outputChannels.push_back(channel("outputs", c.outputs[o], o));

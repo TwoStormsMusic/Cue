@@ -17,7 +17,7 @@ struct AlsaConfig {
     unsigned rate = 48000;
     unsigned period = 64;        // frames per period, fixed
     unsigned periods = 2;        // playback buffer = periods x period
-    unsigned inputChannel = 0;   // capture channel carrying the instrument (0-based)
+    std::vector<unsigned> inputChannels = {0};     // capture channel of each engine input (0-based)
     std::vector<unsigned> outputChannels = {0, 1}; // playback channel for each engine output
     int rtPriority = 80;         // SCHED_FIFO priority of the audio thread; 0 = do not ask
     int cpu = -1;                // CPU to pin the audio thread to; -1 = leave unpinned
@@ -47,8 +47,8 @@ struct AlsaStats {
 // Where the engine's audio comes from and goes to.
 class AudioBackend {
 public:
-    // in: one mono channel. outs: one buffer per configured output channel.
-    using Callback = std::function<void(const float* in, float* const* outs, uint32_t frames)>;
+    // ins: one buffer per configured input channel. outs: one per output channel.
+    using Callback = std::function<void(const float* const* ins, float* const* outs, uint32_t frames)>;
 
     virtual ~AudioBackend() = default;
     virtual bool open(const AlsaConfig& config, std::string* error) = 0;
@@ -89,7 +89,8 @@ private:
     std::chrono::steady_clock::time_point started_;
     int captureFormat_ = 0, playbackFormat_ = 0;
     std::vector<uint8_t> captureRaw_, playbackRaw_;
-    std::vector<float> in_;
+    std::vector<std::vector<float>> ins_;
+    std::vector<const float*> inPtrs_;
     std::vector<std::vector<float>> outs_;
     std::vector<float*> outPtrs_;
 

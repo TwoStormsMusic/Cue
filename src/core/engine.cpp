@@ -65,7 +65,8 @@ bool Engine::activate() {
     const uint32_t maxFrames = settings_.maxFrames;
     for (size_t i = 0; i < chains_.size(); ++i) {
         chains_[i].chain->setDrain(std::pow(10.0f, settings_.tailQuietDb / 20.0f), ms(settings_.tailHoldMs), ms(settings_.tailCapMs));
-        if (chains_[i].chain->numOutputs() != settings_.numOutputs || !chains_[i].chain->activate(settings_.sampleRate, maxFrames)) {
+        if (chains_[i].chain->numOutputs() != settings_.numOutputs || chains_[i].chain->input() >= std::max<size_t>(settings_.numInputs, 1) ||
+            !chains_[i].chain->activate(settings_.sampleRate, maxFrames)) {
             for (size_t j = 0; j < i; ++j)
                 chains_[j].chain->deactivate();
             return false;
@@ -81,7 +82,9 @@ bool Engine::activate() {
             s.outs[o] = s.gain + (1 + o) * static_cast<size_t>(maxFrames);
     }
     jobs_.assign(chains_.size(), -1);
-    jobIn_.assign(maxFrames, 0.0f);
+    const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
+    jobIn_.assign((inputs + 1) * static_cast<size_t>(maxFrames), 0.0f); // the last stays silent
+    oneInput_.assign(inputs, jobIn_.data() + inputs * static_cast<size_t>(maxFrames));
     heardJobs_ = backgroundJobs_ = 0;
     shared_ = false;
     activated_ = true;
@@ -458,6 +461,11 @@ void Engine::advance(int index, uint32_t frames, float peak) {
 }
 
 void Engine::process(const float* in, float* const* outs, uint32_t frames) {
+    oneInput_[0] = in;
+    process(oneInput_.data(), outs, frames);
+}
+
+void Engine::process(const float* const* ins, float* const* outs, uint32_t frames) {
     const auto blockStart = std::chrono::steady_clock::now();
     frames = std::min(frames, settings_.maxFrames);
     // The last block's background chains, before anything can touch them.
@@ -518,7 +526,7 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
         block.chains[k].background = s.background;
         block.chains[k].ns = s.backgroundNs;
     }
-    runChains(in, frames, heard, unheard, flushIdle);
+    runChains(ins, frames, heard, unheard, flushIdle);
 
     // Mixed and moved on in chain order, whichever thread processed them,
     // so the result is the same as processing them one by one. Background
@@ -574,10 +582,11 @@ void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     }
 }
 
-void Engine::runChains(const float* in, uint32_t frames, size_t heard, size_t background, bool flushIdle) {
-    // A copy of the input: background chains may read it after process()
-    // has returned and the caller has reused its buffer.
-    std::memcpy(jobIn_.data(), in, frames * sizeof(float));
+void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, size_t background, bool flushIdle) {
+    // A copy of the inputs: background chains may read them after process()
+    // has returned and the caller has reused its buffers.
+    for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i)
+        std::memcpy(jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames), ins[i], frames * sizeof(float));
     jobFrames_ = frames;
     heardJobs_ = heard;
     backgroundJobs_ = background;
@@ -646,13 +655,14 @@ void Engine::runChain(int index, bool helper) {
     Slot& s = chains_[index];
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t frames = jobFrames_;
-    // Input, with the chain's input gain.
+    // Its input, with the chain's input gain.
+    const float* in = jobIn_.data() + s.chain->input() * static_cast<size_t>(settings_.maxFrames);
     if (s.inGain.done() && s.inGain.value() == 1.0f) {
-        std::memcpy(s.in, jobIn_.data(), frames * sizeof(float));
+        std::memcpy(s.in, in, frames * sizeof(float));
     } else {
         s.inGain.render(s.gain, frames);
         for (uint32_t n = 0; n < frames; ++n)
-            s.in[n] = jobIn_[n] * s.gain[n];
+            s.in[n] = in[n] * s.gain[n];
     }
     s.chain->process(s.in, s.outs.data(), frames);
     s.helper = helper;
