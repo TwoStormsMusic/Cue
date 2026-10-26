@@ -472,4 +472,15 @@ TEST(rpp_import_turns_simple_realearn_mappings_into_triggers) {
     Config c;
     std::string err;
     CHECK_MSG(parseConfigText(ini, "/tmp/x.ini", c, &err), "%s", err.c_str());
+
+    // With a pedal file the pedals come from it, and ReaLearn is left alone.
+    const std::string dir = tempDir();
+    writeText(dir + "/pedals.ini", "[trigger Five]\non = pedal 5\ndo = chain Punk\n");
+    PathLocator loc;
+    Import imp;
+    CHECK_MSG(convertRpp(rpp, "Show", loc, dir + "/pedals.ini", imp, &err), "%s", err.c_str());
+    CHECK_MSG(imp.config.find("include = " + dir + "/pedals.ini") != std::string::npos && imp.config.find("[trigger Gate]") == std::string::npos, "%s", imp.config.c_str());
+    for (const auto& n : imp.notes)
+        CHECK_MSG(n.find("became triggers") == std::string::npos, "%s", n.c_str());
+    std::filesystem::remove_all(dir);
 }

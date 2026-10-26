@@ -53,7 +53,11 @@ private:
     QLabel* detail_;
     QListWidget* notes_;
     QPushButton* open_;
+    QLabel* pedalsName_;
+    QPushButton* pedalsClear_;
     QString lastOut_;
+    QString pedals_; // a Cue pedal file for REAPER projects, remembered between runs
+    void setPedals(const QString& path);
 };
 
 } // namespace cue::converter

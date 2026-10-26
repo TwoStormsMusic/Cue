@@ -1124,7 +1124,7 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
     if (cue.found)
         cfg << "\n; The performance's controls and pedals, as Cue Converter saved them in the project.\n" << cue.ini;
     std::string triggers;
-    for (const auto& text : realearns)
+    for (const auto& text : mapping.empty() ? realearns : std::vector<std::string>{}) // a pedal file replaces ReaLearn
         triggers += realearnTriggers(text, trackChain, fxPlugin, cue.found, out.notes);
     if (!triggers.empty())
         cfg << "\n; From ReaLearn.\n" << triggers;

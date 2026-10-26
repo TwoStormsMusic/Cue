@@ -13,6 +13,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QSettings>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -201,6 +202,26 @@ Window::Window(QWidget* parent) : QWidget(parent) {
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(lastOut_).absolutePath()));
     });
 
+    // Pedals for REAPER projects: the project's ReaLearn, or a Cue pedal file.
+    auto* pedalsLabel = new QLabel("Pedals for .RPP:");
+    pedalsLabel->setStyleSheet(QString("color: %1;").arg(css(muted)));
+    pedalsName_ = new QLabel;
+    auto* pedalsChoose = new QPushButton("Choose…");
+    pedalsClear_ = new QPushButton("Use ReaLearn");
+    for (auto* b : {pedalsChoose, pedalsClear_})
+        b->setCursor(Qt::PointingHandCursor);
+    connect(pedalsChoose, &QPushButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(this, "Cue pedal file", QFileInfo(pedals_).absolutePath(), "Cue pedal files (*.ini)");
+        if (!path.isEmpty())
+            setPedals(path);
+    });
+    connect(pedalsClear_, &QPushButton::clicked, this, [this] { setPedals(QString()); });
+    auto* pedalsRow = new QHBoxLayout;
+    pedalsRow->addWidget(pedalsLabel);
+    pedalsRow->addWidget(pedalsName_, 1);
+    pedalsRow->addWidget(pedalsChoose);
+    pedalsRow->addWidget(pedalsClear_);
+
     auto* buttons = new QHBoxLayout;
     buttons->addStretch();
     buttons->addWidget(open_);
@@ -212,6 +233,7 @@ Window::Window(QWidget* parent) : QWidget(parent) {
     layout->addWidget(subtitle);
     layout->addSpacing(6);
     layout->addWidget(drop_, 3);
+    layout->addLayout(pedalsRow);
     layout->addSpacing(4);
     layout->addWidget(status_);
     layout->addWidget(detail_);
@@ -223,6 +245,16 @@ Window::Window(QWidget* parent) : QWidget(parent) {
     notes_->hide();
     open_->hide();
     connect(drop_, &DropZone::fileChosen, this, &Window::convert);
+    setPedals(QSettings("TwoStorms", "Cue Converter").value("pedals").toString());
+}
+
+void Window::setPedals(const QString& path) {
+    pedals_ = path;
+    QSettings("TwoStorms", "Cue Converter").setValue("pedals", path);
+    pedalsName_->setText(path.isEmpty() ? "from the project's ReaLearn" : QFileInfo(path).fileName());
+    pedalsName_->setStyleSheet(QString("color: %1;").arg(css(path.isEmpty() ? text : purple)));
+    pedalsName_->setToolTip(path);
+    pedalsClear_->setVisible(!path.isEmpty());
 }
 
 void Window::convert(const QString& path) {
@@ -233,10 +265,12 @@ void Window::convert(const QString& path) {
     open_->hide();
     const std::string in = path.toStdString();
     // Finding plug-ins can open many files: off the window's thread.
-    std::thread([this, in] {
+    ConvertOptions options;
+    options.mapping = pedals_.toStdString();
+    std::thread([this, in, options] {
         ConvertResult r;
         std::string err;
-        const bool ok = convertFile(in, "", ConvertOptions{}, r, &err);
+        const bool ok = convertFile(in, "", options, r, &err);
         QString summary;
         QStringList notes;
         if (ok) {

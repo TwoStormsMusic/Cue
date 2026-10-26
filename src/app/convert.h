@@ -14,6 +14,9 @@ struct ConvertOptions {
     std::vector<std::string> search; // more folders to look for plug-ins in
     bool scanClap = true;            // open native .clap files to find ids REAPER's cache lacks
     std::string reaperDir = "~/.config/REAPER";
+    // .rpp -> .cue: a Cue pedal file (presets, controls, triggers) to use
+    // instead of the project's ReaLearn, like configs/cue-template-mapping.ini.
+    std::string mapping;
 };
 
 struct ConvertResult {

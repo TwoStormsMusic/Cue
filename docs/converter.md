@@ -80,3 +80,12 @@ converting the project back to a `.cue` takes them from there: a performance
 comes back as it went, and the converter's own ReaLearn mappings are not read.
 Pedals changed in ReaLearn are therefore not read back; change them in Cue.
 Any other ReaLearn mappings in the project are read as simple mappings are.
+
+### A pedal file instead of ReaLearn
+
+A project whose ReaLearn works through formulas and parameters (like the
+template) keeps few of its pedals. Choose a Cue pedal file under the drop area
+(**Pedals for .RPP**, or `--mapping` on `cue import-rpp`) and every `.RPP`
+converted takes its pedals, controls and FCB settings from that file instead,
+ignoring the project's ReaLearn. **Use ReaLearn** goes back to reading it. The
+choice is remembered.

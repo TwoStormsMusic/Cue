@@ -79,7 +79,16 @@ bool rppToCue(const std::string& in, const std::string& out, const ConvertOption
     const std::string project = fs::path(in).stem().string();
     SystemLocator locator(options.search, options.reaperDir, options.scanClap);
     Import imp;
-    if (!convertRpp(text, project, locator, "", imp, error))
+    std::string mapping;
+    if (!options.mapping.empty()) {
+        std::error_code ec;
+        mapping = fs::absolute(expandPath(options.mapping), ec).string();
+        if (!fs::exists(mapping, ec)) {
+            *error = "pedal file " + options.mapping + " not found";
+            return false;
+        }
+    }
+    if (!convertRpp(text, project, locator, mapping, imp, error))
         return false;
     // The import is a config with its states beside it: read it back from a
     // temporary folder and save it as one file.
@@ -102,6 +111,8 @@ bool rppToCue(const std::string& in, const std::string& out, const ConvertOption
     if (!saveCue(config, out, error, &warnings))
         return false;
     result.notes = imp.notes;
+    if (!mapping.empty())
+        result.notes.insert(result.notes.begin(), "pedals: from " + fs::path(mapping).filename().string() + ", not from ReaLearn");
     result.notes.insert(result.notes.end(), warnings.begin(), warnings.end());
     result.chains = imp.chains;
     result.plugins = imp.plugins;
