@@ -125,6 +125,11 @@ void SettingsView::paint(QPainter& p) {
         s.settings.fullScreen = i == 0;
         changed();
     });
+    y = row(p, y, "Show modified wire parameters", "level, width and pan on the routing board's wires", {"On", "Off"},
+            st.wireTags ? 0 : 1, [this](int i) {
+                s.settings.wireTags = i == 0;
+                changed();
+            });
 
     y += 10 * u;
     section("TUNER (SAVED WITH THE PERFORMANCE)");

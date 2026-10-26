@@ -48,8 +48,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -320,7 +322,7 @@ bool portOf(const Json& j, bool from, bool key, const Config& config, const Chai
 }
 
 // A wire from a request: its ends, and its gains (level_db, width and pan
-// in per cent) over those it has, or a plain wire's.
+// in per cent, muted) over those it has, or a plain wire's.
 bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec& w, std::string* error) {
     if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
         return false;
@@ -330,6 +332,7 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
     w.gains.levelDb = req.value("level_db", w.gains.levelDb);
     w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
     w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
+    w.gains.muted = req.value("muted", w.gains.muted);
     if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1) {
         *error = "a wire's width is 0 to 200 % and its pan -100 to 100";
         return false;
@@ -387,44 +390,9 @@ void captureStates(const Rig& rig, Config& config) {
     for (auto& scene : config.scenes)
         for (auto& chain : scene.chains) {
             const int index = c++;
-            for (size_t slot = 0; slot < chain.blocks.size(); ++slot) {
-                    PluginSpec& ps = chain.blocks[slot];
-                    const int k = rig.find(index, slot);
-                    if (k < 0)
-                        continue;
-                    Processor* p = rig.plugins[k].processor;
-                    bool ok = true;
-                    if (ps.kind == "clap") {
-                        std::vector<uint8_t> state;
-                        ok = static_cast<ClapProcessor*>(p)->saveState(state);
-                        if (ok) {
-                            ps.state = std::move(state);
-                            ps.controllerState.clear();
-                        }
-                    } else if (ps.kind == "vst3") {
-                        std::vector<uint8_t> state, controller;
-                        ok = static_cast<Vst3Processor*>(p)->saveState(state, controller);
-                        if (ok) {
-                            ps.state = std::move(state);
-                            ps.controllerState = std::move(controller);
-                        }
-                    } else {
-                        continue;
-                    }
-                    if (ok)
-                        ps.embeddedState = true;
-                    else
-                        std::fprintf(stderr, "warning: %s did not give its state; saving the one it was loaded with\n", p->name().c_str());
-                    // A param line in the file wins over the state when the
-                    // performance loads, so the lines follow what the
-                    // plug-in says now: a move made in its own editor is
-                    // kept rather than set back.
-                    for (auto& [id, value] : ps.params) {
-                        double now = value;
-                        if (p->paramValue(id, now))
-                            value = now;
-                    }
-            }
+            for (size_t slot = 0; slot < chain.blocks.size(); ++slot)
+                if (const int k = rig.find(index, slot); k >= 0)
+                    captureState(*rig.plugins[k].processor, chain.blocks[slot]);
         }
 }
 
@@ -594,6 +562,29 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     EditorHost editors;
     // Changes to the chains while they play.
     LiveRig live{config, rig, show, &editors};
+    // What removals took out, by the token the app gave, so an undo can put
+    // them back. The oldest go first.
+    std::map<std::string, Removed> removedPlugins;
+    std::deque<std::string> removedOrder;
+    // The performance as the app sees it: the file's, and which plug-ins
+    // have a side-chain input to wire into.
+    auto livePerformance = [&](Json& out, std::string* why) {
+        std::string text;
+        if (!performanceText(config, text, why))
+            return false;
+        out = Json::parse(text);
+        int c = 0;
+        for (Json& scene : out.at("scenes"))
+            for (Json& chain : scene.at("chains")) {
+                int slot = 0;
+                for (Json& block : chain.at("blocks")) {
+                    if (Processor* p = rig.at(c, slot++); p && p->hasSidechain())
+                        block["has_key"] = true;
+                }
+                ++c;
+            }
+        return true;
+    };
 
     // The control socket: the app and cue ctl.
     Service service;
@@ -625,10 +616,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         } else if (cmd == "status") {
             reply["status"] = status();
         } else if (cmd == "performance") {
-            std::string text;
-            if (!performanceText(config, text, &err))
+            Json now;
+            if (!livePerformance(now, &err))
                 return refuse(err);
-            reply["performance"] = Json::parse(text);
+            reply["performance"] = now;
         } else if (cmd == "select") {
             int index = -1;
             if (req.contains("step")) {
@@ -734,13 +725,17 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 ps->shownSet = true;
             }
             reply["plugin"] = pluginJson(rig, k, *ps, show.ties(chain, slot), &editors);
-        } else if (cmd == "add" || cmd == "remove" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
-            const int chain = req.at("chain").get<int>();
+        } else if (cmd == "add" || cmd == "remove" || cmd == "restore" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
+            // restore: the chain is the one it was taken out of.
+            const std::string token = req.value("token", std::string());
+            const auto taken = removedPlugins.find(token);
+            if (cmd == "restore" && taken == removedPlugins.end())
+                return refuse("nothing taken out is kept as '" + token + "'");
+            const int chain = cmd == "restore" ? taken->second.chain : req.at("chain").get<int>();
             ChainSpec* cs = chainSpec(config, chain);
             if (!cs)
                 return refuse("there is no chain number " + std::to_string(chain + 1));
             std::string why;
-            bool changed = true; // the routing, not only where something is drawn
             if (cmd == "add") {
                 // As a plugin line has it, or by its parts.
                 PluginSpec spec;
@@ -776,14 +771,39 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     return refuse(why);
                 reply["slot"] = slot;
             } else if (cmd == "remove") {
-                if (!removePlugin(live, chain, req.at("slot").get<size_t>(), &why))
+                Removed removed;
+                if (!removePlugin(live, chain, req.at("slot").get<size_t>(), &removed, &why))
                     return refuse(why);
+                if (!token.empty()) {
+                    if (!removedPlugins.count(token))
+                        removedOrder.push_back(token);
+                    removedPlugins[token] = std::move(removed);
+                    if (removedOrder.size() > 100) {
+                        removedPlugins.erase(removedOrder.front());
+                        removedOrder.pop_front();
+                    }
+                }
+            } else if (cmd == "restore") {
+                if (!restorePlugin(live, taken->second, &why))
+                    return refuse(why);
+                reply["slot"] = taken->second.slot;
             } else if (cmd == "wire" || cmd == "unwire") {
                 WireSpec w;
                 if (!wireOf(req, config, *cs, w, &why))
                     return refuse(why);
+                const bool had = std::any_of(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == w.from && o.to == w.to; });
                 if (!(cmd == "wire" ? setWire(live, chain, w, &why) : removeWire(live, chain, w.from, w.to, &why)))
                     return refuse(why);
+                if (cmd == "wire" && had) {
+                    // Only its gains: the wire, not the whole performance.
+                    Json wj = {{"from", req.at("from")}, {"to", req.at("to")}, {"level_db", w.gains.levelDb},
+                               {"width", std::round(w.gains.width * 1000) / 10}, {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted}};
+                    if (w.to.key)
+                        wj["key"] = true;
+                    reply["wire"] = wj;
+                    service.publish("wire", {{"chain", chain}, {"wire", wj}});
+                    return;
+                }
             } else if (cmd == "wires") {
                 // The chain's wires all at once, as the performance lists them.
                 std::vector<WireSpec> wires;
@@ -796,23 +816,22 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (!setWires(live, chain, wires, &why))
                     return refuse(why);
             } else {
+                // Only where it is drawn: the app that asked knows.
                 if (!placePlugin(live, chain, req.at("slot").get<size_t>(), req.at("x").get<double>(), req.at("y").get<double>(), &why))
                     return refuse(why);
-                changed = false;
+                return;
             }
             // Everyone watching sees the chain as it is now.
-            std::string text;
-            if (performanceText(config, text, &why)) {
-                const Json now = Json::parse(text);
+            Json now;
+            if (livePerformance(now, &why)) {
                 reply["performance"] = now;
-                if (changed)
-                    service.publish("performance", now);
+                service.publish("performance", now);
             }
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
             refuse("unknown command '" + cmd +
-                   "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, wire, unwire, wires, "
+                   "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
                    "place, quit, subscribe, unsubscribe)");
         }
     };

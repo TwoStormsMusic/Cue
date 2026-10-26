@@ -33,19 +33,94 @@ QString pluginName(const QJsonObject& p) {
 
 } // namespace
 
-int ChainInfo::numPlugins() const {
-    int n = 0;
-    for (const LineInfo& l : lines)
-        n += l.plugins.size();
-    return n;
+QJsonValue PortInfo::json(const QStringList& outputs) const {
+    switch (kind) {
+    case Kind::Input: return "in";
+    case Kind::Block: return index;
+    case Kind::Output: break;
+    }
+    return index >= 0 && index < outputs.size() ? outputs[index] : QString("out%1").arg(index + 1);
 }
 
-const PluginInfo* ChainInfo::plugin(int slot) const {
-    for (const LineInfo& l : lines)
-        for (const PluginInfo& p : l.plugins)
-            if (p.slot == slot)
-                return &p;
-    return nullptr;
+QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QString& cmd) const {
+    QJsonObject r{{"cmd", cmd}, {"chain", chain}, {"from", from.json(outputs)}, {"to", to.json(outputs)}};
+    if (to.key)
+        r["key"] = true;
+    if (cmd == "wire") {
+        r["level_db"] = levelDb;
+        r["width"] = width;
+        r["pan"] = pan;
+        r["muted"] = muted;
+    }
+    return r;
+}
+
+const PluginInfo* ChainInfo::plugin(int slot) const { return slot >= 0 && slot < blocks.size() ? &blocks[slot] : nullptr; }
+
+int ChainInfo::wire(const PortInfo& from, const PortInfo& to) const {
+    for (int i = 0; i < wires.size(); ++i)
+        if (wires[i].from == from && wires[i].to == to)
+            return i;
+    return -1;
+}
+
+QVector<int> ChainInfo::outputsUsed() const {
+    QVector<int> out;
+    for (const WireInfo& w : wires)
+        if (w.to.kind == PortInfo::Kind::Output && !out.contains(w.to.index))
+            out << w.to.index;
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+Flow flowOf(const ChainInfo& c, const std::function<bool(int)>& bypassed, bool inputsMuted, int numOutputs) {
+    const int n = c.blocks.size(), m = c.wires.size();
+    Flow f;
+    f.wires.fill(false, m);
+    f.played.fill(false, n);
+    f.heard.fill(false, numOutputs);
+    auto isBlock = [n](const PortInfo& p) { return p.kind == PortInfo::Kind::Block && p.index >= 0 && p.index < n; };
+    auto silences = [&](int slot) { return c.blocks[slot].muteOnBypass && bypassed && bypassed(slot); };
+    auto passes = [](const WireInfo& w) { return !w.muted && w.levelDb > -96; };
+    // Loops are refused, so n passes settle it.
+    // Fed: the input reaches its main input (whatever the gains); sounding:
+    // sound comes out of it.
+    QVector<bool> fed(n, false), sounding(n, false);
+    for (int pass = 0; pass <= n; ++pass)
+        for (const WireInfo& w : c.wires) {
+            if (!isBlock(w.to) || w.to.key)
+                continue;
+            const bool from = w.from.kind == PortInfo::Kind::Input || (isBlock(w.from) && fed[w.from.index]);
+            const bool sound = w.from.kind == PortInfo::Kind::Input ? !inputsMuted : isBlock(w.from) && sounding[w.from.index];
+            if (from)
+                fed[w.to.index] = true;
+            if (sound && passes(w) && !silences(w.to.index))
+                sounding[w.to.index] = true;
+        }
+    // Heard: an output hears it, through wires or a key (whatever the
+    // gains); leads on: its sound goes on to an output.
+    QVector<bool> heard(n, false), leads(n, false);
+    for (int pass = 0; pass <= n; ++pass)
+        for (const WireInfo& w : c.wires) {
+            if (!isBlock(w.from))
+                continue;
+            const bool out = w.to.kind == PortInfo::Kind::Output;
+            if (out || (isBlock(w.to) && heard[w.to.index]))
+                heard[w.from.index] = true;
+            if (passes(w) && (out || (isBlock(w.to) && leads[w.to.index] && !silences(w.to.index))))
+                leads[w.from.index] = true;
+        }
+    for (int b = 0; b < n; ++b)
+        f.played[b] = fed[b] && heard[b];
+    for (int i = 0; i < m; ++i) {
+        const WireInfo& w = c.wires[i];
+        const bool sound = w.from.kind == PortInfo::Kind::Input ? !inputsMuted : isBlock(w.from) && sounding[w.from.index];
+        const bool on = w.to.kind == PortInfo::Kind::Output || (isBlock(w.to) && leads[w.to.index] && !silences(w.to.index));
+        f.wires[i] = sound && passes(w) && on && (w.from.kind == PortInfo::Kind::Input || f.played[w.from.index]);
+        if (f.wires[i] && w.to.kind == PortInfo::Kind::Output && w.to.index >= 0 && w.to.index < numOutputs)
+            f.heard[w.to.index] = true;
+    }
+    return f;
 }
 
 Performance Performance::fromJson(const QJsonObject& j) {
@@ -73,50 +148,46 @@ Performance Performance::fromJson(const QJsonObject& j) {
             c.warm = cj.value("warm").toString("next");
             c.input = cj.value("input").toString(perf.inputs.first());
             c.pedal = cj.value("pedal").toInt();
-            int slot = 0;
-            for (const QJsonValue& lv : cj.value("lines").toArray()) {
-                const QJsonObject lj = lv.toObject();
-                LineInfo line;
-                line.name = lj.value("name").toString();
-                line.from = lj.value("from").toString();
-                line.after = lj.value("after").toInt();
-                if (!c.lines.isEmpty()) {
-                    line.parent = 0;
-                    for (int k = 0; k < c.lines.size(); ++k)
-                        if (c.lines[k].name == line.from)
-                            line.parent = k;
-                }
-                for (const QJsonValue& pv : lj.value("plugins").toArray()) {
-                    const QJsonObject pj = pv.toObject();
-                    PluginInfo p;
-                    p.slot = slot++;
-                    p.format = pj.value("format").toString();
-                    p.path = pj.value("path").toString();
-                    p.id = pj.value("id").toString();
-                    p.label = pj.value("label").toString(pluginName(pj));
-                    p.bypassed = pj.value("bypassed").toBool();
-                    p.muteOnBypass = pj.value("bypass_mode").toString() == "mute";
-                    line.plugins << p;
-                }
-                c.lines << line;
+            for (const QJsonValue& pv : cj.value("blocks").toArray()) {
+                const QJsonObject pj = pv.toObject();
+                PluginInfo p;
+                p.slot = c.blocks.size();
+                p.format = pj.value("format").toString();
+                p.path = pj.value("path").toString();
+                p.id = pj.value("id").toString();
+                p.args = strings(pj.value("args"));
+                p.label = pj.value("label").toString(pluginName(pj));
+                p.bypassed = pj.value("bypassed").toBool();
+                p.muteOnBypass = pj.value("bypass_mode").toString() == "mute";
+                p.hasKey = pj.value("has_key").toBool();
+                p.placed = pj.contains("x") || pj.contains("y");
+                p.at = QPointF(pj.value("x").toDouble(), pj.value("y").toDouble());
+                c.blocks << p;
             }
-            if (c.lines.isEmpty())
-                c.lines << LineInfo{};
-            // Every output: where the file says, else the end of the main line.
-            const QJsonObject outs = cj.value("outputs").toObject();
-            for (const QString& o : perf.outputs) {
-                TapInfo t;
-                t.output = o;
-                t.after = c.lines[0].plugins.size();
-                if (outs.contains(o)) {
-                    const QJsonObject tj = outs.value(o).toObject();
-                    const QString line = tj.value("line").toString();
-                    for (int k = 0; k < c.lines.size(); ++k)
-                        if (c.lines[k].name == line)
-                            t.line = k;
-                    t.after = std::min<int>(tj.value("after").toInt(), c.lines[t.line].plugins.size());
+            // A wire's ends: a block by number, the input by name, an output by name.
+            auto port = [&](const QJsonValue& v, bool from, bool key, PortInfo& out) {
+                if (v.isDouble()) {
+                    out = PortInfo::block(v.toInt(), !from && key);
+                    return v.toInt() >= 0 && v.toInt() < c.blocks.size();
                 }
-                c.taps << t;
+                if (from) {
+                    out = PortInfo::input();
+                    return true;
+                }
+                const int o = perf.outputs.indexOf(v.toString());
+                out = PortInfo::output(o);
+                return o >= 0;
+            };
+            for (const QJsonValue& wv : cj.value("wires").toArray()) {
+                const QJsonObject wj = wv.toObject();
+                WireInfo w;
+                if (!port(wj.value("from"), true, false, w.from) || !port(wj.value("to"), false, wj.value("key").toBool(), w.to))
+                    continue;
+                w.levelDb = wj.value("level_db").toDouble(0);
+                w.width = wj.value("width").toDouble(100);
+                w.pan = wj.value("pan").toDouble(0);
+                w.muted = wj.value("muted").toBool();
+                c.wires << w;
             }
             scene.chains << c.index;
             perf.chains << c;

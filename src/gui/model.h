@@ -5,36 +5,55 @@
 // tuner's reading. Plain data, so the views and the tests can share it.
 
 #include <QJsonObject>
+#include <QJsonValue>
+#include <QPointF>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
+#include <functional>
 #include <optional>
 
 namespace cue::gui {
 
-// One plug-in of a chain, from performance.json. slot is its place in the
-// chain counted line by line, as the engine numbers them.
+// One plug-in of a chain, from performance.json: a block. slot is its
+// place in the chain's list of blocks, from 0, as the engine numbers them.
 struct PluginInfo {
     int slot = 0;
     QString label, format, path, id;
+    QStringList args;      // a built-in's name and numbers
     bool bypassed = false; // as the file starts it
     bool muteOnBypass = false;
+    bool hasKey = false;   // it has a side-chain input to wire into
+    bool placed = false;   // the routing board draws it where it was put...
+    QPointF at;            // ...its centre, in board units
 };
 
-struct LineInfo {
-    QString name;        // empty for the main line
-    QString from;        // the line it leaves ("" = the main line)
-    int after = 0;       // after this many of that line's plug-ins
-    int parent = -1;     // index of that line
-    QVector<PluginInfo> plugins;
+// An end of a wire: the chain's input, a plug-in (its input, or its key)
+// or one of the performance's outputs.
+struct PortInfo {
+    enum class Kind { Input, Block, Output };
+    Kind kind = Kind::Input;
+    int index = 0; // the plug-in's slot, or the output's number
+    bool key = false;
+    static PortInfo input() { return {}; }
+    static PortInfo block(int slot, bool key = false) { return {Kind::Block, slot, key}; }
+    static PortInfo output(int o) { return {Kind::Output, o, false}; }
+    bool operator==(const PortInfo& o) const { return kind == o.kind && index == o.index && key == o.key; }
+    bool operator!=(const PortInfo& o) const { return !(*this == o); }
+    // As a request names it: a slot, "in", or the output's name.
+    QJsonValue json(const QStringList& outputs) const;
 };
 
-// Where a chain feeds one output: a line, after so many of its plug-ins.
-struct TapInfo {
-    QString output;
-    int line = 0;
-    int after = 0;
+// A wire and what it does to the sound: its level (-96 dB and below is
+// silent), width in % (0 = mono), then a balance, -100 (left) to 100.
+struct WireInfo {
+    PortInfo from, to;
+    double levelDb = 0, width = 100, pan = 0;
+    bool muted = false;
+    bool neutral() const { return levelDb == 0 && width == 100 && pan == 0 && !muted; }
+    // The request that makes it so: {"cmd": "wire", "chain", "from", "to", ...}.
+    QJsonObject request(int chain, const QStringList& outputs, const QString& cmd = "wire") const;
 };
 
 struct ChainInfo {
@@ -42,11 +61,28 @@ struct ChainInfo {
     int scene = 0;
     QString name, display, warm, input;
     int pedal = 0;
-    QVector<LineInfo> lines;
-    QVector<TapInfo> taps; // one per output
-    int numPlugins() const;
+    QVector<PluginInfo> blocks;
+    QVector<WireInfo> wires;
+    int numPlugins() const { return blocks.size(); }
     const PluginInfo* plugin(int slot) const;
+    // The wire between two ports, by its place in wires, or -1.
+    int wire(const PortInfo& from, const PortInfo& to) const;
+    // The outputs it has a wire to, by number.
+    QVector<int> outputsUsed() const;
 };
+
+// What a chain would do if it played (whether it does or not). A wire is
+// green when sound from the input would pass through it on its way to an
+// output: not after a plug-in bypassed to silence, not on a wire muted, not
+// where nothing leads on to an output. A plug-in is played when the input
+// reaches it and an output hears it (through it or its key); the engine
+// processes only those.
+struct Flow {
+    QVector<bool> wires;  // by wire
+    QVector<bool> played; // by slot
+    QVector<bool> heard;  // by output: some sound would reach it
+};
+Flow flowOf(const ChainInfo& c, const std::function<bool(int slot)>& bypassed, bool inputsMuted, int numOutputs);
 
 struct SceneInfo {
     QString name;

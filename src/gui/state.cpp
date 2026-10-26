@@ -20,6 +20,7 @@ void Settings::load() {
     scale = std::clamp(s.value("scale", scale).toDouble(), 0.5, 2.5);
     tunerWhenMuted = s.value("tuner_when_muted", tunerWhenMuted).toBool();
     fullScreen = s.value("full_screen", fullScreen).toBool();
+    wireTags = s.value("wire_tags", wireTags).toBool();
 }
 
 void Settings::save() const {
@@ -29,12 +30,13 @@ void Settings::save() const {
     s.setValue("scale", scale);
     s.setValue("tuner_when_muted", tunerWhenMuted);
     s.setValue("full_screen", fullScreen);
+    s.setValue("wire_tags", wireTags);
 }
 
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
     connect(&link, &EngineLink::connectionChanged, this, &AppState::onConnection);
     connect(&link, &EngineLink::event, this, &AppState::onEvent);
-    link.setEvents({"status", "log", "tuner"});
+    link.setEvents({"status", "log", "tuner", "performance", "wire"});
 }
 
 void AppState::onConnection(bool up) {
@@ -79,6 +81,11 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         tuner = TunerReading::fromJson(m);
         strobePhase = tuner.turn(strobePhase, dt);
         emit tunerChanged();
+    } else if (name == "performance") {
+        perf = Performance::fromJson(m);
+        emit changed();
+    } else if (name == "wire") {
+        setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
     } else if (name == "log") {
         log.append({m.value("level").toString(), m.value("text").toString(), QDateTime::currentDateTime()});
         if (log.size() > 200)
@@ -104,6 +111,54 @@ bool AppState::check(const QJsonObject& reply, const QString& what) {
         return true;
     emit message(what + ": " + reply.value("error").toString("no answer"), true);
     return false;
+}
+
+void AppState::change(const QJsonObject& request, std::function<void(const QJsonObject&)> then) {
+    link.request(request, [this, request, then](const QJsonObject& r) {
+        follow(request, r);
+        if (then)
+            then(r);
+    });
+}
+
+void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
+    if (!r.value("ok").toBool())
+        return;
+    if (r.contains("performance")) {
+        perf = Performance::fromJson(r.value("performance").toObject());
+        emit changed();
+    } else if (r.contains("wire")) {
+        setWire(request.value("chain").toInt(-1), r.value("wire").toObject());
+    } else if (request.value("cmd").toString() == "place") {
+        const int chain = request.value("chain").toInt(-1), slot = request.value("slot").toInt(-1);
+        if (chain >= 0 && chain < perf.chains.size() && slot >= 0 && slot < perf.chains[chain].blocks.size()) {
+            PluginInfo& b = perf.chains[chain].blocks[slot];
+            b.placed = true;
+            b.at = QPointF(request.value("x").toDouble(), request.value("y").toDouble());
+            emit changed();
+        }
+    }
+}
+
+// A wire's gains, as the engine has them now.
+void AppState::setWire(int chain, const QJsonObject& wj) {
+    if (chain < 0 || chain >= perf.chains.size())
+        return;
+    ChainInfo& c = perf.chains[chain];
+    auto port = [&](const QJsonValue& v, bool from) {
+        if (v.isDouble())
+            return PortInfo::block(v.toInt(), !from && wj.value("key").toBool());
+        return from ? PortInfo::input() : PortInfo::output(perf.outputs.indexOf(v.toString()));
+    };
+    const int i = c.wire(port(wj.value("from"), true), port(wj.value("to"), false));
+    if (i < 0)
+        return;
+    WireInfo& w = c.wires[i];
+    w.levelDb = wj.value("level_db").toDouble(0);
+    w.width = wj.value("width").toDouble(100);
+    w.pan = wj.value("pan").toDouble(0);
+    w.muted = wj.value("muted").toBool();
+    emit changed();
 }
 
 void AppState::select(int chain) {
@@ -157,11 +212,27 @@ void AppState::takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing) {
     const Edit e = from.takeLast();
     to.append(e);
     emit undoChanged();
-    link.request(undoing ? e.undo : e.redo, [this, e, undoing](const QJsonObject& r) {
+    // One request, or a batch of them, in order: what is said comes with the last.
+    const QJsonObject request = undoing ? e.undo : e.redo;
+    QVector<QJsonObject> requests;
+    if (request.value("cmd").toString() == "batch") {
+        for (const QJsonValue& v : request.value("requests").toArray())
+            requests << v.toObject();
+    } else {
+        requests << request;
+    }
+    for (int i = 0; i + 1 < requests.size(); ++i)
+        link.request(requests[i], [this, undoing, one = requests[i]](const QJsonObject& r) {
+            follow(one, r);
+            check(r, undoing ? "Not undone" : "Not redone");
+        });
+    const QJsonObject last = requests.isEmpty() ? QJsonObject() : requests.last();
+    link.request(last, [this, e, undoing, last](const QJsonObject& r) {
+        follow(last, r);
         if (!check(r, undoing ? "Not undone" : "Not redone"))
             return;
         emit message((undoing ? "Undone: " : "Redone: ") + e.what, false);
-        emit undone(e.chain, e.slot);
+        emit undone(e.chain, undoing || e.redoSlot == -2 ? e.slot : e.redoSlot);
     });
 }
 

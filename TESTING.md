@@ -16,7 +16,7 @@ They come back at the next login, or with `systemctl --user start pipewire.socke
 ./run-tests.sh
 ```
 
-Runs the 82 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs, the built-in tuner), the app's 11 tests (every view at six screen sizes, taps, and the app against a running engine that is stopped and started again) and two benches. Every test should say `OK` or `PASS`. **Send** the last 30 lines if anything fails.
+Runs the 105 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches and wires, live rewiring while audio plays, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs, the built-in tuner), the app's 20 tests (every view at six screen sizes, taps, the routing board, and the app against a running engine that is stopped and started again) and two benches. Every test should say `OK` or `PASS`. **Send** the last 30 lines if anything fails.
 
 ## 2. Real-time settings
 
@@ -305,6 +305,40 @@ Same start as step 8 (`bin/cue-app --version` should say 0.6.2). Try each on the
 
 **Undo.** Move a slider, bypass a plug-in, pick a parameter. Then **Undo** (top right, or Ctrl+Z) three times: each comes back, in the reverse order, and the panel shows the plug-in it was on. **Redo** (or Ctrl+Shift+Z) makes them again. Changes made with a pedal or in a plug-in's own editor are not undone by it.
 
+## 13. The routing board (0.7.0)
+
+Same start as step 8 (`bin/cue-app --version` should say 0.7.0). Copy your `.cue` first: once 0.7.0 saves it, it is format 2, and 0.6 cannot open it. Try each on the touchscreen and with a mouse.
+
+**First, what 0.6.2 left to check** (step 12 has the details):
+
+1. With a TwoStorms editor open, **Close editor** and the panel's sliders work on the first tap.
+2. Typing into a TwoStorms editor's text box, and a Neural DSP one's, works.
+3. Tapping a chain twice plays it; tapping a plug-in twice switches it off or on.
+4. On a chain that is not playing, wires are green where sound would pass and grey where it would not.
+5. **Undo**, Ctrl+Z and Ctrl+Y (redo) work.
+
+**Your performance opens as it was.** Open your 0.6 `.cue`. Every chain should sound the same as before, and its board should show the same plug-ins in the same order, branches on rows below.
+
+**Wires.** On a chain that is playing:
+
+- Drag from a plug-in's right dot to an output: a new wire. You should hear it join with no click. Drag from the input or a plug-in's right dot to another plug-in's left dot: two wires into one input add up.
+- A wire from a plug-in back to one before it is refused with a message.
+- Tap a wire: it turns orange and the panel shows its level, width and pan. Move each fader while you play: the sound follows smoothly, with no click and no gap. A double tap on a fader sets it back. The wire gets thick, with a tag saying what changed; Settings > **Show modified wire parameters** hides the tags.
+- Width at 0% makes that wire mono; pan then turns one side down, like a balance.
+- **Mute** silences that wire only; **Delete** (or the Delete key) takes it away.
+
+**Plug-ins.**
+
+- Tap the **+** on the selected wire and pick a plug-in: it goes onto that wire and the blocks after it move along. You should hear a short fade, no click.
+- **+ Plug-in** puts one on the board unwired: grey, "not connected", and it costs no CPU until it is wired from the input to an output.
+- Drag a block somewhere else. Wire it. The board stays as you left it.
+- Select a plug-in and **Remove** it (or press Delete). Then **Undo**: it comes back with its settings and its wires. **Redo** takes it out again.
+- With a plug-in on the board that has a side-chain input (a gate, a compressor with a key), drag a wire to the small triangle low on its left.
+
+**Save and open again.** Tap **Save**, quit the app and the engine, start them again: the wires, their levels, widths and pans, and where you put each block are all as you left them.
+
+**Rig check.** Then play for 30 minutes, switching chains every few seconds, with a wire edit or two every few minutes. **Send** the status line at the end: `xruns 0`, as in step 8.
+
 ## What passes
 
 | Check | Pass when |
@@ -324,5 +358,6 @@ Same start as step 8 (`bin/cue-app --version` should say 0.6.2). Try each on the
 | Tuner | The note settles fast and holds steady; the tuner pedal brings the tuner view up and back |
 | App closed | `pkill -9 cue-app` mid-song makes no sound at all; the app comes back within a second |
 | App costs nothing | 30 minutes with the app on the stage view: still `xruns 0` |
+| Routing | Wiring, inserting and removing while playing makes no click; fader moves on a wire are smooth; 30 minutes of it, still `xruns 0` |
 
 If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which chain you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

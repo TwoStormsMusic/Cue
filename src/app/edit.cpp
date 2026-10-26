@@ -182,10 +182,14 @@ bool addPlugin(LiveRig& live, int chain, PluginSpec spec, const WireSpec* on, si
     return true;
 }
 
-bool removePlugin(LiveRig& live, int chain, size_t slot, std::string* error) {
+bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::string* error) {
     ChainSpec* cs = chainSpec(live.config, chain);
     if (!cs || slot >= cs->blocks.size())
         return fail(error, "there is no plug-in " + std::to_string(slot + 1) + " in chain number " + std::to_string(chain + 1));
+    Removed taken{chain, slot, cs->blocks[slot], cs->wires, cs->blocks.size()};
+    if (removed)
+        if (Processor* p = live.rig.at(chain, slot))
+            captureState(*p, taken.spec);
     ChainSpec next = *cs;
     const Port self = Port::block(static_cast<int>(slot));
     std::vector<WireSpec> into, outOf, wires;
@@ -217,7 +221,29 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, std::string* error) {
     std::string why;
     if (!rewire(live, chain, std::move(next), keep, {}, &why))
         return fail(error, why.find("no plug-in named") != std::string::npos ? "the mappings still use it: " + why : why);
+    if (removed)
+        *removed = std::move(taken);
     return true;
+}
+
+bool restorePlugin(LiveRig& live, const Removed& removed, std::string* error) {
+    ChainSpec* cs = chainSpec(live.config, removed.chain);
+    if (!cs)
+        return fail(error, "there is no chain number " + std::to_string(removed.chain + 1));
+    if (cs->blocks.size() + 1 != removed.blocks || removed.slot > cs->blocks.size())
+        return fail(error, "chain " + cs->name + " has changed since that plug-in was taken out, so it cannot go back");
+    std::unique_ptr<Processor> p;
+    if (!loadLivePlugin(removed.spec, live.rig.engine->settings(), p, error))
+        return false;
+    ChainSpec next = *cs;
+    next.blocks.insert(next.blocks.begin() + static_cast<long>(removed.slot), removed.spec);
+    next.wires = removed.wires;
+    std::vector<int> keep;
+    for (size_t i = 0; i < next.blocks.size(); ++i)
+        keep.push_back(i < removed.slot ? static_cast<int>(i) : i == removed.slot ? -1 : static_cast<int>(i) - 1);
+    std::vector<std::unique_ptr<Processor>> added;
+    added.push_back(std::move(p));
+    return rewire(live, removed.chain, std::move(next), keep, std::move(added), error);
 }
 
 bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error) {

@@ -66,6 +66,9 @@ bool buildRig(Config& config, Rig& rig, std::string* error);
 // A plug-in for a chain that is playing: loaded, activated for the engine,
 // with its state and params set. Not yet in any chain.
 bool loadLivePlugin(const PluginSpec& spec, const EngineSettings& engine, std::unique_ptr<Processor>& out, std::string* error);
+// Its state as it is now, into spec (embedded), and its param lines
+// following what it says now. On the main thread.
+void captureState(Processor& p, PluginSpec& spec);
 
 // The show's output for a live rig: engine commands, plug-in parameters and
 // MIDI into plug-ins, and MIDI to the controller through midiOut.

@@ -75,15 +75,42 @@ over the app (full screen too) until you close it; tapping the app does not
 hide it. What you change there is heard at once and kept by **Save**. The sound never waits on
 an editor: it is drawn between blocks, never on the audio thread, and
 closing one changes nothing about what is heard. **Play this chain** plays the chain shown.
+
+The chain view is also where a chain is wired. A plug-in's inputs are the
+dots on its left, its outputs the dots on its right, and the small triangle
+low on its left is its key (side-chain input), for the plug-ins that have
+one. Drag a block to move it; it stays where you put it. Drag from a dot to
+another to draw a wire: from the input or a plug-in's output, to a plug-in
+or an output. One output can feed any number of wires, each a copy of the
+same sound, and wires into one input add together. A wire that would make
+a loop is refused. Tap a wire to select it (orange): the panel gives its
+**level** (silent to +12 dB, 0 dB at the tick), **width** (100% is stereo
+as it comes, 0% folds left and right to mono) and **pan** (a balance: it
+turns one side down, never moves sound across), in that order; a double tap
+on a fader sets it back. **Mute**, **Insert** and **Delete** are under them.
+A wire whose level, width or pan is changed is drawn thick, with a tag
+saying what is changed (Settings can hide the tags). The **+** on the
+selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
+room. **+ Plug-in** adds one to the board unwired. Both offer the plug-ins
+the performance already has and the built-ins (gain, drive, lowpass, delay);
+the plug-in browser comes later. **Remove** on a block's panel, or Delete,
+takes a plug-in out with its wires. A plug-in that the input does not reach
+or that no output hears is loaded but not processed, drawn grey and marked
+"not connected". The sound changes as you wire: a playing chain fades out
+and back in over 10 ms, a level, width or pan moves smoothly with no fade at
+all, and a chain not playing changes at once.
+
 **Undo** takes back what you changed here (a slider, a bypass, the parameters
-picked), showing where, and **Redo** makes it again; what a pedal or a
-plug-in's own editor changes is not in it. **Save** saves the performance,
-plug-in settings included, to its `.cue`
-file. Moving and wiring blocks comes with the routing editor.
+picked, a wire, a plug-in added, moved or taken out), showing where, and
+**Redo** makes it again; what a pedal or a plug-in's own editor changes is
+not in it. A plug-in taken out comes back with its settings and its wires.
+**Save** saves the performance, plug-in settings, wiring and where each
+block is drawn included, to its `.cue` file.
 
 **Settings.** For this machine: the view the app starts in (Stage, Tuner or
 Chains), CPU and margin in ms or as % of what a block allows, the size of
-everything, the tuner while muted, full screen. For the performance: the
+everything, the tuner while muted, full screen, and whether the routing
+board tags the wires whose level, width or pan is changed. For the performance: the
 tuner's range, reference, tolerance and note names, saved with it.
 
 ## Touch, mouse and keys
@@ -100,7 +127,8 @@ smaller on top.
 | --- | --- |
 | Left, Right, Page Up, Page Down | previous or next chain (on the stage view) |
 | T | the tuner, and back |
-| Esc | the stage view |
+| Esc | the stage view (on the chain view, first lets go of what is selected) |
+| Delete, Backspace | on the chain view: take away the selected wire or plug-in |
 | Ctrl+S | save |
 | Ctrl+Z | undo |
 | Ctrl+Shift+Z, Ctrl+Y | redo |

@@ -20,7 +20,7 @@ std::vector<Line> oneLine(std::vector<std::unique_ptr<Processor>> slots) {
 // A wire's gains as a matrix: L' = c[0] L + c[1] R, R' = c[2] L + c[3] R.
 // Width first (the side signal scaled about the middle), then the balance.
 void coefficients(const WireGains& g, float c[4]) {
-    const float level = g.levelDb <= kWireOffDb ? 0.0f : std::pow(10.0f, g.levelDb / 20.0f);
+    const float level = g.muted || g.levelDb <= kWireOffDb ? 0.0f : std::pow(10.0f, g.levelDb / 20.0f);
     const float w = std::clamp(g.width, 0.0f, 2.0f);
     const float pan = std::clamp(g.pan, -1.0f, 1.0f);
     const float left = level * (pan > 0 ? 1 - pan : 1), right = level * (pan < 0 ? 1 + pan : 1);

@@ -147,9 +147,17 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         applySettings();
         return;
     case Qt::Key_Escape:
+        // On the routing board it first lets go of what is selected.
+        if (current_ == "chains" && static_cast<ChainView*>(views_.value("chains"))->deselect())
+            return;
         autoTuner_ = false;
         showView("stage");
         return;
+    case Qt::Key_Delete:
+    case Qt::Key_Backspace:
+        if (current_ == "chains" && static_cast<ChainView*>(views_.value("chains"))->deleteSelected())
+            return;
+        break;
     case Qt::Key_Q:
         if (ctrl) {
             qApp->quit();

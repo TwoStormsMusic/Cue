@@ -170,6 +170,39 @@ bool loadLivePlugin(const PluginSpec& spec, const EngineSettings& engine, std::u
     return true;
 }
 
+void captureState(Processor& p, PluginSpec& ps) {
+    bool ok = true;
+    if (ps.kind == "clap") {
+        std::vector<uint8_t> state;
+        ok = static_cast<ClapProcessor&>(p).saveState(state);
+        if (ok) {
+            ps.state = std::move(state);
+            ps.controllerState.clear();
+        }
+    } else if (ps.kind == "vst3") {
+        std::vector<uint8_t> state, controller;
+        ok = static_cast<Vst3Processor&>(p).saveState(state, controller);
+        if (ok) {
+            ps.state = std::move(state);
+            ps.controllerState = std::move(controller);
+        }
+    } else {
+        return;
+    }
+    if (ok)
+        ps.embeddedState = true;
+    else
+        std::fprintf(stderr, "warning: %s did not give its state; keeping the one it was loaded with\n", p.name().c_str());
+    // A param line in the file wins over the state when the performance
+    // loads, so the lines follow what the plug-in says now: a move made in
+    // its own editor is kept rather than set back.
+    for (auto& [id, value] : ps.params) {
+        double now = value;
+        if (p.paramValue(id, now))
+            value = now;
+    }
+}
+
 bool buildRig(Config& config, Rig& rig, std::string* error) {
     EngineSettings es = config.engine;
     es.sampleRate = config.audio.rate;

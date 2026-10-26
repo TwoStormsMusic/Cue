@@ -59,8 +59,15 @@ reply repeats:
 | `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
 | `editor` | `chain`, `slot`, `open` (true to open, false to close; true by default); from an app on the same screen, `above` (its X11 window) and `display` (its `DISPLAY`) | `plugin` as above. The window opens on the screen of the computer running the engine, not the app's, so it is the stage computer that shows it. With `above` it stays over the app's window and never takes its focus |
 | `shown` | `chain`, `slot`, `params` (parameter ids, in the order the app shows them) | `plugin` as above; kept as the plug-in's `shown` when the performance is saved |
+| `add` | `chain`, `plugin` (a plugin line's text as in [config.md](config.md), or `format` with `path` and `id`, or `args` for a built-in), optional `label`, `bypassed`, `x` and `y` (where the app draws it), and `on` (a wire, as for `wire`, to put it on) | `slot`, `performance`. Without `on` it is added unwired |
+| `remove` | `chain`, `slot`, optional `token` | `performance`. With a `token`, what was taken out (the plug-in with its state, and its wires) is kept for `restore`; the last 100 are kept |
+| `restore` | `token` | `slot`, `performance`: the plug-in back in its slot, its state and the wiring it had |
+| `wire` | `chain`, `from` (a slot, from 0, or `in` or the chain's input by name), `to` (a slot, or an output by name or `out1`, `out2`...), `key` (true: the plug-in's side-chain input), and any of `level_db`, `width` (0 to 200 %), `pan` (-100 to 100), `muted` | a new wire: `performance`. A wire it has: only its gains change, and the reply and the `wire` event carry `wire` |
+| `unwire` | `chain`, `from`, `to`, `key` | `performance` |
+| `wires` | `chain`, `wires` (each as for `wire`) | `performance`: the chain wired so, all at once |
+| `place` | `chain`, `slot`, `x`, `y` | nothing: where the block is drawn, kept when saved |
 | `quit` | | |
-| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner"]` | `events` now subscribed |
+| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire"]` | `events` now subscribed |
 
 Events have an `event` field instead of an `id`:
 
@@ -81,6 +88,18 @@ Events have an `event` field instead of an `id`:
   `in_tune`, `signal` and `level_db` of the input, and its settings:
   `input`, `reference`, `range`, `tolerance`, `names`. The tuner only listens
   while a client is subscribed to it, so it costs nothing otherwise.
+- `performance`: the performance, as the `performance` command answers it,
+  each time a plug-in is added, taken out or put back, or a chain's wires
+  change.
+- `wire`: `chain` and `wire` (as the `wire` command answers it), when only a
+  wire's level, width, pan or mute changed.
+
+A loop, a wire to a plug-in or output the chain does not have, or a key on
+a plug-in without a side-chain input is refused with the reason, and
+nothing changes. A playing chain's wiring changes between a 10 ms fade out
+and a fade in; gains move with a short ramp and no fade; a chain not playing
+changes at once. In the performance JSON each block says `has_key` when the
+plug-in has a side-chain input.
 
 Everything runs on `cue run`'s main thread, never on the audio thread: a slow
 or stuck client cannot cause a click. A client that stops reading is

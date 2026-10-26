@@ -31,8 +31,8 @@ A `.cue` file is a zip:
 
 ```json
 {
-  "cue": 1,
-  "saved_by": "Cue 0.4.0",
+  "cue": 2,
+  "saved_by": "Cue 0.7.0",
   "name": "Friday",
   "inputs": ["Bass"],
   "outputs": ["FOH", "Amp"],
@@ -47,16 +47,20 @@ A `.cue` file is a zip:
       "name": "Punk", "display": "PU", "pedal": 6, "program": 4,
       "on_select": ["group Start", "Wah = Off"],
       "warm": "next",
-      "lines": [
-        {"plugins": [
-          {"format": "clap", "path": "~/.clap/TwoStorms Gain Stage.clap", "id": "com.twostorms.gainstage",
-           "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru", "midi": true,
-           "params": {"54": 1}, "state": "states/01 Covers/01 Punk/01 Gain Stage.clapstate"},
-          {"format": "vst3", "path": "~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "...": "..."}
-        ]},
-        {"name": "FOH", "from": "", "after": 2, "plugins": ["..."]}
+      "blocks": [
+        {"format": "clap", "path": "~/.clap/TwoStorms Gain Stage.clap", "id": "com.twostorms.gainstage",
+         "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru", "midi": true,
+         "params": {"54": 1}, "state": "states/01 Covers/01 Punk/01 Gain Stage.clapstate", "x": 196, "y": 109},
+        {"format": "vst3", "path": "~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "...": "..."},
+        {"format": "clap", "path": "~/.clap/TwoStorms IR Loader.clap", "...": "..."}
       ],
-      "outputs": {"FOH": {"line": "FOH", "after": 1}, "Amp": {"line": "", "after": 2}}
+      "wires": [
+        {"from": "Bass", "to": 0},
+        {"from": 0, "to": 1},
+        {"from": 1, "to": 2},
+        {"from": 2, "to": "FOH"},
+        {"from": 1, "to": "Amp", "level_db": -3, "width": 50, "pan": -30}
+      ]
     }]
   }],
   "controls": [{"name": "Wah", "type": "discrete", "values": ["Off", "Auto", "Pedal"], "default": 0, "wrap": true,
@@ -73,11 +77,24 @@ A `.cue` file is a zip:
   switching to it is instant: `next` (the next chain), `none`, or the name of
   a chain of the same scene. `chain Punk` and `preset Punk` both select it in
   actions and conditions.
-- **Lines** are the main line first, then branches: each branch takes a copy
-  of the line named in `from` (`""` is the main line) after that many of its
-  plug-ins. **outputs** says where each of the performance's outputs is taken,
-  by line and number of plug-ins before it; an output a chain leaves out takes
-  the end of the main line.
+- **Blocks and wires.** `blocks` are the chain's plug-ins, numbered from 0
+  in the order listed; `wires` join them. A wire comes `from` the chain's
+  input (by its name, or `in`) or a block's output (its number), and goes
+  `to` a block's input, its side-chain input with `"key": true`, or an
+  output (by name). A block's output can feed any number of wires, and wires
+  into one input are summed. Each wire has a `level_db` (0 when left out;
+  -96 or less is off), a `width` (100 % when left out; 0 folds to mono, up
+  to 200), a `pan` (a balance, -100 left to 100 right, 0 when left out),
+  and `muted`. Width comes before pan. A loop is refused as the file loads.
+  A block that the input does not reach, or no output hears, is loaded but
+  not processed. `x` and `y` are where the app's routing board draws a
+  block the user put somewhere; a block without them is laid out from its
+  wires.
+- **Format 1** files (Cue 0.4 to 0.6) have `lines` and `outputs` instead: the
+  main line first, then branches, each taking a copy of the line named in
+  `from` (`""` is the main line) after that many of its plug-ins, and each
+  output taken from a line after a number of its plug-ins. They still open,
+  as the blocks and wires they describe, and are saved as format 2.
 - **input** is the performance input a chain plays. It is written only when
   the performance has more than one; without it, a chain plays the first.
 - **Plug-ins** are found by `path`. Paths under your home folder are written

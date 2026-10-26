@@ -757,7 +757,8 @@ std::string wireList(const ChainSpec& chain, const std::vector<std::string>& out
         s += end(w.from) + ">" + end(w.to);
         if (!w.gains.neutral()) {
             char buf[80];
-            std::snprintf(buf, sizeof buf, "(%gdB w%g p%g)", w.gains.levelDb, std::round(w.gains.width * 1000) / 10, std::round(w.gains.pan * 1000) / 10);
+            std::snprintf(buf, sizeof buf, "(%gdB w%g p%g%s)", w.gains.levelDb, std::round(w.gains.width * 1000) / 10, std::round(w.gains.pan * 1000) / 10,
+                          w.gains.muted ? " muted" : "");
             s += buf;
         }
     }

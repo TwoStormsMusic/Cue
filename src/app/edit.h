@@ -29,9 +29,22 @@ ChainSpec* chainSpec(Config& config, int chain);
 // then runs through it (the wire's gains stay with the part that arrives
 // where it did); without one it is not wired. slot: where it went.
 bool addPlugin(LiveRig& live, int chain, PluginSpec spec, const WireSpec* on, size_t* slot, std::string* error);
+// What a removal took out, so it can be put back as it was (an undo).
+struct Removed {
+    int chain = -1;
+    size_t slot = 0;
+    PluginSpec spec;             // with its state as it was taken out
+    std::vector<WireSpec> wires; // the chain's wires with it there
+    size_t blocks = 0;           // how many the chain had with it
+};
+
 // A plug-in and its wires go. What fed it is wired to what it fed, so one
 // taken out of a line closes the gap. Refused while the mappings use it.
-bool removePlugin(LiveRig& live, int chain, size_t slot, std::string* error);
+// removed, if given, keeps what it takes out.
+bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::string* error);
+// The plug-in back where it was, with its state and the chain's wires as
+// they were. Refused if the chain has gained or lost a plug-in since.
+bool restorePlugin(LiveRig& live, const Removed& removed, std::string* error);
 // A wire between two ports, or new gains for the one already there (which
 // move with a short fade rather than a swap).
 bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error);

@@ -9,9 +9,13 @@
 #include "core/engine.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace cue;
@@ -545,4 +549,82 @@ TEST(editing_a_warm_chain_keeps_it_warm) {
     r.seconds(0.2);
     CHECK_MSG(near(r.last(0), 0.5f) && near(r.last(1), 0.5f), "B plays %.5f / %.5f", r.last(0), r.last(1));
     e.collect();
+}
+
+// The audio thread plays on, with helper threads, while the main thread
+// changes both chains over and over: what an edit adds is primed and
+// swapped in, what it takes out is freed on the main thread, and nothing
+// is left behind. Run under ThreadSanitizer, this is where a race shows.
+TEST(edits_while_the_audio_thread_plays) {
+    // One count each: started and stopped are each gain's own.
+    std::deque<CountingProcessor::Counts> counts;
+    auto destroyed = [&] {
+        uint64_t n = 0;
+        for (const auto& c : counts)
+            n += c.destroyed;
+        return n;
+    };
+    int made = 0;
+    {
+        EngineSettings s = settings();
+        s.workers = 2;
+        Engine e(s);
+        for (const char* name : {"A", "B"}) {
+            auto c = std::make_unique<Chain>(name, 2);
+            c->addBlock(gain(0.5f));
+            c->connect(Port::input(), Port::block(0));
+            c->connect(Port::block(0), Port::output(0));
+            c->connect(Port::block(0), Port::output(1));
+            e.addChain(std::move(c));
+        }
+        CHECK(e.activate());
+        e.switchTo(0);
+        e.setWarm(1);
+        std::atomic<bool> stop{false};
+        std::thread audio([&] {
+            std::vector<float> in(kBlock, 0.5f), o1(kBlock), o2(kBlock);
+            float* outs[2] = {o1.data(), o2.data()};
+            while (!stop.load()) {
+                e.process(in.data(), outs, kBlock);
+                std::this_thread::sleep_for(std::chrono::microseconds(300));
+            }
+        });
+        int playing = 0;
+        for (int i = 0; i < 40; ++i) {
+            const int chain = i % 2;
+            ChainEdit edit;
+            if (e.chain(chain).numSlots() == 1) {
+                // A gain after the first, on the way to output 0.
+                edit.slots = {0, -1};
+                edit.added.push_back({counted(0.5f, counts.emplace_back())});
+                CHECK(edit.added[0].processor->activate(kRate, kBlock));
+                ++made;
+                edit.wires = {{Port::input(), Port::block(0)}, {Port::block(0), Port::block(1)}, {Port::block(1), Port::output(0)},
+                              {Port::block(0), Port::output(1)}};
+            } else {
+                edit.slots = {0};
+                edit.wires = {{Port::input(), Port::block(0)}, {Port::block(0), Port::output(0)}, {Port::block(0), Port::output(1)}};
+            }
+            std::string why;
+            CHECK_MSG(e.edit(chain, std::move(edit), &why), "%s", why.c_str());
+            CHECK(e.setWire(chain, Port::block(0), Port::output(1), {-6.0f, 0.5f, 0.25f}));
+            e.collect();
+            if (i % 8 == 7) {
+                playing = 1 - playing;
+                e.switchTo(playing);
+                e.setWarm(1 - playing);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        stop = true;
+        audio.join();
+        e.collect();
+        CHECK_MSG(destroyed() == static_cast<uint64_t>(made) - (e.chain(0).numSlots() - 1) - (e.chain(1).numSlots() - 1),
+                  "%llu of %d freed while playing", (unsigned long long)destroyed(), made);
+        for (const auto& c : counts)
+            CHECK(c.processWhileStopped == 0 && c.process > 0);
+        e.deactivate();
+    }
+    CHECK_MSG(destroyed() == static_cast<uint64_t>(made), "%llu of %d freed", (unsigned long long)destroyed(), made);
 }

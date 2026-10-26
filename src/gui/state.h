@@ -23,6 +23,7 @@ struct Settings {
     double scale = 1.0;          // size of everything, 0.5 to 2.5
     bool tunerWhenMuted = true;  // the tuner view comes up while the inputs are muted
     bool fullScreen = false;
+    bool wireTags = true;        // a wire shows its level, width and pan on the board when they are changed
 
     static QString path();
     void load();
@@ -67,16 +68,22 @@ public:
     void reloadPerformance();
     // A reply's "ok", or a message saying why not.
     bool check(const QJsonObject& reply, const QString& what);
+    // Asks the engine for a change to the routing (add, remove, restore,
+    // wire, unwire, place). The performance follows its answer, which then
+    // goes to then.
+    void change(const QJsonObject& request, std::function<void(const QJsonObject&)> then = {});
 
     // What was changed here, so it can be taken back (Ctrl+Z) and made again
-    // (Ctrl+Shift+Z): a parameter, a bypass, the parameters picked to show.
+    // (Ctrl+Y or Ctrl+Shift+Z): a parameter, a bypass, the parameters picked
+    // to show, the routing.
     // Each is the request that undoes it and the one that does it again.
     // What a pedal or a plug-in's own editor changes is not in it. A new
     // engine or performance starts it afresh.
     struct Edit {
         QString what; // said when it is undone: "Delay: Output"
-        int chain = -1, slot = -1;
-        QJsonObject undo, redo;
+        int chain = -1, slot = -1; // where it is shown once undone (-1: no plug-in)
+        QJsonObject undo, redo; // each a request, or {"cmd": "batch", "requests": [...]}
+        int redoSlot = -2; // ...and once redone, if not slot
     };
     void edited(const Edit& e);
     bool canUndo() const { return !undo_.isEmpty(); }
@@ -98,6 +105,9 @@ signals:
 private:
     void onConnection(bool up);
     void onEvent(const QString& name, const QJsonObject& m);
+    // What a change's answer (or an event) says the performance is now.
+    void follow(const QJsonObject& request, const QJsonObject& reply);
+    void setWire(int chain, const QJsonObject& wire);
 
     void takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing);
 

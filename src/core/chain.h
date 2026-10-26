@@ -36,11 +36,13 @@ constexpr float kWireOffDb = -96.0f;
 // What a wire does to the stereo signal it carries, in signal order: its
 // level, its width (0 = mono, 1 = as it is, 2 = twice as wide), then a
 // balance that turns one side down (-1 = the left only, 1 = the right only).
+// A muted wire passes nothing and keeps its level for when it is not.
 struct WireGains {
     float levelDb = 0.0f;
     float width = 1.0f;
     float pan = 0.0f;
-    bool neutral() const { return levelDb == 0.0f && width == 1.0f && pan == 0.0f; }
+    bool muted = false;
+    bool neutral() const { return levelDb == 0.0f && width == 1.0f && pan == 0.0f && !muted; }
 };
 
 struct Wire {

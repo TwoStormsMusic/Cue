@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.6.2 LANGUAGES C CXX)
+project(cue VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -137,6 +137,7 @@ if(CUE_BUILD_APP)
       src/gui/surface.cpp
       src/gui/stageview.cpp
       src/gui/tunerview.cpp
+      src/gui/board.cpp
       src/gui/chainview.cpp
       src/gui/settingsview.cpp
       src/gui/mainwindow.cpp
