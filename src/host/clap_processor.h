@@ -44,6 +44,7 @@ public:
     std::vector<ParamInfo> params() const override;
     bool paramValue(uint32_t id, double& value) const override;
     std::string paramText(uint32_t id, double value) const override;
+    bool paramFromText(uint32_t id, const std::string& text, double& value) const override;
     bool saveState(std::vector<uint8_t>& out) const;
     bool loadState(const std::vector<uint8_t>& data);
     // Handles callbacks the plug-in asked for (request_callback, rescans).
@@ -76,6 +77,7 @@ public:
     void closeEditor() override;
     bool editorOpen() const override { return editorOpen_; }
     bool editorResized(uint32_t width, uint32_t height) override;
+    void takeEditorEdits(std::vector<ParamEdit>& out) override;
     bool takeEditorResize(EditorSize* size) override;
     void editorFds(std::vector<int>& out) const override;
     void onEditorFd(int fd) override;
@@ -84,6 +86,9 @@ public:
     void onRequestRestart() { restartRequested_ = true; }
     void onRequestCallback() { callbackRequested_ = true; }
     void onParamsRescan() { rescanRequested_ = true; }
+    void onRequestFlush() { flushRequested_.store(true, std::memory_order_release); }
+    // Audio thread: what the plug-in says it changed (its editor).
+    void onOutputEvent(const clap_event_header_t* event);
     void onLatencyChanged() { latencyDirty_ = true; }
     void onTailChanged() { tailDirty_ = true; }
     void onLog(int severity, const char* msg) const;
@@ -151,6 +156,16 @@ private:
     std::unique_ptr<InputEvents> inEvents_;
     clap_output_events_t outEvents_{};
     std::atomic<bool> paramsPending_{false};
+    // What the editor changes comes out of process() and flush() on the
+    // audio thread, and is made into edits on the main thread.
+    struct OutEvent {
+        uint16_t type;
+        uint32_t id;
+        double value;
+    };
+    RingQueue<OutEvent, 1024> outQueue_;
+    std::atomic<bool> flushRequested_{false};
+    EditorEdits edits_;
 
     // MIDI in: the latest value of every controller and pitch bend, with a
     // bit set for each one changed since the last block; other messages queued.

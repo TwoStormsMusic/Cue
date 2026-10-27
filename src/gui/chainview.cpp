@@ -202,6 +202,17 @@ ChainView::ChainView(AppState& state, QWidget* parent) : Surface(state, parent) 
     letGo_.setSingleShot(true);
     letGo_.setInterval(QGuiApplication::styleHints()->mouseDoubleClickInterval());
     connect(&letGo_, &QTimer::timeout, this, [this] { selectSlot(-1); });
+    valueTap_.setSingleShot(true);
+    valueTap_.setInterval(QGuiApplication::styleHints()->mouseDoubleClickInterval());
+    connect(&valueTap_, &QTimer::timeout, this, [this] {
+        const QJsonObject q = valueParam_;
+        const int id = q.value("id").toInt(), chain = chain_, slot = slot_;
+        QString now = q.value("text").toString();
+        if (now.isEmpty())
+            now = QString::number(q.value("value").toDouble(q.value("default").toDouble()), 'g', 4);
+        startEntry(QString("value %1").arg(id), now, "A value", 40,
+                   [this, chain, slot, q](const QString& typed) { typeValue(chain, slot, q, typed); });
+    });
     // Something undone: show where, with its values now.
     connect(&s, &AppState::undone, this, [this](int chain, int slot) {
         if (!isVisible() || !s.chain(chain))
@@ -273,6 +284,9 @@ void ChainView::selectSlot(int slot) {
         picker_ = Picker::None;
     }
     if (slot != slot_) {
+        if (entryFor_.startsWith("value "))
+            endEntry();
+        valueTap_.stop();
         slot_ = slot;
         plugin_ = {};
         scroll_ = 0;
@@ -1835,9 +1849,6 @@ void ChainView::paramRow(QPainter& p, const QRectF& row, const QRectF& list, con
     p.drawRoundedRect(track, 3 * u, 3 * u);
     p.setBrush(tie.isEmpty() ? color::orange : color::purple);
     p.drawRoundedRect(QRectF(track.left(), track.top(), std::max(track.height(), track.width() * f), track.height()), 3 * u, 3 * u);
-    p.setPen(color::text2);
-    p.setFont(typeface(Face::Mono, 12 * u));
-    draw::text(p, QRectF(track.right() + 8 * u, cy - 12 * u, valueW, 24 * u), Qt::AlignRight | Qt::AlignVCenter, text);
     // The slider takes the whole row's height, so a finger finds it.
     const QRectF grab(track.left() - 6 * u, row.top() + 4 * u, track.width() + 12 * u, row.height() - 8 * u);
     if (grab.intersects(list) && dragRow_ < 0)
@@ -1845,6 +1856,66 @@ void ChainView::paramRow(QPainter& p, const QRectF& row, const QRectF& list, con
             const double f = std::clamp((pos.x() - track.left()) / track.width(), 0.0, 1.0);
             setParam(q, lo + f * (hi - lo), done);
         });
+    // The value, in a box to type into.
+    const QString vid = QString("value %1").arg(id);
+    const QRectF box(track.right() + 8 * u, cy - 14 * u, valueW + 6 * u, 28 * u);
+    if (entryFor_ == vid && list.contains(box)) {
+        // Wider while typing, over the slider: "-12.5 dB" fits.
+        placeEntry(vid, QRectF(box.right() - 120 * u, box.top() - 4 * u, 120 * u, box.height() + 8 * u));
+        return;
+    }
+    if (isPressed(vid))
+        draw::card(p, box, 6 * u, color::raised, color::border2);
+    p.setPen(color::text2);
+    p.setFont(typeface(Face::Mono, 12 * u));
+    draw::text(p, box.adjusted(4 * u, 0, -6 * u, 0), Qt::AlignRight | Qt::AlignVCenter, text);
+    p.setPen(QPen(color::border2, 1));
+    p.drawLine(QPointF(box.left() + 6 * u, box.bottom() - 2 * u), QPointF(box.right() - 4 * u, box.bottom() - 2 * u));
+    if (box.intersects(list) && dragRow_ < 0)
+        hit(vid, box.intersected(list), [this, q] { tapValue(q); });
+}
+
+void ChainView::tapValue(const QJsonObject& q) {
+    const int id = q.value("id").toInt();
+    if (doubleTap(QString("value %1").arg(id))) {
+        valueTap_.stop();
+        setParam(q, q.value("default").toDouble(), true);
+        return;
+    }
+    valueParam_ = q;
+    valueTap_.start();
+}
+
+void ChainView::typeValue(int chain, int slot, const QJsonObject& q, const QString& typed) {
+    const int id = q.value("id").toInt();
+    const double from = q.value("value").toDouble(q.value("default").toDouble());
+    if (typed.trimmed().isEmpty() || typed.trimmed() == q.value("text").toString().trimmed())
+        return;
+    const QJsonObject request{{"cmd", "param"}, {"chain", chain}, {"slot", slot}, {"param", id}, {"text", typed.trimmed()}};
+    s.link.request(request, [this, chain, slot, id, from, q](const QJsonObject& r) {
+        if (!s.check(r, "Not set"))
+            return;
+        const double value = r.value("value").toDouble(from);
+        auto set = [&](double v) {
+            return QJsonObject{{"cmd", "param"}, {"chain", chain}, {"slot", slot}, {"param", id}, {"value", v}};
+        };
+        const ChainInfo* c = s.chain(chain);
+        const PluginInfo* pi = c ? c->plugin(slot) : nullptr;
+        if (value != from)
+            s.edited({QString("%1: %2").arg(pi ? pi->label : "plug-in", q.value("name").toString()), chain, slot, set(from), set(value)});
+        if (chain != chain_ || slot != slot_)
+            return;
+        QJsonArray params = plugin_.value("params").toArray();
+        for (int i = 0; i < params.size(); ++i)
+            if (params[i].toObject().value("id").toInt() == id) {
+                QJsonObject p = params[i].toObject();
+                p["value"] = value;
+                p["text"] = r.value("text").toString();
+                params[i] = p;
+            }
+        plugin_["params"] = params;
+        update();
+    });
 }
 
 // The picked parameters, each with a grip to move it up or down, then the

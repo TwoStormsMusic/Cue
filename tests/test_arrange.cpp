@@ -216,12 +216,16 @@ TEST(arrange_sets_a_chains_pedal_display_actions_and_warm_chain) {
     pedal.pedal = 11;
     CHECK(!setChain(*t.live, 0, pedal, &t.err));
 
-    // The display, up to three characters.
+    // The display: two letters, as the FCB shows them (three with a leading 1, - or +).
     ChainSettings display;
+    display.display = "ON";
+    CHECK(setChain(*t.live, 0, display, &t.err) && t.scene(0).presets[0].display == "ON");
+    display.display = "-12";
+    CHECK(setChain(*t.live, 0, display, &t.err) && t.scene(0).presets[0].display == "-12");
     display.display = "ONE";
-    CHECK(setChain(*t.live, 0, display, &t.err) && t.scene(0).presets[0].display == "ONE");
-    display.display = "LONG";
-    CHECK(!setChain(*t.live, 0, display, &t.err) && t.scene(0).presets[0].display == "ONE");
+    CHECK(!setChain(*t.live, 0, display, &t.err) && t.scene(0).presets[0].display == "-12");
+    display.display = "ON";
+    CHECK(setChain(*t.live, 0, display, &t.err));
 
     // What selecting it does; one the show cannot follow is refused.
     ChainSettings actions;

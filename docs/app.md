@@ -62,7 +62,9 @@ orange is what you selected. Tap a chain in the list to see it, tap it twice
 to play it. The wheel, two fingers or the **−**,
 **Fit** and **+** buttons zoom; dragging open space or two fingers move it; a
 double tap on open space fits the whole chain again. Tap a block to move its
-parameters with sliders; tap it twice to switch it on or off. It shows the parameters
+parameters with sliders; tap it twice to switch it on or off. Tap a value to type
+one ("-3 dB", "250 ms": the plug-in reads it), and tap it twice to set it back to
+its default. A slider moves while the plug-in is switched off too. It shows the parameters
 you picked, in your order (drag a row by its grip to move it), and always the
 ones a control or trigger moves, purple, with what moves them; until you
 pick, the first eight. **Show all parameters** lists every one in the
@@ -113,7 +115,7 @@ warmed beside it, and nothing you hear stops.
 Under the board are the shown chain's settings:
 its **name**, the FCB pedal that **selects** it (the menu says what else
 each pedal does; a pedal given to it is taken from the chain here that had
-it), its 3-letter **FCB display**, the chain **kept warm while it plays**
+it), its 2-letter **FCB display**, the chain **kept warm while it plays**
 (the next one, none, or one you pick, so the switch to it is instant), and
 **when selected, do**: the actions done each time it is picked, each a chip
 (tap one to take it out or move it; **+ Action** offers the controls' values
@@ -126,9 +128,9 @@ the triggers that work only there), **Move** and **Take out**.
 
 **Undo** takes back what you changed here (a slider, a bypass, the parameters
 picked, a wire, a plug-in added, moved or taken out, a chain or scene added,
-copied, set, moved or taken out), showing where, and
-**Redo** makes it again; what a pedal or a plug-in's own editor changes is
-not in it. A plug-in taken out comes back with its settings and its wires;
+copied, set, moved or taken out, and each knob turned in a plug-in's own
+editor, from where it was grabbed to where it was let go), showing where, and
+**Redo** makes it again; what a pedal changes is not in it. A plug-in taken out comes back with its settings and its wires;
 a chain or a scene with everything it had.
 **Save** saves the performance, plug-in settings, wiring and where each
 block is drawn included, to its `.cue` file.

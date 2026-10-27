@@ -19,6 +19,8 @@
 #include <QFile>
 #include <QLineF>
 #include <QWheelEvent>
+#include <QStyleHints>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLocalServer>
@@ -942,6 +944,68 @@ private slots:
         shot(v, "chains-undone");
     }
 
+    // A parameter's value typed, as the plug-in reads it; a double tap on it
+    // sets the default. Both undone.
+    void a_parameters_value_is_typed_or_set_back() {
+        FakeLink link;
+        link.answer = [](const QJsonObject& r) -> QJsonObject {
+            if (r.value("cmd") == "plugin")
+                return parse(R"({"ok": true, "plugin": {"chain": 1, "slot": 0, "label": "Gain Stage", "name": "Test Gain", "format": "clap",
+                                  "bypassed": false, "params": [{"id": 0, "name": "Gain", "module": "", "min": 0, "max": 2, "default": 1,
+                                  "steps": 0, "value": 0.5, "text": "0.500"}]}})");
+            if (r.value("cmd") == "param" && r.contains("text"))
+                return {{"ok", true}, {"value", r.value("text").toString().toDouble()}, {"text", "typed"}};
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        v->grab();
+        QVERIFY(!v->hitRect("value 0").isEmpty());
+        // One tap: once it is clear it was not the first of two, a line to type in.
+        click(v, v->hitRect("value 0"));
+        QTRY_VERIFY_WITH_TIMEOUT((v->grab(), v->entryField() == "value 0"), 2000);
+        shot(v, "chains-typing-a-value");
+        v->typeEntry("1.25");
+        QJsonObject sent = link.last("param");
+        QCOMPARE(sent.value("text").toString(), QString("1.25"));
+        QCOMPARE(sent.value("param").toInt(), 0);
+        QVERIFY(s.canUndo());
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 0.5);
+        QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 1.25);
+        // Two taps: the default, and no line to type in.
+        v->grab();
+        const QRectF box = v->hitRect("value 0");
+        click(v, box);
+        click(v, box);
+        QCOMPARE(link.last("param").value("value").toDouble(), 1.0);
+        QTest::qWait(QGuiApplication::styleHints()->mouseDoubleClickInterval() + 100);
+        v->grab();
+        QCOMPARE(v->entryField(), QString());
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 0.5);
+
+        // A knob turned in the plug-in's own editor is undone the same way.
+        emit link.event("edited", QJsonObject{{"event", "edited"}, {"chain", 1}, {"slot", 0}, {"param", 0}, {"name", "Gain"},
+                                              {"from", 0.5}, {"to", 1.75}, {"text", "1.750"}});
+        QVERIFY(s.canUndo());
+        QSignalSpy said(&s, &AppState::message);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 0.5);
+        QCOMPARE(said.last().at(0).toString(), QString("Undone: Gain Stage: Gain"));
+        QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
+        QCOMPARE(link.last("param").value("value").toDouble(), 1.75);
+    }
+
     // The routing board, tap by tap: a wire selected and its faders moved,
     // a plug-in put on it, a wire drawn and one taken away, a plug-in moved
     // and one taken out; each undone and done again.
@@ -1239,8 +1303,8 @@ private slots:
         QCOMPARE(link.last("set-chain").value("name").toString(), QString("Slap"));
         tap("chain display");
         QCOMPARE(v->entryField(), QString("chain display"));
-        v->typeEntry("SLB");
-        QCOMPARE(link.last("set-chain").value("display").toString(), QString("SLB"));
+        v->typeEntry("SBX"); // the FCB shows two
+        QCOMPARE(link.last("set-chain").value("display").toString(), QString("SB"));
         const int sent = link.sent.size();
         tap("chain display");
         QTest::keyClick(&w, Qt::Key_Escape);
@@ -1697,6 +1761,13 @@ private slots:
             }
             QCOMPARE(now, 0.5);
         }
+        // A value typed, read by the plug-in.
+        QJsonObject typed;
+        link.request({{"cmd", "param"}, {"chain", 1}, {"slot", 0}, {"param", 0}, {"text", "0.75"}}, [&](const QJsonObject& r) { typed = r; });
+        QTRY_VERIFY_WITH_TIMEOUT(!typed.isEmpty(), 3000);
+        QVERIFY2(typed.value("ok").toBool(), qPrintable(typed.value("error").toString()));
+        QCOMPARE(typed.value("value").toDouble(), 0.75);
+        QCOMPARE(typed.value("text").toString(), QString("0.750"));
         // The picked parameters are kept, and come back with the plug-in.
         QJsonObject picked;
         link.request({{"cmd", "shown"}, {"chain", 1}, {"slot", 0}, {"params", QJsonArray{0}}}, [&](const QJsonObject& r) { picked = r; });
@@ -1778,12 +1849,15 @@ private slots:
         QCOMPARE(s.chain(1)->pedal, 0);
         r = ask({{"cmd", "set-chain"}, {"chain", 1}, {"pedal", 7}});
         QCOMPARE(s.chain(1)->pedal, 7);
-        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"name", "Slap Bright"}, {"display", "SLB"}, {"warm", "Punk"},
+        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"name", "Slap Bright"}, {"display", "SB"}, {"warm", "Punk"},
                  {"on_select", QJsonArray{"Effect 1 = on"}}});
         QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
         const ChainInfo* bright = s.chain(copy);
         QCOMPARE(bright->name, QString("Slap Bright"));
-        QCOMPARE(bright->display, QString("SLB"));
+        QCOMPARE(bright->display, QString("SB"));
+        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"display", "SLB"}});
+        QVERIFY(!ok(r));
+        QVERIFY2(r.value("error").toString().contains("two letters"), qPrintable(r.value("error").toString()));
         QCOMPARE(bright->warm, QString("Punk"));
         QCOMPARE(bright->onSelect, QStringList{"Effect 1 = on"});
         r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"name", "Punk"}});
@@ -1831,9 +1905,9 @@ private slots:
         QVERIFY(!ok(r));
         s.select(1);
         QTRY_COMPARE_WITH_TIMEOUT(s.status.scene, 0, 3000);
-        r = ask({{"cmd", "set-scene"}, {"scene", 1}, {"name", "Chorus"}, {"display", "CHO"}});
+        r = ask({{"cmd", "set-scene"}, {"scene", 1}, {"name", "Chorus"}, {"display", "CH"}});
         QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
-        QCOMPARE(s.perf.scenes[1].display, QString("CHO"));
+        QCOMPARE(s.perf.scenes[1].display, QString("CH"));
         r = ask({{"cmd", "remove-scene"}, {"scene", 1}, {"token", "copy"}});
         QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
         QCOMPARE(s.perf.scenes.size(), 1);

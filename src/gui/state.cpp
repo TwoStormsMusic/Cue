@@ -38,7 +38,7 @@ void Settings::save() const {
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
     connect(&link, &EngineLink::connectionChanged, this, &AppState::onConnection);
     connect(&link, &EngineLink::event, this, &AppState::onEvent);
-    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins"});
+    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins", "edited"});
 }
 
 void AppState::onConnection(bool up) {
@@ -89,6 +89,14 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         emit changed();
     } else if (name == "wire") {
         setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
+    } else if (name == "edited") {
+        // A knob turned in a plug-in's own editor: undone like a slider here.
+        const int chain = m.value("chain").toInt(-1), slot = m.value("slot").toInt(-1), param = m.value("param").toInt();
+        auto set = [&](double v) { return QJsonObject{{"cmd", "param"}, {"chain", chain}, {"slot", slot}, {"param", param}, {"value", v}}; };
+        const ChainInfo* c = perf.chain(chain);
+        const PluginInfo* pi = c ? c->plugin(slot) : nullptr;
+        edited({QString("%1: %2").arg(pi ? pi->label : "plug-in", m.value("name").toString()), chain, slot, set(m.value("from").toDouble()),
+                set(m.value("to").toDouble())});
     } else if (name == "scan") {
         catalog.progress(m);
         emit catalogChanged();

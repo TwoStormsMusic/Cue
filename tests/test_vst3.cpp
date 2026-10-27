@@ -128,6 +128,7 @@ TEST(vst3_param_change_reaches_the_processor) {
     CHECK(v->paramValue(0, value));
     CHECK(value == 0.0);
     CHECK(v->paramText(0, 0.25) == "25 %");
+    CHECK(!v->paramFromText(0, "25 %", value)); // this one cannot read text: the app's number is used
 }
 
 TEST(vst3_state_round_trips) {

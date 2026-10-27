@@ -134,10 +134,11 @@ bool EditorHost::open(Processor& plugin, const std::string& title, std::string* 
     XSetWMProtocols(d, w, &impl_->deleteWindow, 1);
     // The window manager never gives it the focus: a tap on the app after
     // one on an editor would otherwise go to bringing the app forward. A
-    // plug-in that wants the keys (a value being typed) takes them itself.
+    // plug-in that wants the keys (a value being typed) takes them itself,
+    // except one under Wine, which types only into an active window.
     XWMHints wm{};
     wm.flags = InputHint | StateHint;
-    wm.input = False;
+    wm.input = plugin.editorNeedsFocus() ? True : False;
     wm.initial_state = NormalState;
     XSetWMHints(d, w, &wm);
     impl_->keepAbove(w, above);

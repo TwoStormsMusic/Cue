@@ -76,14 +76,22 @@ class ComponentHandler : public U::Implements<U::Directly<IComponentHandler>> {
 public:
     std::atomic<int32> restartFlags{0};
     std::function<void(ParamID, ParamValue)> onEdit;
+    cue::EditorEdits edits; // what the editor changes, to undo
 
-    tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
+    tresult PLUGIN_API beginEdit(ParamID id) override {
+        edits.begin(id);
+        return kResultOk;
+    }
     tresult PLUGIN_API performEdit(ParamID id, ParamValue value) override {
+        edits.change(id, value);
         if (onEdit)
             onEdit(id, value);
         return kResultOk;
     }
-    tresult PLUGIN_API endEdit(ParamID) override { return kResultOk; }
+    tresult PLUGIN_API endEdit(ParamID id) override {
+        edits.end(id);
+        return kResultOk;
+    }
     tresult PLUGIN_API restartComponent(int32 flags) override {
         restartFlags.fetch_or(flags);
         return kResultOk;
@@ -440,6 +448,13 @@ bool Vst3Processor::openEditor(unsigned long window, EditorSize* size, std::stri
         *error = name_ + " has no editor of its own";
         return false;
     }
+    // Where each parameter is, so what the editor changes can be undone.
+    if (d.handler)
+        for (int32 i = 0, n = d.controller->getParameterCount(); i < n; ++i) {
+            ParameterInfo info{};
+            if (d.controller->getParameterInfo(i, info) == kResultOk)
+                d.handler->edits.known(info.id, d.controller->getParamNormalized(info.id));
+        }
     IPtr<IPlugView> view = owned(d.controller->createView(ViewType::kEditor));
     if (!view) {
         *error = name_ + " has no editor of its own";
@@ -530,8 +545,15 @@ void Vst3Processor::pumpMainThread() {
         d.frame->runTimers();
 }
 
+void Vst3Processor::takeEditorEdits(std::vector<ParamEdit>& out) {
+    if (impl_->handler)
+        impl_->handler->edits.take(out);
+}
+
 bool Vst3Processor::setParam(uint32_t id, double normalized) {
     normalized = std::clamp(normalized, 0.0, 1.0);
+    if (impl_->handler)
+        impl_->handler->edits.known(id, normalized);
     const bool ok = impl_->audioQueue.push({id, normalized});
     impl_->controllerQueue.push({id, normalized});
     return ok;
@@ -563,6 +585,18 @@ std::string Vst3Processor::paramText(uint32_t id, double normalized) const {
     if (!impl_->controller || impl_->controller->getParamStringByValue(id, normalized, text) != kResultOk)
         return {};
     return Steinberg::Vst::StringConvert::convert(text);
+}
+
+bool Vst3Processor::paramFromText(uint32_t id, const std::string& text, double& normalized) const {
+    if (!impl_->controller)
+        return false;
+    Steinberg::Vst::String128 wide{};
+    Steinberg::Vst::StringConvert::convert(text, wide, 127);
+    Steinberg::Vst::ParamValue v = 0;
+    if (impl_->controller->getParamValueByString(id, wide, v) != kResultOk)
+        return false;
+    normalized = v;
+    return true;
 }
 
 // Processing is on for as long as the plug-in is active (see activate()), so

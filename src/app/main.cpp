@@ -757,7 +757,25 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             } else if (cmd == "param") {
                 // "param", not "id": a request's "id" is its number on the socket.
                 const uint32_t id = req.at("param").get<uint32_t>();
-                const double value = req.at("value").get<double>();
+                double value = 0;
+                if (req.contains("text")) {
+                    // Typed: as the plug-in reads it, else a plain number
+                    // (a VST3 plug-in's in %, as the app shows it).
+                    const std::string typed = req.at("text").get<std::string>();
+                    if (!p->paramFromText(id, typed, value)) {
+                        char* end = nullptr;
+                        const double n = std::strtod(typed.c_str(), &end);
+                        if (end == typed.c_str())
+                            return refuse(p->name() + " cannot read '" + typed + "' as a value");
+                        const bool vst3 = dynamic_cast<Vst3Processor*>(p) != nullptr;
+                        value = vst3 ? n / 100.0 : n;
+                    }
+                    for (const ParamInfo& info : p->params())
+                        if (info.id == id)
+                            value = std::clamp(value, info.min, info.max);
+                } else {
+                    value = req.at("value").get<double>();
+                }
                 if (!p->setParam(id, value))
                     return refuse(p->name() + " did not take the change (too many at once)");
                 // The plug-in's state keeps it; a param line in the file
@@ -766,6 +784,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     if (pid == id)
                         v = value;
                 reply["text"] = p->paramText(id, value);
+                reply["value"] = value;
                 return;
             } else if (cmd == "editor") {
                 // The plug-in's own window, on the computer's screen, not the
@@ -1025,6 +1044,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     uint64_t reportedXruns = 0, reportedStartup = 0;
 
     std::vector<int> editorFds;
+    std::vector<ParamEdit> editorEdits;
     while (!g_quit) {
         editorFds.clear();
         editors.fds(editorFds);
@@ -1033,6 +1053,28 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         service.poll(10, editorFds);
         rig.pumpMainThread();
         editors.pump();
+        // What a plug-in's own editor changed, for the app to undo.
+        for (const RigPlugin& rp : rig.plugins) {
+            editorEdits.clear();
+            rp.processor->takeEditorEdits(editorEdits);
+            if (editorEdits.empty() || !rp.processor->editorOpen())
+                continue;
+            const std::vector<ParamInfo> infos = rp.processor->params();
+            PluginSpec* ps = specAt(config, rp.chain, rp.slot);
+            for (const ParamEdit& e : editorEdits) {
+                std::string name;
+                for (const ParamInfo& info : infos)
+                    if (info.id == e.id)
+                        name = info.name;
+                if (ps)
+                    for (auto& [pid, v] : ps->params)
+                        if (pid == e.id)
+                            v = e.to;
+                if (service.subscribed("edited"))
+                    service.publish("edited", {{"chain", rp.chain}, {"slot", rp.slot}, {"param", e.id}, {"name", name}, {"from", e.from},
+                                               {"to", e.to}, {"text", rp.processor->paramText(e.id, e.to)}});
+            }
+        }
         // What edits replaced, now that the audio thread is done with it.
         engine.collect();
         // A plug-in scan: how far it is, and what it found once it ends.
@@ -2000,8 +2042,13 @@ int main(int argc, char** argv) {
     }
     if (cmd == "params" && argc >= 3)
         return cmdParams(argv[2]);
-    if (cmd == "scan-file" && argc >= 5)
+    if (cmd == "scan-file" && argc >= 5) {
+        // A scan started while playing (from a terminal too) stays off the
+        // audio core, as cue run keeps its own helpers and Wine hosts. Not a
+        // lower priority: a Wine server it starts would serve the show too.
+        keepOffAudioCore(pickAudioCpu());
         return scanFileMain(argv[2], argv[3], std::atoi(argv[4]), argc >= 6 ? std::strtoul(argv[5], nullptr, 10) : 0);
+    }
     if (cmd == "scan" && argc >= 3 && argv[2][0] != '-')
         return cmdScan(argv[2]);
     if (cmd == "scan")

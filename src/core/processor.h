@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/editor_edits.h"
+
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -56,8 +58,8 @@ public:
     virtual void process(const float* const* in, float* const* out, uint32_t frames) = 0;
 
     // Called on the audio thread, between processing, for processors in idle
-    // or resting chains, so queued parameter changes still reach a plug-in
-    // that is not being processed. Must be cheap when there is nothing to do.
+    // or resting chains and for bypassed blocks, so queued parameter changes
+    // still reach a plug-in that is not being processed. Must be cheap when there is nothing to do.
     virtual void flushIdle() {}
 
     // MIDI for plug-ins that take it (a wah moved by an expression pedal).
@@ -85,6 +87,9 @@ public:
     // plug-in writes a value ("-3.0 dB"). False or empty when it cannot say.
     virtual bool paramValue(uint32_t /*id*/, double& /*value*/) const { return false; }
     virtual std::string paramText(uint32_t /*id*/, double /*value*/) const { return {}; }
+    // Main thread: what a typed value ("-3 dB", "250 ms") is, as setParam
+    // takes it. False when the plug-in cannot read it.
+    virtual bool paramFromText(uint32_t /*id*/, const std::string& /*text*/, double& /*value*/) const { return false; }
 
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.
@@ -106,6 +111,13 @@ public:
     }
     virtual void closeEditor() {}
     virtual bool editorOpen() const { return false; }
+    // Whether its window needs the window manager to give it the keys. A
+    // plug-in under Wine (yabridge) types only into a window that is active;
+    // others take the keys themselves when a box is tapped.
+    virtual bool editorNeedsFocus() const { return false; }
+    // Main thread: what its own editor changed since the last call, each
+    // knob from where it was grabbed to where it was let go.
+    virtual void takeEditorEdits(std::vector<ParamEdit>& /*out*/) {}
     // The window was resized by hand: the editor lays out again (false if it
     // would rather keep the size it has).
     virtual bool editorResized(uint32_t /*width*/, uint32_t /*height*/) { return false; }

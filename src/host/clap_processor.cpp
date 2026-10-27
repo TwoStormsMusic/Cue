@@ -122,9 +122,9 @@ const clap_host_log_t kLog = {hostLog};
 
 void hostParamsRescan(const clap_host_t* host, clap_param_rescan_flags) { owner(host)->onParamsRescan(); }
 void hostParamsClear(const clap_host_t*, clap_id, clap_param_clear_flags) {}
-// The engine flushes idle plug-ins regularly and processes active ones
-// every block, so an explicit flush request needs no action.
-void hostParamsRequestFlush(const clap_host_t*) {}
+// The engine processes active plug-ins every block, and flushes idle and
+// bypassed ones every few milliseconds when asked to: an editor moved.
+void hostParamsRequestFlush(const clap_host_t* host) { owner(host)->onRequestFlush(); }
 const clap_host_params_t kParamsHost = {hostParamsRescan, hostParamsClear, hostParamsRequestFlush};
 
 void hostLatencyChanged(const clap_host_t* host) { owner(host)->onLatencyChanged(); }
@@ -176,7 +176,10 @@ void hostRequestRestart(const clap_host_t* host) { owner(host)->onRequestRestart
 void hostRequestProcess(const clap_host_t*) {}
 void hostRequestCallback(const clap_host_t* host) { owner(host)->onRequestCallback(); }
 
-bool outTryPush(const clap_output_events_t*, const clap_event_header_t*) { return true; }
+bool outTryPush(const clap_output_events_t* list, const clap_event_header_t* event) {
+    static_cast<ClapProcessor*>(list->ctx)->onOutputEvent(event);
+    return true;
+}
 
 } // namespace
 
@@ -286,7 +289,7 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->inEvents_ = std::make_unique<InputEvents>();
     p->inEvents_->list = {p->inEvents_.get(), InputEvents::size, InputEvents::get};
     p->inEvents_->self = p.get();
-    p->outEvents_ = {nullptr, outTryPush};
+    p->outEvents_ = {p.get(), outTryPush};
     p->events_.resize(1024);
     return p;
 }
@@ -412,6 +415,14 @@ bool ClapProcessor::openEditor(unsigned long window, EditorSize* size, std::stri
     }
     if (editorOpen_)
         return true;
+    // Where each parameter is, so what the editor changes can be undone.
+    if (paramsExt_)
+        for (uint32_t i = 0, n = paramsExt_->count(plugin_); i < n; ++i) {
+            clap_param_info_t info{};
+            double value = 0;
+            if (paramsExt_->get_info(plugin_, i, &info) && paramsExt_->get_value(plugin_, info.id, &value))
+                edits_.known(info.id, value);
+        }
     if (!gui_->create(plugin_, kWindowApi, false)) {
         *error = name_ + " would not make its editor";
         return false;
@@ -523,6 +534,10 @@ std::string ClapProcessor::paramText(uint32_t id, double value) const {
     return buf;
 }
 
+bool ClapProcessor::paramFromText(uint32_t id, const std::string& text, double& value) const {
+    return paramsExt_ && paramsExt_->text_to_value && paramsExt_->text_to_value(plugin_, id, text.c_str(), &value);
+}
+
 bool ClapProcessor::saveState(std::vector<uint8_t>& out) const {
     if (!state_)
         return false;
@@ -556,6 +571,7 @@ bool ClapProcessor::loadState(const std::vector<uint8_t>& data) {
 bool ClapProcessor::setParam(uint32_t id, double value) {
     if (!paramQueue_.push({id, value}))
         return false;
+    edits_.known(id, value);
     paramsPending_.store(true, std::memory_order_release);
     return true;
 }
@@ -606,11 +622,37 @@ void ClapProcessor::reset() {
         plugin_->reset(plugin_);
 }
 
+void ClapProcessor::onOutputEvent(const clap_event_header_t* event) {
+    if (event->space_id != CLAP_CORE_EVENT_SPACE_ID)
+        return;
+    if (event->type == CLAP_EVENT_PARAM_VALUE) {
+        const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(event);
+        outQueue_.push({event->type, ev->param_id, ev->value});
+    } else if (event->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || event->type == CLAP_EVENT_PARAM_GESTURE_END) {
+        const auto* ev = reinterpret_cast<const clap_event_param_gesture_t*>(event);
+        outQueue_.push({event->type, ev->param_id, 0.0});
+    }
+}
+
+void ClapProcessor::takeEditorEdits(std::vector<ParamEdit>& out) {
+    while (auto e = outQueue_.pop()) {
+        if (e->type == CLAP_EVENT_PARAM_VALUE)
+            edits_.change(e->id, e->value);
+        else if (e->type == CLAP_EVENT_PARAM_GESTURE_BEGIN)
+            edits_.begin(e->id);
+        else
+            edits_.end(e->id);
+    }
+    edits_.take(out);
+}
+
 void ClapProcessor::flushIdle() {
-    if (!paramsPending_.load(std::memory_order_acquire) || !paramsExt_ || !activated_)
+    // Asked by the plug-in (its editor moved something), or changes to deliver.
+    const bool asked = flushRequested_.load(std::memory_order_acquire) && flushRequested_.exchange(false, std::memory_order_acq_rel);
+    if ((!asked && !paramsPending_.load(std::memory_order_acquire)) || !paramsExt_ || !activated_)
         return;
     drainParams(static_cast<uint32_t>(events_.size()));
-    if (inEvents_->count > 0)
+    if (inEvents_->count > 0 || asked)
         paramsExt_->flush(plugin_, &inEvents_->list, &outEvents_);
     inEvents_->count = 0;
 }

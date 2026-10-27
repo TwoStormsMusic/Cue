@@ -641,8 +641,11 @@ const float* const* Chain::gather(Plan& plan, uint32_t first, uint32_t count, fl
 void Chain::processBlock(Block& b, const float* const* input, uint32_t frames) {
     const bool fullyBypassed = b.wet.done() && b.wet.value() == 0.0f;
     if (fullyBypassed) {
+        // Its parameters still move: they are delivered without a block.
         if (b.draining)
             drain(b, frames);
+        else
+            b.processor->flushIdle();
         // Thru: the signal passes untouched. Mute: nothing passes.
         for (int c = 0; c < kChainChannels; ++c)
             b.res[c] = b.muteOnBypass ? silence_[c] : input[c];

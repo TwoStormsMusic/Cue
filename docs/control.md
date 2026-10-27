@@ -56,7 +56,7 @@ reply repeats:
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
 | `plugin` | `chain` (its number: the chain's `index` in `performance`), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text`, and `tied` when a control's `drive` (`control`, what it `follows`, its `pedal`) or a trigger's `param` action (`trigger`) moves it; `shown` once the app has picked parameters |
 | `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
-| `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
+| `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), and `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) or `text` (a value as typed, "-3 dB", which the plug-in reads; a plain number if it cannot, in % for VST3) | `value`, and `text`: how the plug-in writes it; kept in its state when saved |
 | `editor` | `chain`, `slot`, `open` (true to open, false to close; true by default); from an app on the same screen, `above` (its X11 window) and `display` (its `DISPLAY`) | `plugin` as above. The window opens on the screen of the computer running the engine, not the app's, so it is the stage computer that shows it. With `above` it stays over the app's window and never takes its focus |
 | `shown` | `chain`, `slot`, `params` (parameter ids, in the order the app shows them) | `plugin` as above; kept as the plug-in's `shown` when the performance is saved |
 | `add` | `chain`, `plugin` (a plugin line's text as in [config.md](config.md), or `format` with `path` and `id`, or `args` for a built-in), optional `label`, `bypassed`, `x` and `y` (where the app draws it), and `on` (a wire, as for `wire`, to put it on) | `slot`, `performance`. Without `on` it is added unwired |
@@ -69,7 +69,7 @@ reply repeats:
 | `add-chain` | `scene` (from 0), optional `at` (its place in the scene; the end if left out), `name`, `copy` (a chain's number: its plug-ins with their states as they are now, its wires and its settings), `input` (an empty chain's, by name) | `chain` (its number), `warnings`, `performance`. An empty chain has its input wired to every output, named `Chain N`; a copy in the same scene is named `Slap 2`. A copy keeps its pedal only in another scene where that pedal is free, and never a program change. Up to 64 chains can be added while it runs; saved and started again, there is room for 64 more |
 | `remove-chain` | `chain`, optional `token` | `performance`. Refused for the chain playing and the last chain of a scene. With a `token`, it is kept (with its plug-ins' states) for `restore-chain` |
 | `restore-chain` | `token` | `chain` (its number again, unless a chain added since has taken it), `performance` |
-| `set-chain` | `chain` and any of `name`, `display` (up to 3 characters), `pedal` (1-10; 0 or null for none), `program` (0-127; -1 or null for none), `warm` (`next`, `none`, or a chain of its scene by name), `on_select` (a list of actions, as [config.md](config.md) writes them) | `warnings` (a pedal another control also uses, say), `performance`. A pedal given to a chain is taken from any other chain of its scene that had it; a program change from any other chain. A new name is followed by every chain that kept it warm by name |
+| `set-chain` | `chain` and any of `name`, `display` (two letters or digits; three with a leading 1, - or +), `pedal` (1-10; 0 or null for none), `program` (0-127; -1 or null for none), `warm` (`next`, `none`, or a chain of its scene by name), `on_select` (a list of actions, as [config.md](config.md) writes them) | `warnings` (a pedal another control also uses, say), `performance`. A pedal given to a chain is taken from any other chain of its scene that had it; a program change from any other chain. A new name is followed by every chain that kept it warm by name |
 | `move-chain` | `chain`, `scene`, `at` (its place there; -1 for the end) | `performance`. Refused for the last chain of a scene |
 | `add-scene` | optional `at` (-1 for the end), `name`, `copy` (a scene: each chain as `add-chain` copies one, pedals kept, and the triggers that work only there) | `scene`, `chains` (their numbers), `performance`. Without `copy`, it has one empty chain |
 | `remove-scene` | `scene`, optional `token` | `performance`. Refused for the scene playing and the only scene. Every chain of it goes, and the triggers that work only there; with a `token`, all of it is kept for `restore-scene` |
@@ -78,7 +78,7 @@ reply repeats:
 | `move-scene` | `scene`, `at` | `performance` |
 | `plugins` | optional `scan`: `changed` (new and changed files), `all`, or one file's path; optional `folders` (the user's folders to look in, kept on this machine) | `plugins`: `scanning`, `done`, `total`, `current` (the file being opened), `scanned_at` (seconds since 1970), `folders` (`clap`, `vst3`: the usual ones; `extra`: the user's), and `files`: each `path`, `format`, `error` when it was skipped, and its `plugins`: `format`, `path`, `id`, `name`, `vendor`, `version`, `categories`, `bridged` (through yabridge), and when the scan made it, `opened` with `sidechain`, `editor` and `midi`; `error` for one that fell over as it was made |
 | `quit` | | |
-| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire", "scan", "plugins"]` | `events` now subscribed |
+| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire", "scan", "plugins", "edited"]` | `events` now subscribed |
 
 Events have an `event` field instead of an `id`:
 
@@ -105,6 +105,10 @@ Events have an `event` field instead of an `id`:
   change, or a chain or scene is added, set, moved or taken out.
 - `wire`: `chain` and `wire` (as the `wire` command answers it), when only a
   wire's level, width, pan or mute changed.
+- `edited`: a knob turned in a plug-in's own editor, once it is let go (or
+  still for 0.6 s, for a plug-in that does not say when it is let go):
+  `chain`, `slot`, `param`, its `name`, `from` and `to` (as `param` takes
+  them) and the `text` of where it went. Only while the editor is open.
 - `scan`: how far a plug-in scan is (`scanning`, `done`, `total`, `current`),
   as each file is opened.
 - `plugins`: as the `plugins` command answers it, when a scan ends.

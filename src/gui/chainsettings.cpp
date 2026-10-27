@@ -396,7 +396,7 @@ void ChainView::chainFields(QPainter& p, const QRectF& r, const ChainInfo& c) {
                  pedalItems(now, [this, id](int pedal) { setChain(id, {{"pedal", pedal}}); }, name, false));
     });
     field(p, "chain display", displayR, "FCB DISPLAY", c.display, false, [this, id, display = c.display] {
-        startEntry("chain display", display, "3 letters", 3, [this, id, display](const QString& text) {
+        startEntry("chain display", display, "2 letters", 2, [this, id, display](const QString& text) {
             if (text.trimmed() != display)
                 setChain(id, {{"display", text.trimmed()}});
         });
@@ -514,7 +514,7 @@ void ChainView::sceneFields(QPainter& p, const QRectF& r, int scene) {
                  pedalItems(now, [this, scene](int pedal) { setScene(scene, {{"pedal", pedal}}); }, name, true));
     });
     field(p, "scene display", displayR, "FCB DISPLAY", sc.display, false, [this, scene, display = sc.display] {
-        startEntry("scene display", display, "3 letters", 3, [this, scene, display](const QString& text) {
+        startEntry("scene display", display, "2 letters", 2, [this, scene, display](const QString& text) {
             if (text.trimmed() != display)
                 setScene(scene, {{"display", text.trimmed()}});
         });

@@ -165,7 +165,38 @@ void applyEvents(Plugin* s, const clap_input_events_t* in) {
     if (s->kind == Kind::Crash && s->param >= 0.5)
         std::raise(SIGSEGV);
 }
-void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*) { applyEvents(self(p), in); }
+// A knob turned in the editor (cue_test_turn): the gain plug-in says so on
+// the next process or flush, with or without a gesture around it.
+std::atomic<bool> g_turnPending{false};
+std::atomic<double> g_turnValue{0};
+std::atomic<bool> g_turnGesture{true};
+std::atomic<Plugin*> g_lastGain{nullptr};
+
+void emitTurn(Plugin* s, const clap_output_events_t* out) {
+    if (s->kind != Kind::Gain || !out || !g_turnPending.exchange(false))
+        return;
+    const double v = g_turnValue.load();
+    const bool gesture = g_turnGesture.load();
+    s->param = v;
+    clap_event_param_gesture_t g{};
+    g.header = {sizeof g, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_GESTURE_BEGIN, 0};
+    g.param_id = 0;
+    if (gesture)
+        out->try_push(out, &g.header);
+    clap_event_param_value_t e{};
+    e.header = {sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0};
+    e.param_id = 0;
+    e.value = v;
+    out->try_push(out, &e.header);
+    g.header.type = CLAP_EVENT_PARAM_GESTURE_END;
+    if (gesture)
+        out->try_push(out, &g.header);
+}
+
+void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t* out) {
+    applyEvents(self(p), in);
+    emitTurn(self(p), out);
+}
 const clap_plugin_params_t kParams = {paramsCount, paramsInfo, paramsValue, paramsToText, paramsFromText, paramsFlush};
 
 // ---- state: the parameter as 8 bytes
@@ -348,6 +379,8 @@ const clap_plugin_gui_t kGui = {guiIsApiSupported, guiGetPreferredApi, guiCreate
 
 bool init(const clap_plugin_t* p) {
     Plugin* s = self(p);
+    if (s->kind == Kind::Gain)
+        g_lastGain = s;
     if (s->kind == Kind::Key)
         if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
             t->register_timer(s->host, 20, &s->timer);
@@ -359,6 +392,8 @@ void destroy(const clap_plugin_t* p) {
         if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
             t->unregister_timer(s->host, s->timer);
     g_stats.instances--;
+    Plugin* last = s;
+    g_lastGain.compare_exchange_strong(last, nullptr);
     delete s;
 }
 bool activate(const clap_plugin_t* p, double sr, uint32_t, uint32_t) {
@@ -394,6 +429,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proc) 
     if (!s->processing)
         g_stats.processWhileStopped++;
     applyEvents(s, proc->in_events);
+    emitTurn(s, proc->out_events);
     if (proc->audio_inputs_count < 1 || proc->audio_outputs_count < 1)
         return CLAP_PROCESS_ERROR;
     float* const* in = proc->audio_inputs[0].data32;
@@ -518,6 +554,17 @@ const void* entryFactory(const char* id) { return !std::strcmp(id, CLAP_PLUGIN_F
 
 extern "C" {
 extern CLAP_EXPORT const clap_plugin_entry_t clap_entry = {CLAP_VERSION_INIT, entryInit, entryDeinit, entryFactory};
+
+// The last gain plug-in made has its knob turned, as if in its editor: it
+// asks the host for a flush, and says so then or with its next block.
+CLAP_EXPORT void cue_test_turn(double value, int gesture) {
+    g_turnValue = value;
+    g_turnGesture = gesture != 0;
+    g_turnPending = true;
+    if (Plugin* s = g_lastGain.load())
+        if (auto* params = static_cast<const clap_host_params_t*>(s->host->get_extension(s->host, CLAP_EXT_PARAMS)))
+            params->request_flush(s->host);
+}
 
 // Lifecycle counters for the host tests (not part of CLAP).
 CLAP_EXPORT long cue_test_stat(const char* name) {

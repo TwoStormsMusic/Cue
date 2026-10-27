@@ -393,7 +393,7 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 
 - **Name**: tap it, type, Enter (Esc leaves it as it was). The list and the stage view follow.
 - **Selected by**: pick a pedal. The menu says what else each pedal does. Pick one another chain uses: that chain loses it, and **Undo** gives it back. Press the pedal on the FCB: this chain plays.
-- **FCB display**: up to 3 letters, shown on the FCB while it plays.
+- **FCB display**: up to 2 letters, shown on the FCB while it plays.
 - **Keep warm while … plays**: pick a chain. Play this one, then switch to the one you picked: it comes in at once, with no pre-roll. The list says "warm" beside it.
 - **When selected, do**: **+ Action** and pick "Wah = Auto" (or one of yours). Play another chain, turn Wah off, play this one again: Wah goes to Auto. Tap the chip to take it out or move it.
 - **Move**: up, down, or into another scene. **Take out**: gone (not the chain playing; Cue says why). **Undo** brings it back with its plug-ins and settings.
@@ -408,6 +408,17 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 **Save and open again.** **Save**, quit the app and the engine, start them again: the chains, scenes and settings are as you left them, and the pedals and displays work.
 
 **Rig check.** Play for 30 minutes, switching chains every few seconds, and add or copy a chain now and then while you play. **Send** the status line at the end: still `xruns 0`. Send too anything that feels wrong or that you would lay out differently.
+
+## 16. Your 0.9.0 notes (0.9.1)
+
+`bin/cue-app --version` should say 0.9.1. Steps 13 to 15 still apply; this checks what changed.
+
+1. **Typing in a Neural DSP editor.** Open a Neural DSP plug-in's editor and type into one of its text boxes (a preset name, a value). The keys go there. Then check **Close editor** and the panel's sliders still work on the first tap with a TwoStorms editor open (step 15, check 1), as that is what the change touched.
+2. **A switched-off plug-in.** Bypass a TwoStorms plug-in, move one of its sliders in the panel: it stays where you put it. Turn the plug-in on: it sounds as set.
+3. **Typing a value.** Tap a parameter's value (right of its slider): after a moment a box opens; type a value as the plug-in writes it ("-6 dB", "250 ms", or just a number) and press Enter. Tap a value twice: it goes back to its default. **Undo** takes back both.
+4. **Undo for a plug-in's own window.** Open an editor, turn a knob, let go. **Undo** (in Cue) turns it back, and the knob in the window follows; **Redo** turns it again. One undo per knob grab. Try a TwoStorms plug-in and a Neural DSP one.
+5. **FCB display.** The display field takes two letters.
+6. **Scanning while playing.** With a chain playing, run `bin/cue scan --all` in a terminal. **Send** whether any xruns show up while it runs (they should not now, as the scan stays off the audio core; a Windows plug-in starting Wine can still load the machine, so tell me if it does).
 
 ## What passes
 

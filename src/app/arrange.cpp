@@ -13,6 +13,12 @@ namespace {
 const char* kUnarranged = "this performance has presets that share a chain (an INI config): chains and scenes can be changed "
                           "here once each chain has a preset of its own";
 
+// The FCB's display: two letters or digits, and a leading 1, - or + before them.
+const char* kDisplayRule = "the FCB's display shows two letters or digits (three with a leading 1, - or +)";
+bool fitsDisplay(const std::string& text) {
+    return text.size() <= 2 || (text.size() == 3 && (text[0] == '1' || text[0] == '-' || text[0] == '+'));
+}
+
 bool fail(std::string* error, const std::string& why) {
     *error = why;
     return false;
@@ -397,8 +403,8 @@ bool setChain(LiveRig& live, int id, const ChainSettings& set, std::string* erro
     }
     if (set.display) {
         const std::string display = trimmed(*set.display);
-        if (display.size() > 3)
-            return fail(error, "the FCB's display shows up to 3 characters");
+        if (!fitsDisplay(display))
+            return fail(error, kDisplayRule);
         ps.display = display;
     }
     if (set.pedal) {
@@ -613,8 +619,8 @@ bool setScene(LiveRig& live, int s, const SceneSettings& set, std::string* error
     }
     if (set.display) {
         const std::string display = trimmed(*set.display);
-        if (display.size() > 3)
-            return fail(error, "the FCB's display shows up to 3 characters");
+        if (!fitsDisplay(display))
+            return fail(error, kDisplayRule);
         scene.display = display;
     }
     if (set.pedal) {

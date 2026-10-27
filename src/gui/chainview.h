@@ -173,6 +173,10 @@ private:
     // Whether this tap, on what is called id, makes a double tap of the last.
     bool doubleTap(const QString& id);
     void paramRow(QPainter& p, const QRectF& row, const QRectF& list, const QJsonObject& q, const QString& format, bool all);
+    // A parameter's value box: a tap types a value (once it is clear it was
+    // not the first of two), a double tap sets the default.
+    void tapValue(const QJsonObject& param);
+    void typeValue(int chain, int slot, const QJsonObject& param, const QString& typed);
     void allParams(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
     void shownList(QPainter& p, const QRectF& r, const QJsonArray& params, const QString& format);
     void scrollable(const QRectF& list, double contentH);
@@ -257,6 +261,8 @@ private:
     double dragY_ = 0, dragGrab_ = 0;
     QSet<QString> closed_, opened_; // sections folded or unfolded by hand
     QLineEdit* search_ = nullptr;
+    QTimer valueTap_;
+    QJsonObject valueParam_; // the parameter whose box was tapped
 
     // The chains and scenes.
     Strip strip_ = Strip::Chain;
