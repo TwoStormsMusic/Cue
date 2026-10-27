@@ -60,7 +60,7 @@ wire that carries sound to an output (or would, in a chain not playing);
 grey is bypassed or silent, and every wire while the inputs are muted;
 orange is what you selected. Tap a chain in the list to see it, tap it twice
 to play it. The wheel, two fingers or the **−**,
-**Fit** and **+** buttons zoom; dragging open space or two fingers move it; a
+**Fit** and **+** buttons (right of the chain's name, beside **+ Plug-in**) zoom; dragging open space or two fingers move it; a
 double tap on open space fits the whole chain again. Tap a block to move its
 parameters with sliders; tap it twice to switch it on or off. Tap a value to type
 one ("-3 dB", "250 ms": the plug-in reads it), and tap it twice to set it back to
@@ -93,7 +93,12 @@ held to +6 dBFS, so turn it down on the wire to keep it from building up. Tap a 
 **level** (silent to +12 dB, 0 dB at the tick), **width** (100% is stereo
 as it comes, 0% folds left and right to mono) and **pan** (a balance: it
 turns one side down, never moves sound across), in that order; a double tap
-on a fader sets it back. **Mute**, **Insert** and **Delete** are under them.
+on a fader sets it back. **Mute**, **Insert** and **Delete** are under them,
+and **Draw as a jump**: the wire then leaves its plug-in as a short stub
+with a letter and comes in at the other end with the same letter, with no
+line between. A long chain can so run left to right on one row and go on
+left to right on the next. A jump is only how the board draws the wire: the
+sound, the .cue and anything made from it (an .RPP) are as for any wire.
 A wire whose level, width or pan is changed is drawn thick, with a tag
 saying what is changed (Settings can hide the tags). The **+** on the
 selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
@@ -159,7 +164,9 @@ app, in its settings.
 
 **Settings.** For this machine: the view the app starts in (Stage, Tuner or
 Chains), CPU and margin in ms or as % of what a block allows, the size of
-everything, the tuner while muted, full screen, whether the routing
+everything, the tuner while muted, full screen, what the stage view's header shows (**Stage shows**: CPU,
+margin, xruns, the sound card and the controller, each on or off; xruns and
+a controller that is not found show whatever is chosen), whether the routing
 board tags the wires whose level, width or pan is changed, **Feedback
 wires** (off: no wire may lead back to its own plug-in or an earlier one),
 and **Take the sound card** (on: an engine the app starts takes the card

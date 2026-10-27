@@ -64,7 +64,7 @@ void StageView::paint(QPainter& p) {
     QString subtitle;
     if (s.status.valid && s.status.scene < perf.scenes.size())
         subtitle = QString("Scene %1 of %2 · %3").arg(s.status.scene + 1).arg(perf.scenes.size()).arg(perf.scenes[s.status.scene].name);
-    const double top = header(p, perf.valid ? perf.name : "Cue", subtitle, enginePills(),
+    const double top = header(p, perf.valid ? perf.name : "Cue", subtitle, enginePills(&s.settings.stageShows),
                               {{"tuner", "Tuner", [this] { emit navigate("tuner"); }, color::green, color::greenDark, color::panel},
                                {"chains", "Chains", [this] { emit navigate("chains"); }},
                                {"settings", "Settings", [this] { emit navigate("settings"); }}});

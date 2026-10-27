@@ -430,6 +430,15 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 4. **No loops while drawing.** Drag a wire from a plug-in's output dot across its own input and key, and across a plug-in before it in the chain: none of them light up, and letting go there makes nothing.
 5. **Feedback wires.** Settings > **Feedback wires** > On. Draw a wire from a plug-in's output to its own input, or to one before it: it is drawn purple. Turn its level down (try -12 dB) and play: it sounds like a very short echo or comb filter. Then, at low volume and not through FOH, turn it up past 0 dB: it builds up to a loud steady level and stops there rather than growing for ever. **Delete** it, and turn the setting off again.
 
+## 18. Board, stage header and jumps (0.9.3)
+
+`bin/cue-app --version` should say 0.9.3. Steps 16 and 17 still apply.
+
+1. **Board buttons.** In Chains, **+ Plug-in** is at the right of the chain's name, with smaller **− Fit +** and the zoom % just left of it, off the board.
+2. **Stage header.** Settings > **Stage shows**: tap CPU, Margin, Xruns, Sound card or Controller to hide or show each; the stage view follows. Xruns and an FCB that is not found still show when they happen.
+3. **Values while dragging.** Drag a Neural DSP parameter's slider in the panel: the value stays in the plug-in's own form ("-6.0 dB", "Off") while you drag, a moment behind your finger, rather than turning into %.
+4. **Jumps.** Lay a long chain out as two rows (drag the plug-ins), tap the wire that turns back from the end of the first row to the start of the second, and tap **Draw as a jump**: it becomes a lettered stub out of the first row's end and the same letter into the second row's start. Tap either stub to select it again. It sounds the same. **Undo**, **Save** and open again: it stays a jump.
+
 ## What passes
 
 | Check | Pass when |

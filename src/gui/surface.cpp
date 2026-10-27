@@ -241,8 +241,9 @@ double Surface::header(QPainter& p, const QString& title, const QString& subtitl
     return h;
 }
 
-QVector<Surface::Pill> Surface::enginePills() const {
+QVector<Surface::Pill> Surface::enginePills(const QStringList* only) const {
     QVector<Pill> pills;
+    auto want = [only](const char* what) { return !only || only->contains(what); };
     if (!s.connected()) {
         pills.append({"Waiting for Cue", color::orange, color::orange, color::orange, color::bg});
         return pills;
@@ -251,9 +252,10 @@ QVector<Surface::Pill> Surface::enginePills() const {
     if (!st.valid)
         return pills;
     const QColor load = st.dspAvg < 60 ? color::green : st.dspAvg < 85 ? color::orange : color::red;
-    pills.append({s.settings.percent ? QString("CPU %1%").arg(std::lround(st.dspAvg))
-                                     : QString("CPU %1 ms").arg(st.dspAvg / 100 * st.periodMs, 0, 'f', 2),
-                  load});
+    if (want("cpu"))
+        pills.append({s.settings.percent ? QString("CPU %1%").arg(std::lround(st.dspAvg))
+                                         : QString("CPU %1 ms").arg(st.dspAvg / 100 * st.periodMs, 0, 'f', 2),
+                      load});
     QString margin = "Margin -";
     QColor marginColor = color::text2;
     if (st.marginMs) {
@@ -262,14 +264,19 @@ QVector<Surface::Pill> Surface::enginePills() const {
         if (pc && *pc < 15)
             marginColor = color::red;
     }
-    pills.append({margin, {}, marginColor});
-    pills.append({QString("Xruns %1").arg(st.xruns), st.xruns ? color::red : color::green, st.xruns ? color::red : color::text2});
+    if (want("margin"))
+        pills.append({margin, {}, marginColor});
+    // Xruns are always shown once there are any.
+    if (want("xruns") || st.xruns)
+        pills.append({QString("Xruns %1").arg(st.xruns), st.xruns ? color::red : color::green, st.xruns ? color::red : color::text2});
     const QString audio = audioSummary(s.hello);
-    if (!audio.isEmpty())
+    if (!audio.isEmpty() && want("audio"))
         pills.append({audio, {}});
     const QString controller = controllerName(s.hello);
-    if (!controller.isEmpty()) {
-        const bool up = s.hello.value("midi").toObject().value("ports").toInt() > 0;
+    // A controller not found is always shown.
+    const bool controllerUp = s.hello.value("midi").toObject().value("ports").toInt() > 0;
+    if (!controller.isEmpty() && (want("controller") || !controllerUp)) {
+        const bool up = controllerUp;
         pills.append({up ? controller : controller + " not found", up ? color::purple : color::red, up ? color::purple : color::red,
                       up ? color::purpleBorder : color::red, up ? color::purpleBg : color::bg});
     }

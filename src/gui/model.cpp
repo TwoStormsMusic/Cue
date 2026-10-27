@@ -55,6 +55,7 @@ QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QStri
         r["muted"] = muted;
         if (feedback)
             r["feedback"] = true;
+        r["jump"] = jump;
     }
     return r;
 }
@@ -219,6 +220,7 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 w.pan = wj.value("pan").toDouble(0);
                 w.muted = wj.value("muted").toBool();
                 w.feedback = wj.value("feedback").toBool();
+                w.jump = wj.value("jump").toBool();
                 c.wires << w;
             }
             scene.chains << c.index;

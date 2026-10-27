@@ -336,8 +336,10 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
         if (had.from == w.from && had.to == w.to) {
             w.gains = had.gains;
             w.feedback = had.feedback;
+            w.jump = had.jump;
         }
     w.feedback = req.value("feedback", w.feedback);
+    w.jump = req.value("jump", w.jump);
     w.gains.levelDb = req.value("level_db", w.gains.levelDb);
     w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
     w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
@@ -890,7 +892,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (cmd == "wire" && had) {
                     // Only its gains: the wire, not the whole performance.
                     Json wj = {{"from", req.at("from")}, {"to", req.at("to")}, {"level_db", w.gains.levelDb},
-                               {"width", std::round(w.gains.width * 1000) / 10}, {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted}};
+                               {"width", std::round(w.gains.width * 1000) / 10}, {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted},
+                               {"jump", w.jump}};
                     if (w.to.key)
                         wj["key"] = true;
                     reply["wire"] = wj;

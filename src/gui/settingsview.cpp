@@ -36,6 +36,11 @@ void SettingsView::tuner(const QJsonObject& change) {
 
 double SettingsView::row(QPainter& p, double y, const QString& label, const QString& hint, const QStringList& choices, int current,
                          const std::function<void(int)>& pick) {
+    return row(p, y, label, hint, choices, [current](int i) { return i == current; }, pick);
+}
+
+double SettingsView::row(QPainter& p, double y, const QString& label, const QString& hint, const QStringList& choices,
+                         const std::function<bool(int)>& marked, const std::function<void(int)>& pick) {
     const double m = 40 * u, h = 64 * u, W = std::min<double>(width(), 1200 * u + 2 * m);
     const double x0 = (width() - W) / 2 + m, labelW = std::min(360 * u, (W - 2 * m) * 0.42);
     p.setPen(color::text);
@@ -59,9 +64,10 @@ double SettingsView::row(QPainter& p, double y, const QString& label, const QStr
         const double sw = (fm.horizontalAdvance(choices[i]) + 44 * u) * k;
         const QRectF seg(x, box.top() + 4 * u, sw, box.height() - 8 * u);
         const QString id = label + ": " + choices[i];
-        if (i == current || isPressed(id))
-            draw::card(p, seg, 9 * u, i == current ? QColor(0x2A, 0x1A, 0x0A) : color::raised, i == current ? color::orange : QColor());
-        p.setPen(i == current ? color::orange : color::text2);
+        const bool on = marked(i);
+        if (on || isPressed(id))
+            draw::card(p, seg, 9 * u, on ? QColor(0x2A, 0x1A, 0x0A) : color::raised, on ? color::orange : QColor());
+        p.setPen(on ? color::orange : color::text2);
         p.setFont(f);
         draw::text(p, seg, Qt::AlignCenter, choices[i]);
         if (seg.intersects(body_))
@@ -116,6 +122,15 @@ void SettingsView::paint(QPainter& p) {
             s.settings.scale = 1.0;
         changed();
     });
+    const QStringList shows = {"cpu", "margin", "xruns", "audio", "controller"};
+    y = row(p, y, "Stage shows", "at the top of the stage view: tap each to show or hide it",
+            {"CPU", "Margin", "Xruns", "Sound card", "Controller"}, [&st, shows](int i) { return st.stageShows.contains(shows[i]); },
+            [this, shows](int i) {
+                QStringList& on = s.settings.stageShows;
+                if (!on.removeAll(shows[i]))
+                    on << shows[i];
+                changed();
+            });
     y = row(p, y, "Tuner while muted", "the tuner view comes up while the inputs are muted", {"On", "Off"}, st.tunerWhenMuted ? 0 : 1,
             [this](int i) {
                 s.settings.tunerWhenMuted = i == 0;

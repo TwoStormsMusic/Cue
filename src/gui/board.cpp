@@ -206,6 +206,14 @@ QPointF Board::inPoint(const PortInfo& p) const {
 }
 
 QPainterPath Board::path(const WireInfo& w) const {
+    if (w.jump) {
+        const QPointF a = outPoint(w.from), b = inPoint(w.to);
+        QPainterPath p(a);
+        p.lineTo(a + QPointF(jumpStub, 0));
+        p.moveTo(b - QPointF(jumpStub, 0));
+        p.lineTo(b);
+        return p;
+    }
     return path(outPoint(w.from), inPoint(w.to), w.from.kind == PortInfo::Kind::Block ? w.from.index : -1,
                 w.to.kind == PortInfo::Kind::Block ? w.to.index : -1);
 }

@@ -122,6 +122,7 @@ protected:
 private:
     void sidebar(QPainter& p, const QRectF& r);
     void canvas(QPainter& p, const QRectF& r, const ChainInfo& c);
+    void boardTools(QPainter& p, const QRectF& r);
     void legend(QPainter& p, const QRectF& r);
     // The settings under the board, and their height.
     double stripHeight(const ChainInfo& c, double width) const;

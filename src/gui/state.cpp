@@ -22,6 +22,9 @@ void Settings::load() {
     fullScreen = s.value("full_screen", fullScreen).toBool();
     wireTags = s.value("wire_tags", wireTags).toBool();
     favourites = s.value("favourites", favourites).toStringList();
+    // An empty list is saved as "none": QSettings would read it back as missing.
+    const QStringList shows = s.value("stage_shows", stageShows).toStringList();
+    stageShows = shows == QStringList{"none"} ? QStringList() : shows;
     feedbackWires = s.value("feedback_wires", feedbackWires).toBool();
     takeCard = s.value("take_sound_card", takeCard).toBool();
 }
@@ -35,6 +38,7 @@ void Settings::save() const {
     s.setValue("full_screen", fullScreen);
     s.setValue("wire_tags", wireTags);
     s.setValue("favourites", favourites);
+    s.setValue("stage_shows", stageShows.isEmpty() ? QStringList{"none"} : stageShows);
     s.setValue("feedback_wires", feedbackWires);
     s.setValue("take_sound_card", takeCard);
 }
@@ -218,6 +222,7 @@ void AppState::setWire(int chain, const QJsonObject& wj) {
     w.width = wj.value("width").toDouble(100);
     w.pan = wj.value("pan").toDouble(0);
     w.muted = wj.value("muted").toBool();
+    w.jump = wj.value("jump").toBool();
     emit changed();
 }
 

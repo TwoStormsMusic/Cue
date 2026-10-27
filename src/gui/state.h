@@ -25,6 +25,8 @@ struct Settings {
     bool fullScreen = false;
     bool wireTags = true;        // a wire shows its level, width and pan on the board when they are changed
     QStringList favourites;      // plug-ins, by ScannedPlugin::key()
+    // What the stage view's header shows: cpu, margin, xruns, audio, controller.
+    QStringList stageShows = {"cpu", "margin", "xruns", "audio", "controller"};
     bool feedbackWires = false;  // a wire may bring a plug-in's sound back to it, a block late
     bool takeCard = true;        // an engine the app starts takes the sound card from what else has it
 

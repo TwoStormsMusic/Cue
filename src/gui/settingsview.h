@@ -25,6 +25,9 @@ private:
     // A row: a label, a hint, and choices; the one in force is marked.
     double row(QPainter& p, double y, const QString& label, const QString& hint, const QStringList& choices, int current,
                const std::function<void(int)>& pick);
+    // ...of which any number may be marked.
+    double row(QPainter& p, double y, const QString& label, const QString& hint, const QStringList& choices,
+               const std::function<bool(int)>& marked, const std::function<void(int)>& pick);
     void changed();
     void tuner(const QJsonObject& change);
 

@@ -52,7 +52,9 @@ struct WireInfo {
     double levelDb = 0, width = 100, pan = 0;
     bool muted = false;
     bool feedback = false; // heard a block late, so it may lead back to its own plug-in
+    bool jump = false;     // drawn as a jump: out at its source and in at its end, marked by a letter
     bool neutral() const { return levelDb == 0 && width == 100 && pan == 0 && !muted; }
+    bool same(const WireInfo& o) const { return levelDb == o.levelDb && width == o.width && pan == o.pan && muted == o.muted && jump == o.jump; }
     // The request that makes it so: {"cmd": "wire", "chain", "from", "to", ...}.
     QJsonObject request(int chain, const QStringList& outputs, const QString& cmd = "wire") const;
 };

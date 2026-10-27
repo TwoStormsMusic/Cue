@@ -67,8 +67,9 @@ protected:
     };
     double header(QPainter& p, const QString& title, const QString& subtitle, const QVector<Pill>& pills, const QVector<Button>& buttons);
 
-    // Pills for the engine's numbers, as the settings say to show times.
-    QVector<Pill> enginePills() const;
+    // Pills for the engine's numbers, as the settings say to show times: all,
+    // or only those named in only (cpu, margin, xruns, audio, controller).
+    QVector<Pill> enginePills(const QStringList* only = nullptr) const;
 
     // A button: a rounded card with centred text.
     void button(QPainter& p, const QString& id, const QRectF& r, const QString& text, std::function<void()> tap, const QColor& textColor,

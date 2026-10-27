@@ -220,6 +220,8 @@ struct Writer {
                 wj["muted"] = true;
             if (w.feedback)
                 wj["feedback"] = true;
+            if (w.jump)
+                wj["jump"] = true;
             wires.push_back(wj);
         }
         j["wires"] = wires;
@@ -503,6 +505,7 @@ struct Reader {
             w.gains.pan = wj.value("pan", 0.0f) / 100.0f;
             w.gains.muted = wj.value("muted", false);
             w.feedback = wj.value("feedback", false);
+            w.jump = wj.value("jump", false);
             if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1)
                 throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
             c.wires.push_back(w);

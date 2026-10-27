@@ -257,10 +257,12 @@ bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error)
         return fail(error, "there is no chain number " + std::to_string(chain + 1));
     const int w = findWire(*cs, wire.from, wire.to);
     if (w >= 0) {
-        // Only its gains: they move, nothing is swapped.
+        // Only its gains: they move, nothing is swapped. How it is drawn
+        // is the app's.
         if (!live.rig.engine->setWire(chain, wire.from, wire.to, wire.gains))
             return fail(error, "the engine has no such wire");
         cs->wires[w].gains = wire.gains;
+        cs->wires[w].jump = wire.jump;
         return true;
     }
     ChainSpec next = *cs;

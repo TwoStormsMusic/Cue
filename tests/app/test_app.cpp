@@ -1074,6 +1074,38 @@ private slots:
         v->grab();
         click(v, v->hitRect("wire mute"));
         QVERIFY(link.last("wire").value("muted").toBool());
+        // Drawn as a jump: only how it looks, undone like the rest.
+        v->grab();
+        click(v, v->hitRect("wire jump"));
+        QVERIFY(link.last("wire").value("jump").toBool());
+        QCOMPARE(link.last("wire").value("from").toInt(), 0);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!link.last("wire").value("jump").toBool());
+        {
+            // As the engine would send it back: two stubs with a letter, still tapped to select.
+            // The wire that turns back to the second row, as a jump.
+            ChainInfo* shown = const_cast<ChainInfo*>(s.chain(1));
+            int ir = 0;
+            while (shown->blocks[ir].label != "IR Loader")
+                ++ir;
+            int back = -1;
+            for (int i = 0; i < shown->wires.size(); ++i)
+                if (shown->wires[i].to == PortInfo::block(ir))
+                    back = i;
+            QVERIFY(back >= 0);
+            shown->wires[back].jump = true;
+            const QPainterPath jump = Board(*shown, 2).path(shown->wires[back]);
+            QCOMPARE(jump.elementCount(), 4);
+            QTest::keyClick(&w, Qt::Key_Escape);
+            tapAt(Board(*shown, 2).inPoint(PortInfo::block(ir)) - QPointF(Board::jumpStub / 2, 0));
+            QCOMPARE(v->selectedWire(), back);
+            QTest::keyClick(&w, Qt::Key_Escape);
+            v->grab();
+            shot(v, "routing-jump");
+            shown->wires[back].jump = false;
+            tapAt(b.path(slap.wires[gw]).pointAtPercent(0.5));
+            QCOMPARE(v->selectedWire(), gw);
+        }
 
         // Its + puts a plug-in on it: the built-in Gain, after the two this
         // performance has. The first change to the routing keeps every
@@ -1724,7 +1756,7 @@ private slots:
         AppState s(link);
         fill(s);
         MainWindow w(s);
-        w.resize(1280, 800);
+        w.resize(1280, 1300);
         w.showView("settings");
         w.show();
         QVERIFY(QTest::qWaitForWindowExposed(&w));
@@ -1736,6 +1768,14 @@ private slots:
         v->grab();
         click(v, v->hitRect("Show modified wire parameters: Off"));
         v->grab();
+        click(v, v->hitRect("Stage shows: Margin"));
+        v->grab();
+        click(v, v->hitRect("Stage shows: Sound card"));
+        QCOMPARE(s.settings.stageShows, (QStringList{"cpu", "xruns", "controller"}));
+        v->grab();
+        click(v, v->hitRect("Stage shows: Margin"));
+        QCOMPARE(s.settings.stageShows, (QStringList{"cpu", "xruns", "controller", "margin"}));
+        v->grab();
         click(v, v->hitRect("Range: Guitar"));
         QCOMPARE(link.last("tuner").value("range").toString(), QString("guitar"));
         Settings again;
@@ -1743,6 +1783,7 @@ private slots:
         QCOMPARE(again.startView, QString("tuner"));
         QVERIFY(again.percent);
         QVERIFY(!again.wireTags);
+        QCOMPARE(again.stageShows, (QStringList{"cpu", "xruns", "controller", "margin"}));
     }
 
     // The app against the real engine: it plays, switches, reads plug-ins,
@@ -1868,6 +1909,12 @@ private slots:
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QVERIFY(ask({{"cmd", "unwire"}, {"chain", 1}, {"from", trim}, {"to", trim}}).value("ok").toBool());
         QVERIFY(ask({{"cmd", "unwire"}, {"chain", 1}, {"from", 1}, {"to", 0}}).value("ok").toBool());
+        // A jump is kept with the wire, and changes nothing else.
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"to", 1}, {"jump", true}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QVERIFY(r.value("wire").toObject().value("jump").toBool());
+        QTRY_VERIFY(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1))].jump);
+        QCOMPARE(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1))].levelDb, -6.0);
         QTRY_VERIFY(s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0)) < 0);
         r = ask({{"cmd", "place"}, {"chain", 1}, {"slot", trim}, {"x", 500}, {"y", 300}});
         QVERIFY(r.value("ok").toBool());
