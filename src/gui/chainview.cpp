@@ -96,19 +96,36 @@ QString freeLabel(const ChainInfo& c, const QString& label) {
             return QString("%1 %2").arg(label).arg(n);
 }
 
-// What can be added: every plug-in the performance has, then the built-ins.
-QVector<PluginInfo> choices(const Performance& perf, int& firstBuiltin) {
-    QVector<PluginInfo> out;
+// What can be added, by section: the favourites the scan found, every
+// plug-in the performance has, then the built-ins.
+struct Choice {
+    QString section;
+    PluginInfo plugin;
+    QString what; // under its name
+};
+
+QVector<Choice> choices(const AppState& s) {
+    QVector<Choice> out;
     QSet<QString> seen;
-    for (const ChainInfo& c : perf.chains)
-        for (const PluginInfo& b : c.blocks) {
-            const QString key = b.format + "|" + b.path + "|" + b.id + "|" + b.args.join(' ');
-            if (b.format == "builtin" || seen.contains(key))
-                continue;
-            seen.insert(key);
-            out << b;
+    auto key = [](const PluginInfo& b) { return b.format + "|" + b.path + "|" + b.id + "|" + b.args.join(' '); };
+    for (const ScannedPlugin& p : s.catalog.plugins)
+        if (p.ready() && s.isFavourite(p)) {
+            const PluginInfo b = p.toPlugin();
+            seen.insert(key(b));
+            out << Choice{"FAVOURITES", b, (p.vendor.isEmpty() ? QString() : p.vendor + " · ") + p.format.toUpper()};
         }
-    firstBuiltin = out.size();
+    for (const ChainInfo& c : s.perf.chains)
+        for (const PluginInfo& b : c.blocks) {
+            if (b.format == "builtin" || seen.contains(key(b)))
+                continue;
+            // Already a favourite under the scan's name.
+            const bool favourite = std::any_of(s.catalog.plugins.begin(), s.catalog.plugins.end(),
+                                               [&](const ScannedPlugin& p) { return s.isFavourite(p) && isPlugin(b, p); });
+            if (favourite)
+                continue;
+            seen.insert(key(b));
+            out << Choice{"IN THIS PERFORMANCE", b, b.format.toUpper() + " · " + b.path.section('/', -1)};
+        }
     const QVector<QPair<QString, QStringList>> builtins = {
         {"Gain", {"gain", "1"}}, {"Drive", {"drive", "3"}}, {"Lowpass", {"lowpass", "2000"}}, {"Delay", {"delay", "400", "0.4", "0.4"}}};
     for (const auto& [label, args] : builtins) {
@@ -116,7 +133,7 @@ QVector<PluginInfo> choices(const Performance& perf, int& firstBuiltin) {
         b.format = "builtin";
         b.label = label;
         b.args = args;
-        out << b;
+        out << Choice{"BUILT IN", b, "built in · " + args.join(' ')};
     }
     return out;
 }
@@ -224,6 +241,11 @@ void ChainView::setBypass(int chain, int slot, bool bypassed) {
 }
 
 void ChainView::showEvent(QShowEvent*) {
+    if (std::exchange(resume_, false)) {
+        refresh_.start();
+        requestPlugin();
+        return;
+    }
     followPlaying_ = true;
     showChain(s.playing());
     refresh_.start();
@@ -233,6 +255,8 @@ void ChainView::showEvent(QShowEvent*) {
 void ChainView::hideEvent(QHideEvent*) { refresh_.stop(); }
 
 void ChainView::showChain(int chain) {
+    // Another than the one playing stays shown when the playing one changes.
+    followPlaying_ = chain == s.playing();
     if (chain != chain_) {
         chain_ = chain;
         selectSlot(-1);
@@ -457,6 +481,7 @@ void ChainView::paint(QPainter& p) {
                                {"redo", "Redo", [this] { s.redo(); }, s.canRedo() ? color::text : color::dim},
                                {"stage", "Stage", [this] { emit navigate("stage"); }},
                                {"tuner", "Tuner", [this] { emit navigate("tuner"); }, color::green, color::greenDark, color::panel},
+                               {"plugins", "Plug-ins", [this] { emit navigate("plugins"); }},
                                {"settings", "Settings", [this] { emit navigate("settings"); }},
                                {"save", "Save", [this] { s.save(); }, color::onOrange, color::orange, color::orange}});
     const double W = width(), H = height();
@@ -1226,6 +1251,24 @@ void ChainView::removePlugin(int slot) {
     });
 }
 
+QString ChainView::addTarget() const {
+    const ChainInfo* c = s.chain(chain_);
+    if (!c)
+        return {};
+    if (const int w = selectedWire(); w >= 0)
+        return "Insert on " + portName(*c, c->wires[w].from) + " → " + portName(*c, c->wires[w].to);
+    return "Add to " + c->name;
+}
+
+void ChainView::addFromBrowser(const PluginInfo& what) {
+    if (!s.chain(chain_))
+        return;
+    picker_ = selectedWire() >= 0 ? Picker::Insert : Picker::Add;
+    if (picker_ == Picker::Add)
+        addAt_ = toBoard(canvasRect_.center());
+    addPlugin(what);
+}
+
 void ChainView::addPlugin(const PluginInfo& what) {
     const ChainInfo* c = s.chain(chain_);
     if (!c)
@@ -1596,12 +1639,13 @@ void ChainView::pickerPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
     p.drawText(sr, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, sub);
     y += used.height() + 18 * u;
 
-    int firstBuiltin = 0;
-    const QVector<PluginInfo> all = choices(s.perf, firstBuiltin);
-    const double rowH = 54 * u, headH = 34 * u, btnH = 46 * u;
-    const QRectF list(r.left(), y, r.width(), r.bottom() - y - btnH - 24 * u);
-    const double contentH = all.size() * rowH + (firstBuiltin > 0 ? 2 : 1) * headH;
-    scrollable(list, contentH);
+    const QVector<Choice> all = choices(s);
+    const double rowH = 54 * u, headH = 34 * u, btnH = 46 * u, gap = 10 * u;
+    const QRectF list(r.left(), y, r.width(), r.bottom() - y - 2 * btnH - gap - 24 * u);
+    int sections = 0;
+    for (int i = 0; i < all.size(); ++i)
+        sections += i == 0 || all[i].section != all[i - 1].section;
+    scrollable(list, all.size() * rowH + sections * headH);
     p.save();
     p.setClipRect(list);
     double ry = list.top() - scroll_;
@@ -1612,11 +1656,9 @@ void ChainView::pickerPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         ry += headH;
     };
     for (int i = 0; i < all.size(); ++i) {
-        if (i == 0 && firstBuiltin > 0)
-            head("IN THIS PERFORMANCE");
-        if (i == firstBuiltin)
-            head("BUILT IN");
-        const PluginInfo& b = all[i];
+        if (i == 0 || all[i].section != all[i - 1].section)
+            head(all[i].section);
+        const PluginInfo& b = all[i].plugin;
         const QRectF row(r.left() + pad, ry, w, rowH - 6 * u);
         ry += rowH;
         if (row.bottom() < list.top() || row.top() > list.bottom())
@@ -1628,13 +1670,15 @@ void ChainView::pickerPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         draw::text(p, row.adjusted(14 * u, 4 * u, -14 * u, -row.height() / 2), Qt::AlignLeft | Qt::AlignBottom, b.label);
         p.setPen(color::muted);
         p.setFont(typeface(Face::Mono, 11.5 * u));
-        const QString what = b.format == "builtin" ? "built in · " + b.args.join(' ') : b.format.toUpper() + " · " + b.path.section('/', -1);
-        draw::text(p, row.adjusted(14 * u, row.height() / 2 + 2 * u, -14 * u, -4 * u), Qt::AlignLeft | Qt::AlignTop, what);
+        draw::text(p, row.adjusted(14 * u, row.height() / 2 + 2 * u, -14 * u, -4 * u), Qt::AlignLeft | Qt::AlignTop, all[i].what);
         const QRectF tap = row.intersected(list);
         if (!tap.isEmpty())
             hit(id, tap, [this, b] { addPlugin(b); });
     }
     p.restore();
+    // Everything the scan found, to pick from in the plug-ins view.
+    button(p, "browse", QRectF(r.left() + pad, r.bottom() - 2 * btnH - gap - 14 * u, w, btnH), "Browse all plug-ins",
+           [this] { emit navigate("plugins"); }, color::orange, color::border2, color::panel2, 15 * u);
     button(p, "cancel", QRectF(r.left() + pad, r.bottom() - btnH - 14 * u, w, btnH), "Cancel",
            [this] {
                picker_ = Picker::None;

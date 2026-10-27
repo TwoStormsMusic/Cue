@@ -1,7 +1,7 @@
 #pragma once
 
-// The app's window: one view at a time (stage, tuner, chains, settings), a
-// message line at the bottom, and the keys that work everywhere.
+// The app's window: one view at a time (stage, tuner, chains, plug-ins,
+// settings), a message line at the bottom, and the keys that work everywhere.
 
 #include "gui/state.h"
 

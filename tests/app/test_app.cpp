@@ -7,6 +7,7 @@
 #include "gui/link.h"
 #include "gui/mainwindow.h"
 #include "gui/model.h"
+#include "gui/pluginsview.h"
 #include "gui/settingsview.h"
 #include "gui/stageview.h"
 #include "gui/state.h"
@@ -14,6 +15,7 @@
 #include "gui/tunerview.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QFile>
 #include <QLineF>
 #include <QWheelEvent>
@@ -23,6 +25,7 @@
 #include <QLocalSocket>
 #include <QPainterPath>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -84,6 +87,37 @@ const char* kStatus = R"({
 
 const char* kTuner = R"({"event": "tuner", "input": "Bass", "signal": true, "level_db": -20, "note": "E", "octave": 1, "midi": 28,
   "cents": 2.2, "hz": 41.26, "held": false, "in_tune": false, "reference": 440, "range": "bass", "tolerance": 2, "names": "sharps"})";
+
+// What a scan might find: native and bridged plug-ins, one in the
+// performance, one that fell over as it was made and a file skipped.
+const char* kCatalog = R"({
+  "scanning": false, "done": 7, "total": 7, "current": "", "scanned_at": 1793000000,
+  "folders": {"clap": ["/home/adam/.clap", "/usr/lib/clap"], "vst3": ["/home/adam/.vst3", "/usr/lib/vst3"], "extra": ["/opt/plugins"]},
+  "files": [
+    {"path": "/home/adam/.clap/CLAP Plugins Linux/TwoStorms Delay.clap", "format": "clap", "plugins": [
+      {"format": "clap", "path": "/home/adam/.clap/CLAP Plugins Linux/TwoStorms Delay.clap", "id": "com.twostorms.delay", "name": "TwoStorms Delay",
+       "vendor": "TwoStorms", "version": "1.2", "categories": ["audio-effect", "delay"], "opened": true, "sidechain": true, "editor": true, "midi": false}]},
+    {"path": "/home/adam/.clap/CLAP Plugins Linux/TwoStorms Wah.clap", "format": "clap", "plugins": [
+      {"format": "clap", "path": "/home/adam/.clap/CLAP Plugins Linux/TwoStorms Wah.clap", "id": "com.twostorms.wah", "name": "TwoStorms Wah",
+       "vendor": "TwoStorms", "version": "1.2", "categories": ["audio-effect", "filter"], "opened": true, "sidechain": false, "editor": true, "midi": true}]},
+    {"path": "/home/adam/.clap/lsp-plugins.clap", "format": "clap", "plugins": [
+      {"format": "clap", "path": "/home/adam/.clap/lsp-plugins.clap", "id": "in.lsp-plug.compressor_stereo", "name": "LSP Compressor Stereo",
+       "vendor": "LSP", "version": "1.2.16", "categories": ["audio-effect", "compressor"], "opened": true, "sidechain": true, "editor": true, "midi": false},
+      {"format": "clap", "path": "/home/adam/.clap/lsp-plugins.clap", "id": "in.lsp-plug.gate_stereo", "name": "LSP Gate Stereo",
+       "vendor": "LSP", "version": "1.2.16", "categories": ["audio-effect", "gate"], "opened": true, "sidechain": true, "editor": true, "midi": false}]},
+    {"path": "/home/adam/.vst3/yabridge/Neural DSP/Archetype Nolly.vst3", "format": "vst3", "plugins": [
+      {"format": "vst3", "path": "/home/adam/.vst3/yabridge/Neural DSP/Archetype Nolly.vst3", "id": "1A2B3C4D5E6F708192A3B4C5D6E7F801",
+       "name": "Archetype Nolly", "vendor": "Neural DSP", "version": "1.0.0", "categories": ["Fx"], "bridged": true}]},
+    {"path": "/home/adam/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "format": "vst3", "plugins": [
+      {"format": "vst3", "path": "/home/adam/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "id": "0F1E2D3C4B5A69788796A5B4C3D2E1F0",
+       "name": "Darkglass Ultra", "vendor": "Neural DSP", "version": "1.1.0", "categories": ["Fx", "Distortion"], "bridged": true}]},
+    {"path": "/home/adam/x/Test.clap", "format": "clap", "plugins": [
+      {"format": "clap", "path": "/home/adam/x/Test.clap", "id": "cue.test.gain", "name": "Test Gain", "vendor": "TwoStorms test",
+       "categories": ["audio-effect"], "opened": true, "editor": true},
+      {"format": "clap", "path": "/home/adam/x/Test.clap", "id": "cue.test.crash", "name": "Test Crash", "vendor": "TwoStorms test",
+       "categories": ["audio-effect"], "error": "crashed with an abort when made"}]},
+    {"path": "/home/adam/.vst3/Broken.vst3", "format": "vst3", "error": "crashed with a segmentation fault", "plugins": []}]
+})";
 
 // A link that is always up and records what is asked; replies come from
 // answer(), or ok.
@@ -344,12 +378,18 @@ private slots:
 
     void every_view_draws_at_every_size() {
         FakeLink link;
+        link.answer = [](const QJsonObject& r) {
+            if (r.value("cmd").toString() == "plugins")
+                return QJsonObject{{"ok", true}, {"plugins", parse(kCatalog)}};
+            return QJsonObject{{"ok", true}};
+        };
         AppState s(link);
         fill(s);
+        s.loadPlugins();
         MainWindow w(s);
         for (const QSize size : {QSize(800, 480), QSize(1024, 600), QSize(1280, 800), QSize(1920, 1080), QSize(2560, 1440), QSize(600, 1024)}) {
             w.resize(size);
-            for (const char* view : {"stage", "tuner", "chains", "settings"}) {
+            for (const char* view : {"stage", "tuner", "chains", "plugins", "settings"}) {
                 w.showView(view);
                 Surface* v = w.view(view);
                 v->resize(size);
@@ -359,7 +399,7 @@ private slots:
                 // Everything tappable is on the screen.
                 for (const QString& id : v->hitIds()) {
                     const QRectF r = v->hitRect(id);
-                    if (id == "params")
+                    if (id == "params" || id == "list" || id == "side")
                         continue;
                     QVERIFY2(QRectF(0, 0, size.width(), size.height()).adjusted(-1, -1, 1, 1).contains(r),
                              qPrintable(QString("%1 at %2x%3 is off the screen").arg(id).arg(size.width()).arg(size.height())));
@@ -374,7 +414,7 @@ private slots:
                     QVERIFY(!stage->hitRect(QString("chain %1").arg(a)).intersects(stage->hitRect(QString("chain %1").arg(b))));
         }
         w.resize(1280, 860);
-        for (const char* view : {"stage", "tuner", "chains", "settings"}) {
+        for (const char* view : {"stage", "tuner", "chains", "plugins", "settings"}) {
             w.showView(view);
             w.view(view)->resize(1280, 860);
             shot(w.view(view), view);
@@ -1055,6 +1095,253 @@ private slots:
         QTest::keyClick(&w, Qt::Key_Escape);
         QCOMPARE(v->selectedSlot(), -1);
         QVERIFY(v->isVisible());
+    }
+
+    void the_catalog_reads_what_the_scan_found() {
+        const Catalog c = Catalog::fromJson(parse(kCatalog));
+        QVERIFY(c.valid && !c.scanning);
+        QCOMPARE(c.plugins.size(), 9);
+        QCOMPARE(c.ready(), 7);
+        QCOMPARE(c.skipped(), 2);
+        QCOMPARE(c.usual, QStringList({"/home/adam/.clap", "/usr/lib/clap", "/home/adam/.vst3", "/usr/lib/vst3"}));
+        QCOMPARE(c.extra, QStringList({"/opt/plugins"}));
+        // By name; a file skipped is named after itself.
+        QCOMPARE(c.plugins.first().name, QString("Archetype Nolly"));
+        QCOMPARE(c.plugins[1].name, QString("Broken"));
+        QVERIFY(!c.plugins[1].ready());
+        const Performance perf = Performance::fromJson(parse(kPerformance));
+        for (const ScannedPlugin& p : c.plugins) {
+            const QStringList chains = chainsWith(perf, p);
+            if (p.name == "Test Gain")
+                QCOMPARE(chains, QStringList({"Punk", "Slap"}));
+            else
+                QVERIFY2(chains.isEmpty(), qPrintable(p.name));
+        }
+        // A scan event moves it on.
+        Catalog d = c;
+        d.progress(parse(R"({"scanning": true, "done": 2, "total": 5, "current": "/a/B.clap", "scanned_at": 1})"));
+        QVERIFY(d.scanning && d.done == 2 && d.total == 5 && d.current == "/a/B.clap" && d.plugins.size() == 9);
+    }
+
+    void the_plugins_view_finds_and_adds_plugins() {
+        FakeLink link;
+        link.answer = [](const QJsonObject& r) {
+            if (r.value("cmd").toString() == "plugins")
+                return QJsonObject{{"ok", true}, {"plugins", parse(kCatalog)}};
+            if (r.value("cmd").toString() == "add")
+                return QJsonObject{{"ok", true}, {"slot", 5}};
+            return QJsonObject{{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        s.settings.favourites.clear();
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* chains = static_cast<ChainView*>(w.view("chains"));
+        chains->grab();
+        QCOMPARE(chains->shownChain(), 1);
+        // Gain Stage -> Wah selected: the plug-ins view puts one there.
+        chains->selectWire(s.chain(1)->wire(PortInfo::block(0), PortInfo::block(1)));
+        QCOMPARE(chains->addTarget(), QString("Insert on Gain Stage → Wah"));
+        click(chains, chains->hitRect("plugins"));
+        QCOMPARE(w.current(), QString("plugins"));
+        auto* v = static_cast<PluginsView*>(w.view("plugins"));
+        QCOMPARE(link.last("plugins").value("scan").toString(), QString("changed"));
+        QCOMPARE(s.catalog.plugins.size(), 9);
+        v->grab();
+
+        // The filters.
+        QCOMPARE(v->listed().size(), 9);
+        v->setKind(PluginsView::Kind::Windows);
+        QCOMPARE(v->listed().size(), 2);
+        v->setKind(PluginsView::Kind::Clap);
+        QCOMPARE(v->listed().size(), 6);
+        v->setKind(PluginsView::Kind::All);
+        v->setVendor("LSP");
+        QCOMPARE(v->listed().size(), 2);
+        v->setVendor({});
+        v->setCollection(PluginsView::Collection::Skipped);
+        QCOMPARE(v->listed().size(), 2);
+        v->setCollection(PluginsView::Collection::Used);
+        QCOMPARE(v->listed().size(), 1);
+        v->setCollection(PluginsView::Collection::All);
+        v->setSearch("dark");
+        QCOMPARE(v->listed().size(), 1);
+        v->setSearch("compressor"); // a kind, not in the name
+        QCOMPARE(v->listed().size(), 1);
+        v->setSearch({});
+        // The sidebar and the chips do the same by touch.
+        v->grab();
+        click(v, v->hitRect("kind Windows (yabridge)"));
+        QCOMPARE(v->listed().size(), 2);
+        v->grab();
+        click(v, v->hitRect("kind All"));
+        QCOMPARE(v->listed().size(), 9);
+
+        // A tap selects; the panel adds it onto the wire.
+        int ultra = -1, broken = -1;
+        for (int i = 0; i < s.catalog.plugins.size(); ++i) {
+            ultra = s.catalog.plugins[i].name == "Darkglass Ultra" ? i : ultra;
+            broken = s.catalog.plugins[i].name == "Broken" ? i : broken;
+        }
+        v->grab();
+        click(v, v->rowRect(ultra));
+        QCOMPARE(v->selected(), ultra);
+        v->grab();
+        shot(v, "plugins-browser");
+        click(v, v->hitRect("favourite"));
+        QVERIFY(s.isFavourite(s.catalog.plugins[ultra]));
+        Settings kept;
+        kept.load();
+        QCOMPARE(kept.favourites, QStringList({s.catalog.plugins[ultra].key()}));
+        v->setCollection(PluginsView::Collection::Favourites);
+        QCOMPARE(v->listed(), QVector<int>({ultra}));
+        v->setCollection(PluginsView::Collection::All);
+        v->grab();
+        click(v, v->hitRect("add"));
+        QCOMPARE(w.current(), QString("chains"));
+        const QJsonObject add = link.last("add");
+        QCOMPARE(add.value("chain").toInt(), 1);
+        QCOMPARE(add.value("label").toString(), QString("Darkglass Ultra"));
+        const QJsonObject plugin = add.value("plugin").toObject();
+        QCOMPARE(plugin.value("format").toString(), QString("vst3"));
+        QCOMPARE(plugin.value("path").toString(), QString("/home/adam/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3"));
+        QCOMPARE(plugin.value("id").toString(), QString("0F1E2D3C4B5A69788796A5B4C3D2E1F0"));
+        QCOMPARE(add.value("on").toObject().value("from").toInt(), 0);
+        QCOMPARE(add.value("on").toObject().value("to").toInt(), 1);
+        // Back on the chain it was added to, not the one playing.
+        QCOMPARE(chains->shownChain(), 1);
+
+        // On a chain not playing, with nothing selected: added to it,
+        // unwired. The add list has the favourite and a way to the rest.
+        chains->showChain(3);
+        chains->grab();
+        click(chains, chains->hitRect("add"));
+        chains->grab();
+        QVERIFY(!chains->hitRect("browse").isEmpty());
+        click(chains, chains->hitRect("choice 0"));
+        QCOMPARE(link.last("add").value("plugin").toObject().value("path").toString(),
+                 QString("/home/adam/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3"));
+        QVERIFY(!link.last("add").contains("on"));
+        chains->grab();
+        click(chains, chains->hitRect("add"));
+        chains->grab();
+        click(chains, chains->hitRect("browse"));
+        QCOMPARE(w.current(), QString("plugins"));
+        QCOMPARE(chains->addTarget(), QString("Add to Motown"));
+        // A double tap on a row adds it too.
+        v->grab();
+        int lsp = -1;
+        for (int i = 0; i < s.catalog.plugins.size(); ++i)
+            lsp = s.catalog.plugins[i].name == "LSP Gate Stereo" ? i : lsp;
+        click(v, v->rowRect(lsp));
+        QCOMPARE(w.current(), QString("plugins"));
+        v->grab();
+        click(v, v->rowRect(lsp));
+        QCOMPARE(w.current(), QString("chains"));
+        QCOMPARE(link.last("add").value("chain").toInt(), 3);
+        QCOMPARE(link.last("add").value("plugin").toObject().value("id").toString(), QString("in.lsp-plug.gate_stereo"));
+        QCOMPARE(chains->shownChain(), 3);
+
+        // A skipped one can be tried again, but not added.
+        w.showView("plugins");
+        v->select(broken);
+        v->grab();
+        QVERIFY(v->hitRect("add").isEmpty());
+        click(v, v->hitRect("try again"));
+        QCOMPARE(link.last("plugins").value("scan").toString(), QString("/home/adam/.vst3/Broken.vst3"));
+        v->grab();
+        click(v, v->hitRect("rescan"));
+        QCOMPARE(link.last("plugins").value("scan").toString(), QString("all"));
+
+        // The folders.
+        v->grab();
+        click(v, v->hitRect("folders"));
+        QVERIFY(v->showingFolders());
+        v->grab();
+        shot(v, "plugins-folders");
+        click(v, v->hitRect("remove folder 0"));
+        QCOMPARE(link.last("plugins").value("folders").toArray().size(), 0);
+        QCOMPARE(link.last("plugins").value("scan").toString(), QString("changed"));
+        click(v, v->hitRect("done"));
+        QVERIFY(!v->showingFolders());
+        // Esc goes back to the chains.
+        QTest::keyClick(&w, Qt::Key_Escape);
+        QCOMPARE(w.current(), QString("chains"));
+    }
+
+    // The engine scans its machine's folders in a helper, and what it found
+    // goes onto the board.
+    void the_plugins_view_scans_with_the_engine() {
+        QTemporaryDir dir;
+        QDir().mkpath(dir.filePath("home/.clap"));
+        QVERIFY(QFile::copy(fromEnv("CUE_TEST_CLAP", CUE_TEST_CLAP), dir.filePath("home/.clap/Test.clap")));
+        QVERIFY(QFile::copy(fromEnv("CUE_TEST_CLAP", CUE_TEST_CLAP), dir.filePath("home/.clap/scan-crash-open.clap")));
+        QFile demo(fromEnv("CUE_CONFIGS", CUE_SOURCE_DIR "/configs") + "/app-demo.ini");
+        QVERIFY(demo.open(QIODevice::ReadOnly));
+        QByteArray text = demo.readAll();
+        text.replace("../plugins/Cue Test Plugins.clap", fromEnv("CUE_TEST_CLAP", CUE_TEST_CLAP).toLocal8Bit());
+        QFile ini(dir.filePath("demo.ini"));
+        QVERIFY(ini.open(QIODevice::WriteOnly));
+        ini.write(text);
+        ini.close();
+        const QString socket = dir.filePath("engine.sock");
+        QProcess engine;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert("HOME", dir.filePath("home"));
+        for (const char* var : {"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "CLAP_PATH", "VST3_PATH"})
+            env.remove(var);
+        engine.setProcessEnvironment(env);
+        engine.setProcessChannelMode(QProcess::MergedChannels);
+        engine.start(fromEnv("CUE_BIN", CUE_BIN), {"run", ini.fileName(), "--audio", "none", "--socket", socket});
+        QVERIFY(engine.waitForStarted());
+
+        EngineLink link(socket);
+        AppState s(link);
+        link.start();
+        QTRY_VERIFY_WITH_TIMEOUT(s.perf.valid && s.status.valid && s.catalog.valid, 10000);
+        QStringList said;
+        connect(&s, &AppState::message, [&said](const QString& text, bool) { said << text; });
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* chains = static_cast<ChainView*>(w.view("chains"));
+        chains->showChain(3);
+        w.showView("plugins");
+        auto* v = static_cast<PluginsView*>(w.view("plugins"));
+        // Opening the view scans what is new: both files, one skipped.
+        QTRY_VERIFY_WITH_TIMEOUT(!s.catalog.scanning && s.catalog.plugins.size() == 7, 20000);
+        QCOMPARE(s.catalog.ready(), 6);
+        QCOMPARE(s.catalog.skipped(), 1);
+        int gain = -1;
+        for (int i = 0; i < s.catalog.plugins.size(); ++i)
+            gain = s.catalog.plugins[i].name == "Test Gain" ? i : gain;
+        QVERIFY(gain >= 0);
+        QVERIFY(s.catalog.plugins[gain].opened && s.catalog.plugins[gain].editor);
+        QVERIFY(s.catalog.plugins[gain].path.endsWith("/home/.clap/Test.clap"));
+        v->select(gain);
+        v->grab();
+        const int before = s.chain(3)->numPlugins();
+        click(v, v->hitRect("add"));
+        QCOMPARE(w.current(), QString("chains"));
+        QTRY_VERIFY2_WITH_TIMEOUT(s.chain(3)->numPlugins() == before + 1, qPrintable(said.join("; ")), 5000);
+        QCOMPARE(s.chain(3)->blocks.last().label, QString("Test Gain"));
+        QCOMPARE(s.chain(3)->blocks.last().id, QString("cue.test.gain"));
+        // Undone like anything added here.
+        s.undo();
+        QTRY_COMPARE_WITH_TIMEOUT(s.chain(3)->numPlugins(), before, 5000);
+        // Kept for next time: a second look opens nothing.
+        link.request({{"cmd", "plugins"}, {"scan", "changed"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!s.catalog.scanning && s.catalog.total == 0, 5000);
+        QVERIFY(QFile::exists(dir.filePath("home/.cache/cue/plugins.json")));
+
+        link.request({{"cmd", "quit"}});
+        QTRY_COMPARE_WITH_TIMEOUT(engine.state(), QProcess::NotRunning, 5000);
     }
 
     void settings_are_kept() {

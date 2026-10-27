@@ -2,6 +2,7 @@
 
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <cmath>
@@ -321,6 +322,100 @@ double TunerReading::turn(double phase, double seconds) const {
         return phase;
     phase += std::clamp(cents * 0.25, -12.0, 12.0) * seconds;
     return phase - std::floor(phase);
+}
+
+PluginInfo ScannedPlugin::toPlugin() const {
+    PluginInfo b;
+    b.format = format;
+    b.path = path;
+    b.id = id;
+    b.label = name;
+    b.hasKey = sidechain;
+    return b;
+}
+
+Catalog Catalog::fromJson(const QJsonObject& j) {
+    Catalog c;
+    c.valid = true;
+    c.progress(j);
+    const QJsonObject folders = j.value("folders").toObject();
+    for (const char* kind : {"clap", "vst3"})
+        for (const QJsonValue& d : folders.value(kind).toArray())
+            if (!c.usual.contains(d.toString()))
+                c.usual << d.toString();
+    for (const QJsonValue& d : folders.value("extra").toArray())
+        c.extra << d.toString();
+    for (const QJsonValue& fv : j.value("files").toArray()) {
+        const QJsonObject f = fv.toObject();
+        const QString fileError = f.value("error").toString();
+        if (!fileError.isEmpty()) {
+            ScannedPlugin p;
+            p.format = f.value("format").toString();
+            p.path = f.value("path").toString();
+            p.name = QFileInfo(p.path).completeBaseName();
+            p.error = fileError;
+            c.plugins << p;
+            continue;
+        }
+        for (const QJsonValue& pv : f.value("plugins").toArray()) {
+            const QJsonObject o = pv.toObject();
+            ScannedPlugin p;
+            p.format = o.value("format").toString();
+            p.path = o.value("path").toString();
+            p.id = o.value("id").toString();
+            p.name = o.value("name").toString();
+            p.vendor = o.value("vendor").toString();
+            p.version = o.value("version").toString();
+            for (const QJsonValue& cat : o.value("categories").toArray())
+                p.categories << cat.toString();
+            p.bridged = o.value("bridged").toBool();
+            p.opened = o.value("opened").toBool();
+            p.sidechain = o.value("sidechain").toBool();
+            p.editor = o.value("editor").toBool();
+            p.midi = o.value("midi").toBool();
+            p.error = o.value("error").toString();
+            if (p.name.isEmpty())
+                p.name = QFileInfo(p.path).completeBaseName();
+            c.plugins << p;
+        }
+    }
+    std::stable_sort(c.plugins.begin(), c.plugins.end(), [](const ScannedPlugin& a, const ScannedPlugin& b) {
+        return QString::compare(a.name, b.name, Qt::CaseInsensitive) < 0;
+    });
+    return c;
+}
+
+void Catalog::progress(const QJsonObject& j) {
+    scanning = j.value("scanning").toBool();
+    done = j.value("done").toInt();
+    total = j.value("total").toInt();
+    current = j.value("current").toString();
+    scannedAt = static_cast<qint64>(j.value("scanned_at").toDouble());
+}
+
+int Catalog::ready() const {
+    return static_cast<int>(std::count_if(plugins.begin(), plugins.end(), [](const ScannedPlugin& p) { return p.ready(); }));
+}
+
+bool isPlugin(const PluginInfo& block, const ScannedPlugin& p) {
+    if (block.format != p.format || p.path.isEmpty())
+        return false;
+    const bool samePath = block.path == p.path || (block.path.startsWith("~/") && p.path.endsWith(block.path.mid(1)));
+    if (!samePath)
+        return false;
+    return block.id.isEmpty() || block.id == p.id || block.id.compare(p.name, Qt::CaseInsensitive) == 0 ||
+           (p.format == "vst3" && QString(block.id).remove(QRegularExpression("[{}-]")).compare(p.id, Qt::CaseInsensitive) == 0);
+}
+
+QStringList chainsWith(const Performance& perf, const ScannedPlugin& p) {
+    QStringList out;
+    for (const ChainInfo& c : perf.chains)
+        for (const PluginInfo& b : c.blocks)
+            if (isPlugin(b, p) && !out.contains(c.name)) {
+                out << c.name;
+                break;
+            }
+    return out;
 }
 
 QString audioSummary(const QJsonObject& hello) {

@@ -91,9 +91,9 @@ on a fader sets it back. **Mute**, **Insert** and **Delete** are under them.
 A wire whose level, width or pan is changed is drawn thick, with a tag
 saying what is changed (Settings can hide the tags). The **+** on the
 selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
-room. **+ Plug-in** adds one to the board unwired. Both offer the plug-ins
-the performance already has and the built-ins (gain, drive, lowpass, delay);
-the plug-in browser comes later. **Remove** on a block's panel, or Delete,
+room. **+ Plug-in** adds one to the board unwired. Both offer your
+favourite plug-ins, those the performance already has and the built-ins
+(gain, drive, lowpass, delay), and **Browse all plug-ins** for the rest. **Remove** on a block's panel, or Delete,
 takes a plug-in out with its wires. A plug-in that the input does not reach
 or that no output hears is loaded but not processed, drawn grey and marked
 "not connected". The sound changes as you wire: a playing chain fades out
@@ -106,6 +106,24 @@ picked, a wire, a plug-in added, moved or taken out), showing where, and
 not in it. A plug-in taken out comes back with its settings and its wires.
 **Save** saves the performance, plug-in settings, wiring and where each
 block is drawn included, to its `.cue` file.
+
+**Plug-ins.** Every plug-in on the computer running the engine: CLAP and
+VST3, native and Windows ones through yabridge. Opening the view scans what
+is new or changed since the last time; **Rescan** opens every plug-in again.
+Each file is opened by a helper of its own, one at a time, so a plug-in that
+crashes or hangs is skipped and listed with the reason (**Skipped**), never
+taking Cue down; **Try again** opens it once more. On the left, the vendors
+and the collections (**Favourites**, **In this performance**, **Skipped**);
+over the list, a search (names, vendors, kinds and file names) and the
+formats. Tap a plug-in to see it: its id and file, its inputs (with a
+side-chain or not), whether it has an editor of its own and a MIDI input
+(for a Windows plug-in, known once it is added: the scan does not start Wine
+for each). The orange button adds it to the chain the chain view shows, on
+its selected wire if one is, and goes back there; a double tap on a row
+does the same. **Folders…** shows where Cue looks (`~/.clap`, `~/.vst3`,
+`/usr/lib` and `/usr/local/lib`, `CLAP_PATH`, `VST3_PATH`) and keeps
+folders of your own, on the engine's computer. Favourites are kept by the
+app, in its settings.
 
 **Settings.** For this machine: the view the app starts in (Stage, Tuner or
 Chains), CPU and margin in ms or as % of what a block allows, the size of
@@ -127,7 +145,7 @@ smaller on top.
 | --- | --- |
 | Left, Right, Page Up, Page Down | previous or next chain (on the stage view) |
 | T | the tuner, and back |
-| Esc | the stage view (on the chain view, first lets go of what is selected) |
+| Esc | the stage view (on the chain view, first lets go of what is selected; on the plug-ins view, back to the chains) |
 | Delete, Backspace | on the chain view: take away the selected wire or plug-in |
 | Ctrl+S | save |
 | Ctrl+Z | undo |

@@ -24,6 +24,7 @@ struct Settings {
     bool tunerWhenMuted = true;  // the tuner view comes up while the inputs are muted
     bool fullScreen = false;
     bool wireTags = true;        // a wire shows its level, width and pan on the board when they are changed
+    QStringList favourites;      // plug-ins, by ScannedPlugin::key()
 
     static QString path();
     void load();
@@ -68,6 +69,14 @@ public:
     void reloadPerformance();
     // A reply's "ok", or a message saying why not.
     bool check(const QJsonObject& reply, const QString& what);
+    // The plug-ins on the engine's machine. Asks for them, and for a scan:
+    // "changed" (new and changed files), "all", or one file by its path.
+    Catalog catalog;
+    void loadPlugins(const QString& scan = {});
+    void setPluginFolders(const QStringList& extra);
+    bool isFavourite(const ScannedPlugin& p) const { return settings.favourites.contains(p.key()); }
+    void setFavourite(const ScannedPlugin& p, bool on);
+
     // Asks the engine for a change to the routing (add, remove, restore,
     // wire, unwire, place). The performance follows its answer, which then
     // goes to then.
@@ -101,6 +110,8 @@ signals:
     // An edit was undone or redone: the plug-in it was on.
     void undone(int chain, int slot);
     void undoChanged();
+    // The scan went on, or the plug-ins changed.
+    void catalogChanged();
 
 private:
     void onConnection(bool up);

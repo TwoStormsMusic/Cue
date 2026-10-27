@@ -40,6 +40,9 @@ public:
     int selectedSlot() const { return slot_; }
     void showChain(int chain);
     void selectSlot(int slot);
+    // The next time it is shown, it stays on the chain and what is selected
+    // (back from the plug-ins view), rather than going to the chain playing.
+    void resume() { resume_ = true; }
     // The wire selected, by its place in the chain's wires, or -1.
     int selectedWire() const;
     void selectWire(int wire);
@@ -47,6 +50,10 @@ public:
     bool deleteSelected();
     // Lets go of what is selected; false if nothing was.
     bool deselect();
+    // Where the plug-ins view adds one, said on its button: on the selected
+    // wire, else to the chain shown, unwired. Empty with no chain.
+    QString addTarget() const;
+    void addFromBrowser(const PluginInfo& plugin);
     // Where a board point is on the screen, as last drawn, and back.
     QPointF toScreen(QPointF board) const;
     QPointF toBoard(QPointF screen) const;
@@ -114,6 +121,7 @@ private:
     QJsonObject plugin_; // the selected plug-in as the engine last described it
     QTimer refresh_;
     double scroll_ = 0, scrollMax_ = 0;
+    bool resume_ = false;
     QRectF listRect_;
     // A slider being dragged shows where the finger is, not the engine.
     int draggingParam_ = -1;

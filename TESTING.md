@@ -16,7 +16,7 @@ They come back at the next login, or with `systemctl --user start pipewire.socke
 ./run-tests.sh
 ```
 
-Runs the 105 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches and wires, live rewiring while audio plays, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs, the built-in tuner), the app's 20 tests (every view at six screen sizes, taps, the routing board, and the app against a running engine that is stopped and started again) and two benches. Every test should say `OK` or `PASS`. **Send** the last 30 lines if anything fails.
+Runs the 110 unit tests (switching without clicks, idle chains never processed, tails, warm chains, branches and wires, live rewiring while audio plays, the plug-in scan with plug-ins that crash or hang, bypass thru and mute, side-chains, background resets, CLAP and VST3 hosting, the config, the mapping, the REAPER import, .cue files and rig profiles, the control socket, several inputs and outputs, the built-in tuner), the app's 23 tests (every view at six screen sizes, taps, the routing board, the plug-in browser, and the app against a running engine that is stopped and started again) and two benches. Every test should say `OK` or `PASS`. **Send** the last 30 lines if anything fails.
 
 ## 2. Real-time settings
 
@@ -339,6 +339,34 @@ Same start as step 8 (`bin/cue-app --version` should say 0.7.0). Copy your `.cue
 
 **Rig check.** Then play for 30 minutes, switching chains every few seconds, with a wire edit or two every few minutes. **Send** the status line at the end: `xruns 0`, as in step 8.
 
+## 14. The plug-in browser (0.8.0)
+
+0.8.0 has everything of step 13 too: do step 13 first with it (`bin/cue-app --version` should say 0.8.0), then this.
+
+**The scan.** On the mini PC, from a terminal:
+
+```sh
+bin/cue scan
+```
+
+It lists every file as it opens it, then every plug-in, the TwoStorms ones and the Neural DSP ones through yabridge among them. Each yabridge plug-in starts Wine once, so the first scan takes a while. **Send** the last lines (how many plug-ins, how many skipped, and why each was skipped). Run it again: it should be done at once, as nothing changed.
+
+**The view.** In the app, on the chain view, tap **Plug-ins** (top right).
+
+- Every plug-in from the scan is listed. Tap the vendors and collections on the left, the formats over the list, and type in the search: the list follows.
+- Tap a TwoStorms plug-in: its details show on the right (inputs, editor, MIDI in). A Neural DSP one says "known once added" for those.
+- **Add to favourites** on two or three you use often.
+- **Folders…** lists where Cue looks. Add a folder you keep plug-ins in, if any, and see its plug-ins appear.
+
+**Adding.** On a chain that is not playing:
+
+- Select a wire, then **Plug-ins**, pick a Neural DSP plug-in and tap the orange **Insert on …** button. You are back on the same chain with it on that wire. Open its editor: it works as any other.
+- With nothing selected, a double tap on a plug-in in the list adds it to the chain unwired.
+- **+ Plug-in** on the board now lists your favourites first, and **Browse all plug-ins** goes to the list.
+- **Undo** takes each of them out again.
+
+Play while you do all of this, then check the status line: still `xruns 0`. **Send** anything skipped that should not be, and what feels wrong.
+
 ## What passes
 
 | Check | Pass when |
@@ -359,5 +387,6 @@ Same start as step 8 (`bin/cue-app --version` should say 0.7.0). Copy your `.cue
 | App closed | `pkill -9 cue-app` mid-song makes no sound at all; the app comes back within a second |
 | App costs nothing | 30 minutes with the app on the stage view: still `xruns 0` |
 | Routing | Wiring, inserting and removing while playing makes no click; fader moves on a wire are smooth; 30 minutes of it, still `xruns 0` |
+| Plug-in browser | `cue scan` finds every plug-in REAPER has, skips nothing that works, and is quick the second time; adding from the list works on any chain |
 
 If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which chain you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

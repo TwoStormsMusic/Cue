@@ -30,7 +30,7 @@ public:
     QStringList hitIds() const;
 
 signals:
-    // Go to another view: "stage", "tuner", "chains" or "settings".
+    // Go to another view: "stage", "tuner", "chains", "plugins" or "settings".
     void navigate(const QString& view);
 
 protected:

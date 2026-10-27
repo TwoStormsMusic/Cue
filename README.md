@@ -57,6 +57,7 @@ All third-party code is vendored under `third_party/`: the CLAP headers (MIT), t
 ```sh
 cue doctor                       # real-time settings: priority, governor, IRQs, USB, sound servers
 cue devices                      # sound cards and MIDI ports
+cue scan                                  # every plug-in in the usual folders, each opened by a helper (--all: again)
 cue scan "<file.clap or bundle.vst3>"     # what is inside a plug-in file
 cue params "<file.clap or bundle.vst3>"   # a plug-in's parameters and their ids
 cue import-rpp "Cue Template.RPP" --mapping configs/cue-template-mapping.ini

@@ -1,6 +1,7 @@
 #include "gui/mainwindow.h"
 
 #include "gui/chainview.h"
+#include "gui/pluginsview.h"
 #include "gui/settingsview.h"
 #include "gui/stageview.h"
 #include "gui/theme.h"
@@ -54,10 +55,20 @@ MainWindow::MainWindow(AppState& state, QWidget* parent) : QWidget(parent), s_(s
     stack_->setContentsMargins(0, 0, 0, 0);
     views_.insert("stage", new StageView(s_, this));
     views_.insert("tuner", new TunerView(s_, this));
-    views_.insert("chains", new ChainView(s_, this));
+    auto* chains = new ChainView(s_, this);
+    views_.insert("chains", chains);
+    // The plug-ins view adds to the chain the chain view shows, then goes
+    // back to it.
+    auto* plugins = new PluginsView(s_, this);
+    plugins->target = [chains] { return chains->addTarget(); };
+    plugins->add = [this, chains](const PluginInfo& plugin) {
+        chains->addFromBrowser(plugin);
+        showView("chains");
+    };
+    views_.insert("plugins", plugins);
     auto* settings = new SettingsView(s_, this);
     views_.insert("settings", settings);
-    for (const char* name : {"stage", "tuner", "chains", "settings"}) {
+    for (const char* name : {"stage", "tuner", "chains", "plugins", "settings"}) {
         stack_->addWidget(views_[name]);
         connect(views_[name], &Surface::navigate, this, [this](const QString& v) {
             autoTuner_ = false;
@@ -93,6 +104,9 @@ void MainWindow::showView(const QString& view) {
         return;
     if (view == "tuner" && current_ != "tuner")
         beforeTuner_ = current_.isEmpty() || current_ == "settings" ? "stage" : current_;
+    // Back from the plug-ins, the chain view is as it was left.
+    if (view == "chains" && (current_ == "plugins" || (current_ == "tuner" && beforeTuner_ == "chains")))
+        static_cast<ChainView*>(v)->resume();
     current_ = view;
     stack_->setCurrentWidget(v);
     v->setFocus();
@@ -151,7 +165,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         if (current_ == "chains" && static_cast<ChainView*>(views_.value("chains"))->deselect())
             return;
         autoTuner_ = false;
-        showView("stage");
+        showView(current_ == "plugins" ? "chains" : "stage");
         return;
     case Qt::Key_Delete:
     case Qt::Key_Backspace:

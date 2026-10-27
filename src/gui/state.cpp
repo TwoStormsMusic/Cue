@@ -21,6 +21,7 @@ void Settings::load() {
     tunerWhenMuted = s.value("tuner_when_muted", tunerWhenMuted).toBool();
     fullScreen = s.value("full_screen", fullScreen).toBool();
     wireTags = s.value("wire_tags", wireTags).toBool();
+    favourites = s.value("favourites", favourites).toStringList();
 }
 
 void Settings::save() const {
@@ -31,12 +32,13 @@ void Settings::save() const {
     s.setValue("tuner_when_muted", tunerWhenMuted);
     s.setValue("full_screen", fullScreen);
     s.setValue("wire_tags", wireTags);
+    s.setValue("favourites", favourites);
 }
 
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
     connect(&link, &EngineLink::connectionChanged, this, &AppState::onConnection);
     connect(&link, &EngineLink::event, this, &AppState::onEvent);
-    link.setEvents({"status", "log", "tuner", "performance", "wire"});
+    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins"});
 }
 
 void AppState::onConnection(bool up) {
@@ -52,6 +54,7 @@ void AppState::onConnection(bool up) {
             }
         });
         reloadPerformance();
+        loadPlugins();
     } else {
         status.valid = false;
         tuner.valid = false;
@@ -86,6 +89,12 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         emit changed();
     } else if (name == "wire") {
         setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
+    } else if (name == "scan") {
+        catalog.progress(m);
+        emit catalogChanged();
+    } else if (name == "plugins") {
+        catalog = Catalog::fromJson(m);
+        emit catalogChanged();
     } else if (name == "log") {
         log.append({m.value("level").toString(), m.value("text").toString(), QDateTime::currentDateTime()});
         if (log.size() > 200)
@@ -93,6 +102,39 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         if (m.value("level").toString() != "info")
             emit message(m.value("text").toString(), true);
     }
+}
+
+void AppState::loadPlugins(const QString& scan) {
+    QJsonObject req{{"cmd", "plugins"}};
+    if (!scan.isEmpty())
+        req["scan"] = scan;
+    link.request(req, [this](const QJsonObject& r) {
+        if (!r.value("ok").toBool()) {
+            // An engine from before the scan, or one scanning already.
+            if (!r.value("error").toString().contains("running"))
+                check(r, "Plug-ins");
+            return;
+        }
+        catalog = Catalog::fromJson(r.value("plugins").toObject());
+        emit catalogChanged();
+    });
+}
+
+void AppState::setPluginFolders(const QStringList& extra) {
+    link.request({{"cmd", "plugins"}, {"folders", QJsonArray::fromStringList(extra)}, {"scan", "changed"}}, [this](const QJsonObject& r) {
+        if (!check(r, "Folders not kept"))
+            return;
+        catalog = Catalog::fromJson(r.value("plugins").toObject());
+        emit catalogChanged();
+    });
+}
+
+void AppState::setFavourite(const ScannedPlugin& p, bool on) {
+    settings.favourites.removeAll(p.key());
+    if (on)
+        settings.favourites << p.key();
+    settings.save();
+    emit catalogChanged();
 }
 
 const ChainInfo* AppState::chain(int index) const {

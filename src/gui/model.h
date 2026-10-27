@@ -171,6 +171,45 @@ struct TunerReading {
     double turn(double phase, double seconds) const;
 };
 
+// A plug-in the engine's scan found on its machine, or a file it skipped
+// (then name is the file's, and error says why).
+struct ScannedPlugin {
+    QString format, path, id, name, vendor, version;
+    QStringList categories;
+    bool bridged = false; // a Windows plug-in, through yabridge
+    bool opened = false;  // the scan made it, so the next three are known
+    bool sidechain = false, editor = false, midi = false;
+    QString error; // why it is skipped; empty when it is ready
+    bool ready() const { return error.isEmpty(); }
+    // The same plug-in wherever it is listed: for favourites.
+    QString key() const { return format + "|" + path + "|" + id; }
+    // As a block would have it, to be added.
+    PluginInfo toPlugin() const;
+};
+
+// What the engine's scan found, where it looked, and how far it is.
+struct Catalog {
+    bool valid = false, scanning = false;
+    int done = 0, total = 0;
+    QString current;     // the file being opened
+    qint64 scannedAt = 0; // seconds since 1970; 0: never
+    QStringList usual;   // the folders always looked in
+    QStringList extra;   // the user's
+    QVector<ScannedPlugin> plugins; // by name, skipped ones too
+
+    static Catalog fromJson(const QJsonObject& plugins);
+    // A "scan" event: how far it is.
+    void progress(const QJsonObject& scan);
+    int ready() const;
+    int skipped() const { return plugins.size() - ready(); }
+};
+
+// Whether a block of the performance is this plug-in. The performance
+// writes paths under the home folder with ~, the scan does not.
+bool isPlugin(const PluginInfo& block, const ScannedPlugin& p);
+// The chains that have it, by name.
+QStringList chainsWith(const Performance& perf, const ScannedPlugin& p);
+
 // "M2 · 48k · 64×3" from the hello's audio_settings.
 QString audioSummary(const QJsonObject& hello);
 // The controller, as the MIDI pill says it: "FCB1010", the port, or empty.

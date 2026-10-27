@@ -66,8 +66,9 @@ reply repeats:
 | `unwire` | `chain`, `from`, `to`, `key` | `performance` |
 | `wires` | `chain`, `wires` (each as for `wire`) | `performance`: the chain wired so, all at once |
 | `place` | `chain`, `slot`, `x`, `y` | nothing: where the block is drawn, kept when saved |
+| `plugins` | optional `scan`: `changed` (new and changed files), `all`, or one file's path; optional `folders` (the user's folders to look in, kept on this machine) | `plugins`: `scanning`, `done`, `total`, `current` (the file being opened), `scanned_at` (seconds since 1970), `folders` (`clap`, `vst3`: the usual ones; `extra`: the user's), and `files`: each `path`, `format`, `error` when it was skipped, and its `plugins`: `format`, `path`, `id`, `name`, `vendor`, `version`, `categories`, `bridged` (through yabridge), and when the scan made it, `opened` with `sidechain`, `editor` and `midi`; `error` for one that fell over as it was made |
 | `quit` | | |
-| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire"]` | `events` now subscribed |
+| `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire", "scan", "plugins"]` | `events` now subscribed |
 
 Events have an `event` field instead of an `id`:
 
@@ -93,6 +94,16 @@ Events have an `event` field instead of an `id`:
   change.
 - `wire`: `chain` and `wire` (as the `wire` command answers it), when only a
   wire's level, width, pan or mute changed.
+- `scan`: how far a plug-in scan is (`scanning`, `done`, `total`, `current`),
+  as each file is opened.
+- `plugins`: as the `plugins` command answers it, when a scan ends.
+
+A scan never runs unless asked for. Each file is opened by `cue scan-file`,
+a helper process of its own, one at a time; one that crashes or says nothing
+for 30 s (120 s for a yabridge plug-in, as Wine starts) is skipped with the
+reason. What was found is kept in `~/.cache/cue/plugins.json`, and the user's
+folders in `~/.config/cue/plugins.json`. `cue scan` does the same from a
+terminal.
 
 A loop, a wire to a plug-in or output the chain does not have, or a key on
 a plug-in without a side-chain input is refused with the reason, and
