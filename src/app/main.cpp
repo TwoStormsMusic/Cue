@@ -27,6 +27,7 @@
 #include "app/scan.h"
 #include "control/show.h"
 #include "audio/alsa_backend.h"
+#include "audio/take_device.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
 #include "host/editor_host.h"
@@ -332,8 +333,11 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
     if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
         return false;
     for (const WireSpec& had : cs.wires)
-        if (had.from == w.from && had.to == w.to)
+        if (had.from == w.from && had.to == w.to) {
             w.gains = had.gains;
+            w.feedback = had.feedback;
+        }
+    w.feedback = req.value("feedback", w.feedback);
     w.gains.levelDb = req.value("level_db", w.gains.levelDb);
     w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
     w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
@@ -516,6 +520,7 @@ struct RunOptions {
     bool noAudio = false;   // --audio none: no sound card, the engine on a timer
     std::string socket;     // --socket PATH; empty: the default
     bool noSocket = false;  // --socket none
+    bool takeDevice = true; // the sound card is taken from what else has it; --leave-device: not
 };
 
 int cmdRun(const std::string& path, const RunOptions& opts) {
@@ -543,7 +548,18 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         audio = std::make_unique<NullBackend>();
     else
         audio = std::make_unique<AlsaBackend>();
-    if (!audio->open(config.audio, &err)) {
+    // Kept for as long as Cue plays, so a sound server does not take the card back.
+    DeviceClaim claim;
+    std::vector<std::string> audioNotes;
+    const bool take = opts.takeDevice && !opts.noAudio;
+    if (take)
+        claim.reserve(config.audio.device, audioNotes);
+    bool opened = audio->open(config.audio, &err);
+    if (!opened && take)
+        opened = claim.takeFrom(config.audio.device, [&] { return audio->open(config.audio, &err); }, audioNotes);
+    for (const auto& n : audioNotes)
+        std::printf("audio: %s\n", n.c_str());
+    if (!opened) {
         std::fprintf(stderr, "audio: %s\n", err.c_str());
         return 1;
     }
@@ -668,6 +684,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                                        {"rate", config.audio.rate},
                                        {"period", config.audio.period},
                                        {"periods", config.audio.periods}};
+            reply["audio_notes"] = audioNotes;
             reply["midi"] = {{"enabled", config.midi.enabled}, {"in", config.midi.in}, {"profile", config.midi.profile}, {"ports", midiPorts}};
         } else if (cmd == "status") {
             reply["status"] = status();
@@ -1969,7 +1986,7 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none]\n"
+                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none] [--leave-device]\n"
                  "  cue ctl [--socket PATH] [--json] status|watch|tuner|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
                  "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
                  "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
@@ -2008,6 +2025,9 @@ int main(int argc, char** argv) {
         o.noAudio = opt("--audio", "") == "none";
         o.socket = opt("--socket", "");
         o.noSocket = o.socket == "none";
+        for (int i = 3; i < argc; ++i)
+            if (std::strcmp(argv[i], "--leave-device") == 0)
+                o.takeDevice = false;
         return cmdRun(argv[2], o);
     }
     if (cmd == "ctl")

@@ -218,6 +218,8 @@ struct Writer {
                 wj["pan"] = std::round(w.gains.pan * 1000) / 10;
             if (w.gains.muted)
                 wj["muted"] = true;
+            if (w.feedback)
+                wj["feedback"] = true;
             wires.push_back(wj);
         }
         j["wires"] = wires;
@@ -500,6 +502,7 @@ struct Reader {
             w.gains.width = wj.value("width", 100.0f) / 100.0f;
             w.gains.pan = wj.value("pan", 0.0f) / 100.0f;
             w.gains.muted = wj.value("muted", false);
+            w.feedback = wj.value("feedback", false);
             if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1)
                 throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
             c.wires.push_back(w);

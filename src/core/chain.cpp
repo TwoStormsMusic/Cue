@@ -46,6 +46,13 @@ struct Chain::Plan {
         Ramp t{1.0f};      // 0 = from, 1 = to
         bool plain = true; // to is the identity and t is done: the signal passes as it is
     };
+    // A feedback wire's signal: what its plug-in played in the last block,
+    // written after every block has played.
+    struct Delay {
+        const float* const* src = nullptr; // the block's res
+        float* buf[kChainChannels] = {};
+        const float* out[kChainChannels] = {};
+    };
     struct Step {
         Block* block = nullptr;
         uint32_t slot = 0;
@@ -58,6 +65,8 @@ struct Chain::Plan {
     std::vector<Step> order;                   // the blocks played, each after what it hears
     std::vector<LiveWire> wires;
     std::vector<std::pair<uint32_t, uint32_t>> outs; // each output's wires: first, count
+    std::vector<Delay> delays;
+    std::vector<float> delayData;
     std::vector<Processor*> added;                   // processors this plan brings in
 };
 
@@ -138,18 +147,21 @@ bool Chain::checkWires(const std::vector<Wire>& wires, const std::vector<bool>& 
             return fail("that plug-in has no side-chain input");
         if (w.to.kind == Port::Kind::Output && (w.to.index < 0 || w.to.index >= outputs || w.to.key))
             return fail("a wire ends at an output the performance does not have");
-        if (w.from.kind == Port::Kind::Block && w.to.kind == Port::Kind::Block && w.from.index == w.to.index)
+        if (w.feedback && (w.from.kind != Port::Kind::Block || w.to.kind != Port::Kind::Block))
+            return fail("only a wire from one plug-in to another can be a feedback wire");
+        if (w.from.kind == Port::Kind::Block && w.to.kind == Port::Kind::Block && w.from.index == w.to.index && !w.feedback)
             return fail("a plug-in cannot feed itself");
         for (size_t k = 0; k < i; ++k)
             if (wires[k].from == w.from && wires[k].to == w.to)
                 return fail("those two are already wired");
     }
-    // No loops: a block's output never comes back to it, by any path.
+    // No loops: a block's output never comes back to it, by any path but a
+    // feedback wire.
     std::vector<uint8_t> state(n, 0); // 0 unseen, 1 on the path, 2 done
     std::function<bool(int)> visit = [&](int b) {
         state[b] = 1;
         for (const Wire& w : wires) {
-            if (w.from.kind != Port::Kind::Block || w.from.index != b || w.to.kind != Port::Kind::Block)
+            if (w.feedback || w.from.kind != Port::Kind::Block || w.from.index != b || w.to.kind != Port::Kind::Block)
                 continue;
             if (state[w.to.index] == 1 || (state[w.to.index] == 0 && !visit(w.to.index)))
                 return false;
@@ -163,9 +175,9 @@ bool Chain::checkWires(const std::vector<Wire>& wires, const std::vector<bool>& 
     return true;
 }
 
-bool Chain::connect(Port from, Port to, WireGains gains, std::string* error) {
+bool Chain::connect(Port from, Port to, WireGains gains, std::string* error, bool feedback) {
     std::vector<Wire> wires = wires_;
-    wires.push_back({from, to, gains, 0});
+    wires.push_back({from, to, gains, 0, feedback});
     std::vector<bool> keys;
     for (const auto& b : blocks_)
         keys.push_back(b->hasKey);
@@ -301,13 +313,28 @@ Chain::PlanPtr Chain::makePlan(std::vector<std::shared_ptr<Block>> blocks, std::
     auto live = [&](const Wire& x) {
         return (x.from.kind == K::Input || played[x.from.index]) && (x.to.kind == K::Output || (x.to.kind == K::Block && played[x.to.index]));
     };
+    // Each live feedback wire's last block, from silence. Made before any
+    // wire points into them.
+    size_t delayed = 0;
+    for (const Wire& x : w)
+        delayed += live(x) && x.feedback;
+    plan->delayData.assign(delayed * kChainChannels * maxFrames_, 0.0f);
+    plan->delays.reserve(delayed);
     auto add = [&](const Wire& x) {
         Plan::LiveWire lw;
         lw.id = x.id;
-        if (x.from.kind == K::Input)
+        if (x.from.kind == K::Input) {
             lw.src = inBuf_;
-        else
+        } else if (x.feedback) {
+            Plan::Delay d;
+            d.src = plan->slots[x.from.index]->res;
+            for (int ch = 0; ch < kChainChannels; ++ch)
+                d.out[ch] = d.buf[ch] = plan->delayData.data() + (plan->delays.size() * kChainChannels + ch) * maxFrames_;
+            plan->delays.push_back(d);
+            lw.src = plan->delays.back().out;
+        } else {
             lw.src = plan->slots[x.from.index]->res;
+        }
         coefficients(x.gains, lw.to);
         std::copy(lw.to, lw.to + 4, lw.from);
         lw.plain = identity(lw.to);
@@ -317,7 +344,7 @@ Chain::PlanPtr Chain::makePlan(std::vector<std::shared_ptr<Block>> blocks, std::
     // a chain made of lines plays line 0, then each branch.
     std::vector<int> waiting(n, 0);
     for (const Wire& x : w)
-        if (live(x) && x.from.kind == K::Block && x.to.kind == K::Block)
+        if (live(x) && !x.feedback && x.from.kind == K::Block && x.to.kind == K::Block)
             ++waiting[x.to.index];
     std::vector<char> done(n, 0);
     for (;;) {
@@ -326,10 +353,10 @@ Chain::PlanPtr Chain::makePlan(std::vector<std::shared_ptr<Block>> blocks, std::
             if (played[i] && !done[i] && waiting[i] == 0)
                 next = i;
         if (next == n)
-            break; // the wires were checked for loops, so every block played is here
+            break; // the wires were checked for loops (feedback wires are not waited for), so every block played is here
         done[next] = 1;
         for (const Wire& x : w)
-            if (live(x) && x.from.kind == K::Block && x.from.index == static_cast<int>(next) && x.to.kind == K::Block)
+            if (live(x) && !x.feedback && x.from.kind == K::Block && x.from.index == static_cast<int>(next) && x.to.kind == K::Block)
                 --waiting[x.to.index];
         Plan::Step st;
         st.block = plan->slots[next].get();
@@ -736,6 +763,12 @@ void Chain::process(const float* in, float* const* outs, uint32_t frames) {
         else
             std::memset(outs[o], 0, frames * sizeof(float));
     }
+    // What feedback wires carry into the next block, once every block has
+    // played: the same block late whichever plays first.
+    for (Plan::Delay& d : plan.delays)
+        for (int c = 0; c < kChainChannels; ++c)
+            for (uint32_t n = 0; n < frames; ++n)
+                d.buf[c][n] = std::isfinite(d.src[c][n]) ? std::clamp(d.src[c][n], -kFeedbackLimit, kFeedbackLimit) : 0.0f;
 }
 
 bool Chain::takeSlowest(size_t& slot, uint32_t& ns) {

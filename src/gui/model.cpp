@@ -53,6 +53,8 @@ QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QStri
         r["width"] = width;
         r["pan"] = pan;
         r["muted"] = muted;
+        if (feedback)
+            r["feedback"] = true;
     }
     return r;
 }
@@ -75,6 +77,26 @@ QVector<int> ChainInfo::outputsUsed() const {
     return out;
 }
 
+bool ChainInfo::wouldLoop(const PortInfo& from, const PortInfo& to) const {
+    if (from.kind != PortInfo::Kind::Block || to.kind != PortInfo::Kind::Block)
+        return false;
+    // Where to's signal goes, by wires other than feedback ones.
+    QVector<bool> reached(blocks.size(), false);
+    QVector<int> todo{to.index};
+    while (!todo.isEmpty()) {
+        const int b = todo.takeLast();
+        if (b == from.index)
+            return true;
+        if (b < 0 || b >= reached.size() || reached[b])
+            continue;
+        reached[b] = true;
+        for (const WireInfo& w : wires)
+            if (!w.feedback && w.from.kind == PortInfo::Kind::Block && w.from.index == b && w.to.kind == PortInfo::Kind::Block)
+                todo << w.to.index;
+    }
+    return false;
+}
+
 Flow flowOf(const ChainInfo& c, const std::function<bool(int)>& bypassed, bool inputsMuted, int numOutputs) {
     const int n = c.blocks.size(), m = c.wires.size();
     Flow f;
@@ -84,7 +106,7 @@ Flow flowOf(const ChainInfo& c, const std::function<bool(int)>& bypassed, bool i
     auto isBlock = [n](const PortInfo& p) { return p.kind == PortInfo::Kind::Block && p.index >= 0 && p.index < n; };
     auto silences = [&](int slot) { return c.blocks[slot].muteOnBypass && bypassed && bypassed(slot); };
     auto passes = [](const WireInfo& w) { return !w.muted && w.levelDb > -96; };
-    // Loops are refused, so n passes settle it.
+    // What a pass finds stays found, so n passes settle it, loops or not.
     // Fed: the input reaches its main input (whatever the gains); sounding:
     // sound comes out of it.
     QVector<bool> fed(n, false), sounding(n, false);
@@ -196,6 +218,7 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 w.width = wj.value("width").toDouble(100);
                 w.pan = wj.value("pan").toDouble(0);
                 w.muted = wj.value("muted").toBool();
+                w.feedback = wj.value("feedback").toBool();
                 c.wires << w;
             }
             scene.chains << c.index;

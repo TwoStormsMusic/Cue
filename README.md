@@ -26,12 +26,13 @@ A **performance** is the whole config: **scenes** in the order you play them. A 
 | FCB1010 with EurekaPROM 3.0: pedals, expression, LEDs and display follow the state | done, needs the FCB to test |
 | Import from REAPER: tracks become chains with plug-in settings, routing and side-chains; TwoStorms IRs embedded from their files | done, tested offline on Cue Template.RPP and Cue Template 2S.RPP |
 | ALSA direct audio, real-time thread pinned to a performance core | done, needs the M2 to test |
+| Takes the sound card at start: reserved from PipeWire, PulseAudio or JACK, or closed in REAPER (`--leave-device` or Settings to turn off) | done, reservation tested offline; needs the rig with REAPER |
 | `doctor` real-time settings check | done |
 | Performances as one `.cue` file, a rig profile per machine, a control socket (`cue ctl`) | done, needs the rig to test |
 | Built-in tuner: the TwoStorms Tuner's pitch detection on an input, before any plug-in | done, tested offline |
 | The app (`cue-app`): stage view, tuner, chains with bypass, parameter sliders, zoom and undo, settings; by touch and mouse, any screen size ([docs/app.md](docs/app.md)) | done, tested on the rig |
 | Plug-in editors: each plug-in's own window, opened by the engine on the stage computer's screen over the app, drawn between blocks and never on the audio thread | done, Neural DSP through yabridge tested on the rig |
-| Routing board in the app: wires drawn between plug-ins, splits and merges, side-chains, each wire's level, width and pan; a plug-in scanner (each file opened in a helper process) and browser | done, tested offline |
+| Routing board in the app: wires drawn between plug-ins, splits and merges, side-chains, each wire's level, width and pan, feedback wires (one block late, off unless Settings allows them); a plug-in scanner (each file opened in a helper process) and browser | done, tested offline |
 | Chains and scenes added, copied, moved, set (pedal, FCB display, warm chain, actions) and taken out from the app while a chain plays, all with undo | done, tested offline |
 | Per-plug-in process isolation | **not yet** |
 | MIDI learn, looper, LV2, JACK, PipeWire | later |

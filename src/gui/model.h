@@ -51,6 +51,7 @@ struct WireInfo {
     PortInfo from, to;
     double levelDb = 0, width = 100, pan = 0;
     bool muted = false;
+    bool feedback = false; // heard a block late, so it may lead back to its own plug-in
     bool neutral() const { return levelDb == 0 && width == 100 && pan == 0 && !muted; }
     // The request that makes it so: {"cmd": "wire", "chain", "from", "to", ...}.
     QJsonObject request(int chain, const QStringList& outputs, const QString& cmd = "wire") const;
@@ -72,6 +73,10 @@ struct ChainInfo {
     int wire(const PortInfo& from, const PortInfo& to) const;
     // The outputs it has a wire to, by number.
     QVector<int> outputsUsed() const;
+    // Whether a wire from -> to would bring a plug-in's signal back to it:
+    // into itself (its input or its key), or into one its signal goes
+    // through on the way there. Only a feedback wire can.
+    bool wouldLoop(const PortInfo& from, const PortInfo& to) const;
 };
 
 // What a chain would do if it played (whether it does or not). A wire is

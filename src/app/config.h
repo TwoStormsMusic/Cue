@@ -56,6 +56,7 @@ struct WireSpec {
     Port from, to;
     WireGains gains;
     std::string where;
+    bool feedback = false; // heard a block late, so it may close a loop (see Wire)
 };
 
 // A line of plug-ins in series, as an INI config and a version 1 .cue file

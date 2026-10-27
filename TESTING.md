@@ -420,6 +420,16 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 5. **FCB display.** The display field takes two letters.
 6. **Scanning while playing.** With a chain playing, run `bin/cue scan --all` in a terminal. **Send** whether any xruns show up while it runs (they should not now, as the scan stays off the audio core; a Windows plug-in starting Wine can still load the machine, so tell me if it does).
 
+## 17. Sound card and feedback wires (0.9.2)
+
+`bin/cue-app --version` should say 0.9.2. Steps 13 to 16 still apply.
+
+1. **REAPER open.** Save anything open in REAPER, leave REAPER playing on the M2, then start Cue the way you do (`bin/cue-app --start your.cue`). Cue starts, REAPER closes, and the app says what it closed. **Send** the `audio:` lines from `~/.local/state/cue/engine.log`.
+2. **PipeWire.** Play something from a browser through the M2 (if PipeWire has it there), then start Cue. Cue gets the card; the browser goes quiet while Cue runs and plays again after Cue quits.
+3. **Turned off.** Settings > **Take the sound card** > Off, quit the app and the engine (`bin/cue ctl quit`), open REAPER on the M2 and start Cue again: it does not start and the log says the card is busy. REAPER keeps playing. Turn the setting back on.
+4. **No loops while drawing.** Drag a wire from a plug-in's output dot across its own input and key, and across a plug-in before it in the chain: none of them light up, and letting go there makes nothing.
+5. **Feedback wires.** Settings > **Feedback wires** > On. Draw a wire from a plug-in's output to its own input, or to one before it: it is drawn purple. Turn its level down (try -12 dB) and play: it sounds like a very short echo or comb filter. Then, at low volume and not through FOH, turn it up past 0 dB: it builds up to a loud steady level and stops there rather than growing for ever. **Delete** it, and turn the setting off again.
+
 ## What passes
 
 | Check | Pass when |

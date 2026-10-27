@@ -52,7 +52,7 @@ bool rewire(LiveRig& live, int chain, ChainSpec next, const std::vector<int>& ke
             edit.added.push_back({std::move(added[a++]), next.blocks[i].bypassed, next.blocks[i].muteOnBypass});
         }
     for (const WireSpec& w : next.wires)
-        edit.wires.push_back({w.from, w.to, w.gains});
+        edit.wires.push_back({w.from, w.to, w.gains, 0, w.feedback});
     Engine::PreparedEdit prepared;
     if (!engine.prepareEdit(chain, edit, prepared, error))
         return false;
@@ -166,7 +166,8 @@ bool addPlugin(LiveRig& live, int chain, PluginSpec spec, const WireSpec* on, si
             return fail(error, "there is no such wire to put it on");
         const WireSpec was = next.wires[w];
         next.wires[w] = {was.from, Port::block(n), {}, was.where};
-        next.wires.insert(next.wires.begin() + w + 1, {Port::block(n), was.to, was.gains, was.where});
+        // On a feedback wire, the new plug-in's way on is the one heard late.
+        next.wires.insert(next.wires.begin() + w + 1, {Port::block(n), was.to, was.gains, was.where, was.feedback});
     }
     std::unique_ptr<Processor> p;
     if (!loadLivePlugin(spec, live.rig.engine->settings(), p, error))
@@ -196,6 +197,8 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
     const Port self = Port::block(static_cast<int>(slot));
     std::vector<WireSpec> into, outOf, wires;
     for (const WireSpec& w : next.wires) {
+        if (w.from == self && w.to.kind == Port::Kind::Block && w.to.index == self.index)
+            continue; // into itself: it goes with it
         if (w.to == self)
             into.push_back(w);
         else if (w.from == self)
@@ -208,7 +211,7 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
         for (const WireSpec& b : outOf) {
             const bool there = std::any_of(wires.begin(), wires.end(), [&](const WireSpec& w) { return w.from == a.from && w.to == b.to; });
             if (!there)
-                wires.push_back({a.from, b.to, b.gains, b.where});
+                wires.push_back({a.from, b.to, b.gains, b.where, a.feedback || b.feedback});
         }
     for (WireSpec& w : wires)
         for (Port* p : {&w.from, &w.to})

@@ -27,6 +27,15 @@ a Cue started with `cue run ... --socket PATH`.
 plays on a timer and hears silence. It is for a machine without the
 interface, to load a performance, change it and save it.
 
+`cue run` takes the sound card from whatever else has it. It reserves the
+card on the desktop's session bus (`org.freedesktop.ReserveDevice1`, as
+JACK does), so PipeWire, PulseAudio or JACK let go of it and do not take it
+back while Cue plays. A program that still has it open (REAPER using ALSA)
+is asked to quit, and stopped if it has not after five seconds; unsaved
+work in it is lost. What it did goes to the log and to `hello`'s
+`audio_notes`. `--leave-device` turns all this off: Cue then stops with
+"Device or resource busy" when the card is taken, as before 0.9.2.
+
 ## The socket
 
 `$XDG_RUNTIME_DIR/cue/engine.sock` (or `/tmp/cue-<uid>/engine.sock`), in a
@@ -47,7 +56,7 @@ reply repeats:
 
 | cmd | with | answers |
 | --- | --- | --- |
-| `hello` | | `cue` (version), `protocol` (1), `performance`, `file`, `audio` (a description), `audio_settings` (`device`, `rate`, `period`, `periods`), `midi` (`enabled`, `in`, `profile`, `ports` connected) |
+| `hello` | | `cue` (version), `protocol` (1), `performance`, `file`, `audio` (a description), `audio_settings` (`device`, `rate`, `period`, `periods`), `audio_notes` (what was done to get the sound card, such as closing REAPER), `midi` (`enabled`, `in`, `profile`, `ports` connected) |
 | `status` | | `status`: as the status event below |
 | `performance` | | `performance`: the .cue's performance.json, without states |
 | `select` | `chain` (a name, or its number as `performance` gives it), `index` (its place among all the chains, scene by scene, from 0) or `step` (+1, -1) | `selected`: `index`, `name`, `chain` (its number) |
@@ -62,7 +71,7 @@ reply repeats:
 | `add` | `chain`, `plugin` (a plugin line's text as in [config.md](config.md), or `format` with `path` and `id`, or `args` for a built-in), optional `label`, `bypassed`, `x` and `y` (where the app draws it), and `on` (a wire, as for `wire`, to put it on) | `slot`, `performance`. Without `on` it is added unwired |
 | `remove` | `chain`, `slot`, optional `token` | `performance`. With a `token`, what was taken out (the plug-in with its state, and its wires) is kept for `restore`; the last 100 are kept |
 | `restore` | `token` | `slot`, `performance`: the plug-in back in its slot, its state and the wiring it had |
-| `wire` | `chain`, `from` (a slot, from 0, or `in` or the chain's input by name), `to` (a slot, or an output by name or `out1`, `out2`...), `key` (true: the plug-in's side-chain input), and any of `level_db`, `width` (0 to 200 %), `pan` (-100 to 100), `muted` | a new wire: `performance`. A wire it has: only its gains change, and the reply and the `wire` event carry `wire` |
+| `wire` | `chain`, `from` (a slot, from 0, or `in` or the chain's input by name), `to` (a slot, or an output by name or `out1`, `out2`...), `key` (true: the plug-in's side-chain input), and any of `level_db`, `width` (0 to 200 %), `pan` (-100 to 100), `muted`, `feedback` (true: heard one block late, so it may lead back to its own plug-in or an earlier one; only between plug-ins) | a new wire: `performance`. A wire it has: only its gains change, and the reply and the `wire` event carry `wire` |
 | `unwire` | `chain`, `from`, `to`, `key` | `performance` |
 | `wires` | `chain`, `wires` (each as for `wire`) | `performance`: the chain wired so, all at once |
 | `place` | `chain`, `slot`, `x`, `y` | nothing: where the block is drawn, kept when saved |

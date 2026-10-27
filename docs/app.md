@@ -84,8 +84,12 @@ low on its left is its key (side-chain input), for the plug-ins that have
 one. Drag a block to move it; it stays where you put it. Drag from a dot to
 another to draw a wire: from the input or a plug-in's output, to a plug-in
 or an output. One output can feed any number of wires, each a copy of the
-same sound, and wires into one input add together. A wire that would make
-a loop is refused. Tap a wire to select it (orange): the panel gives its
+same sound, and wires into one input add together. While you draw, only
+the dots a wire may join light up: never the plug-in's own input or key, nor
+one whose sound already comes through it (a loop). With **Feedback wires**
+on in Settings, those are offered too and make feedback wires, drawn
+purple: what goes back is heard one block late (1.3 ms at 64 frames) and
+held to +6 dBFS, so turn it down on the wire to keep it from building up. Tap a wire to select it (orange): the panel gives its
 **level** (silent to +12 dB, 0 dB at the tick), **width** (100% is stereo
 as it comes, 0% folds left and right to mono) and **pan** (a balance: it
 turns one side down, never moves sound across), in that order; a double tap
@@ -155,8 +159,12 @@ app, in its settings.
 
 **Settings.** For this machine: the view the app starts in (Stage, Tuner or
 Chains), CPU and margin in ms or as % of what a block allows, the size of
-everything, the tuner while muted, full screen, and whether the routing
-board tags the wires whose level, width or pan is changed. For the performance: the
+everything, the tuner while muted, full screen, whether the routing
+board tags the wires whose level, width or pan is changed, **Feedback
+wires** (off: no wire may lead back to its own plug-in or an earlier one),
+and **Take the sound card** (on: an engine the app starts takes the card
+from PipeWire, or closes REAPER if REAPER has it; off: it stops with "busy"
+instead). For the performance: the
 tuner's range, reference, tolerance and note names, saved with it.
 
 ## Touch, mouse and keys

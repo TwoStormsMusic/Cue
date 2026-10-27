@@ -130,6 +130,16 @@ void SettingsView::paint(QPainter& p) {
                 s.settings.wireTags = i == 0;
                 changed();
             });
+    y = row(p, y, "Feedback wires", "lets a wire loop back, heard one block late",
+            {"On", "Off"}, st.feedbackWires ? 0 : 1, [this](int i) {
+                s.settings.feedbackWires = i == 0;
+                changed();
+            });
+    y = row(p, y, "Take the sound card", "on start, from PipeWire, or by closing REAPER",
+            {"On", "Off"}, st.takeCard ? 0 : 1, [this](int i) {
+                s.settings.takeCard = i == 0;
+                changed();
+            });
 
     y += 10 * u;
     section("TUNER (SAVED WITH THE PERFORMANCE)");

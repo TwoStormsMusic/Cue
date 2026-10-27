@@ -1131,6 +1131,51 @@ private slots:
         QCOMPARE(wire.value("to").toInt(), 4);
         QVERIFY(wire.value("key").toBool());
 
+        // Nothing that would bring a plug-in's sound back to it is offered:
+        // not its own input or key, not one its sound goes through.
+        auto offered = [&](const QString& from, const QString& over) {
+            v->grab();
+            const QPointF a = v->hitRect(from).center(), z = v->hitRect(over).center();
+            QTest::mousePress(v, Qt::LeftButton, {}, a.toPoint());
+            QTest::mouseMove(v, ((a + z) / 2).toPoint());
+            QTest::mouseMove(v, z.toPoint());
+            PortInfo target;
+            const bool any = v->wiringTarget(target);
+            QTest::mouseRelease(v, Qt::LeftButton, {}, z.toPoint());
+            return any;
+        };
+        const int wires = count("wire");
+        QVERIFY(!offered("port out 0", "port in 0"));
+        QVERIFY(!offered("port out 4", "port key 4"));
+        QVERIFY(!offered("port out 1", "port in 0"));
+        QVERIFY(!offered("port in 0", "port out 1"));
+        QCOMPARE(count("wire"), wires);
+        QVERIFY(offered("port out 0", "port in 4"));
+        QCOMPARE(count("wire"), wires + 1);
+        // With feedback wires on, they are made as feedback wires.
+        s.settings.feedbackWires = true;
+        QVERIFY(offered("port out 1", "port in 0"));
+        wire = link.last("wire");
+        QCOMPARE(wire.value("from").toInt(), 1);
+        QCOMPARE(wire.value("to").toInt(), 0);
+        QVERIFY(wire.value("feedback").toBool());
+        QVERIFY(offered("port out 0", "port in 0"));
+        QVERIFY(link.last("wire").value("feedback").toBool());
+        if (qEnvironmentVariableIsSet("CUE_APP_SHOTS")) {
+            // As the engine would send it back.
+            ChainInfo* shown = const_cast<ChainInfo*>(s.chain(1));
+            WireInfo fb;
+            fb.from = PortInfo::block(2);
+            fb.to = PortInfo::block(1);
+            fb.feedback = true;
+            fb.levelDb = -12;
+            shown->wires << fb;
+            v->grab();
+            shot(v, "routing-feedback");
+            shown->wires.removeLast();
+        }
+        s.settings.feedbackWires = false;
+
         // Delete takes the selected wire away; undo puts it back as it was.
         const int aw = slap.wire(PortInfo::block(2), PortInfo::output(1));
         tapAt(Board(*s.chain(1), 2).path(slap.wires[aw]).pointAtPercent(0.5));
@@ -1814,6 +1859,16 @@ private slots:
         r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", 1}, {"to", 0}});
         QVERIFY(!r.value("ok").toBool());
         QVERIFY2(r.value("error").toString().contains("loop"), qPrintable(r.value("error").toString()));
+        // As a feedback wire it plays, and is saved as one; into itself too.
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", 1}, {"to", 0}, {"feedback", true}, {"level_db", -12}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QTRY_VERIFY(s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0)) >= 0);
+        QVERIFY(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0))].feedback);
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"to", trim}, {"feedback", true}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QVERIFY(ask({{"cmd", "unwire"}, {"chain", 1}, {"from", trim}, {"to", trim}}).value("ok").toBool());
+        QVERIFY(ask({{"cmd", "unwire"}, {"chain", 1}, {"from", 1}, {"to", 0}}).value("ok").toBool());
+        QTRY_VERIFY(s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0)) < 0);
         r = ask({{"cmd", "place"}, {"chain", 1}, {"slot", trim}, {"x", 500}, {"y", 300}});
         QVERIFY(r.value("ok").toBool());
         QCOMPARE(s.perf.chains[1].plugin(trim)->at, QPointF(500, 300));

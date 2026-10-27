@@ -230,6 +230,57 @@ TEST(wires_that_do_not_fit_and_loops_are_refused) {
     CHECK(c.wires().size() == 4);
 }
 
+TEST(a_feedback_wire_is_heard_a_block_late_and_cannot_run_away) {
+    Chain c("A", 2);
+    c.addBlock(gain(1.0f));
+    c.addBlock(gain(1.0f));
+    std::string why;
+    CHECK(c.connect(Port::input(), Port::block(0)));
+    CHECK(c.connect(Port::block(0), Port::block(1)));
+    // Back to where it came from, and into itself: only as feedback.
+    CHECK(c.connect(Port::block(1), Port::block(0), {}, &why, true));
+    CHECK(c.connect(Port::block(1), Port::block(1), {}, &why, true));
+    CHECK(!c.connect(Port::input(), Port::block(1), {}, &why, true) && why.find("feedback") != std::string::npos);
+    CHECK(!c.connect(Port::block(1), Port::output(0), {}, &why, true));
+
+    // One plug-in into itself at half its level: 1 + 1/2 + 1/4 ... = 2.
+    auto play = [](float levelDb) {
+        auto ch = std::make_unique<Chain>("Echo", 2);
+        ch->addBlock(gain(1.0f));
+        CHECK(ch->connect(Port::input(), Port::block(0)));
+        CHECK(ch->connect(Port::block(0), Port::output(0)));
+        WireGains g;
+        g.levelDb = levelDb;
+        std::string err;
+        CHECK_MSG(ch->connect(Port::block(0), Port::block(0), g, &err, true), "%s", err.c_str());
+        auto e = std::make_unique<Engine>(settings());
+        e->addChain(std::move(ch));
+        CHECK(e->activate());
+        e->switchTo(0);
+        return e;
+    };
+    {
+        auto e = play(20 * std::log10(0.5f));
+        Run r{*e};
+        r.seconds(0.5);
+        CHECK_MSG(near(r.last(0), 2.0f), "plays %.5f, expected 2", r.last(0));
+        // A block late: it climbs in steps of a block, never within one.
+        Run steps{*e};
+        steps.input = [] { return 0.0f; };
+        steps.blocks(2);
+        CHECK_MSG(near(steps.out[0][0], 1.0f) && near(steps.out[0][kBlock - 1], 1.0f) && near(steps.out[0][kBlock], 0.5f),
+                  "dies away as %.5f, %.5f, %.5f", steps.out[0][0], steps.out[0][kBlock - 1], steps.out[0][kBlock]);
+    }
+    {
+        // Louder than it came in: held, not growing for ever.
+        auto e = play(6.0f);
+        Run r{*e};
+        r.seconds(1.0);
+        const float most = *std::max_element(r.out[0].begin(), r.out[0].end());
+        CHECK_MSG(std::isfinite(most) && most <= 1.0f + kFeedbackLimit * 2.0f, "reaches %.3f", most);
+    }
+}
+
 TEST(a_key_wire_feeds_the_side_chain_input) {
     auto c = std::make_unique<Chain>("A", 2);
     c->addBlock(gain(0.5f));

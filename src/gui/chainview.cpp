@@ -674,7 +674,7 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         const QPainterPath path = screen.map(B.path(w));
         wireShapes_ << stroker.createStroke(path);
         const bool selected = i == selWire;
-        const QColor col = selected ? color::orange : flow.wires.value(i) ? color::green : kSilentWire;
+        const QColor col = selected ? color::orange : !flow.wires.value(i) ? kSilentWire : w.feedback ? color::purple : color::green;
         p.setPen(QPen(col, w.neutral() ? std::max(1.5, 2.2 * k) : std::max(3.0, 4.4 * k), Qt::SolidLine, Qt::RoundCap));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
@@ -954,6 +954,7 @@ void ChainView::legend(QPainter& p, const QRectF& r) {
     item("carries sound", wire(color::green, 2), 26 * u);
     item("silent", wire(kSilentWire, 2), 26 * u);
     item("level, width or pan changed", wire(color::green, 4), 26 * u);
+    item("feedback (heard a block late)", wire(color::purple, 2), 26 * u);
     item("selected", [&](const QRectF& b) { draw::card(p, QRectF(b.left(), b.top() + 2 * u, b.height() - 4 * u, b.height() - 4 * u), 3 * u, color::orange, QColor()); },
          h);
     p.restore();
@@ -1143,20 +1144,26 @@ void ChainView::dragWire(const PortInfo& port, bool source, QPointF pos, bool do
 
 // What a wire being drawn would join at pos: a dot of the kind wanted (an
 // input, or where sound comes out), else a plug-in, the input or an output
-// as a whole.
+// as a whole. Never one that would make a loop, unless feedback wires are on.
 bool ChainView::portAt(QPointF pos, bool input, PortInfo& out) const {
+    const ChainInfo* c = s.chain(chain_);
+    // Its own plug-in counts as a loop too.
+    auto allowed = [&](const PortInfo& p) {
+        return !c || s.settings.feedbackWires || !(input ? c->wouldLoop(wiringPort_, p) : c->wouldLoop(p, wiringPort_));
+    };
     for (int i = ports_.size() - 1; i >= 0; --i)
-        if (ports_[i].input == input && ports_[i].r.contains(pos) && !(ports_[i].port == wiringPort_)) {
+        if (ports_[i].input == input && ports_[i].r.contains(pos) && allowed(ports_[i].port)) {
             out = ports_[i].port;
             return true;
         }
-    const ChainInfo* c = s.chain(chain_);
     if (!c)
         return false;
     const Board B(*c, s.perf.outputs.size(), moving_);
     const QPointF at = toBoard(pos);
     for (int b = 0; b < B.block.size(); ++b)
-        if (B.box(b).adjusted(-6, -6, 6, 6).contains(at)) {
+        // Its own plug-in by a dot only: the wire starts on its box.
+        if (B.box(b).adjusted(-6, -6, 6, 6).contains(at) && allowed(PortInfo::block(b)) &&
+            !(wiringPort_.kind == PortInfo::Kind::Block && wiringPort_.index == b)) {
             out = PortInfo::block(b);
             return true;
         }
@@ -1177,8 +1184,9 @@ void ChainView::connectPorts(PortInfo from, PortInfo to) {
     const ChainInfo* c = s.chain(chain_);
     if (!c || from.kind == PortInfo::Kind::Output || to.kind == PortInfo::Kind::Input)
         return;
-    if (from.kind == PortInfo::Kind::Block && to.kind == PortInfo::Kind::Block && from.index == to.index) {
-        emit s.message("A plug-in cannot feed itself", true);
+    const bool loop = c->wouldLoop(from, to);
+    if (loop && !s.settings.feedbackWires) {
+        emit s.message("That would bring a plug-in's sound back to it: feedback wires are off in Settings", true);
         return;
     }
     if (const int i = c->wire(from, to); i >= 0) {
@@ -1188,6 +1196,7 @@ void ChainView::connectPorts(PortInfo from, PortInfo to) {
     WireInfo w;
     w.from = from;
     w.to = to;
+    w.feedback = loop;
     const int chain = c->index;
     const QStringList outs = s.perf.outputs;
     const QJsonObject make = w.request(chain, outs), take = w.request(chain, outs, "unwire");

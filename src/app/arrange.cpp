@@ -153,7 +153,7 @@ bool arrange(LiveRig& live, Config next, Fills& fills, const std::vector<int>& e
             edit.added.push_back({std::move(f.processors[i]), ps.bypassed, ps.muteOnBypass});
         }
         for (const WireSpec& w : cs->wires)
-            edit.wires.push_back({w.from, w.to, w.gains});
+            edit.wires.push_back({w.from, w.to, w.gains, 0, w.feedback});
         if (!engine.prepareEdit(f.id, edit, prepared[e++], error))
             return false;
     }

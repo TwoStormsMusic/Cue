@@ -266,7 +266,7 @@ bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains) 
             }
             for (const WireSpec& w : cs.wires) {
                 std::string why;
-                if (!chain->connect(w.from, w.to, w.gains, &why)) {
+                if (!chain->connect(w.from, w.to, w.gains, &why, w.feedback)) {
                     *error = (w.where.empty() ? cs.where : w.where) + ": chain '" + cs.name + "': " + why;
                     return false;
                 }

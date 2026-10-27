@@ -45,10 +45,16 @@ struct WireGains {
     bool neutral() const { return levelDb == 0.0f && width == 1.0f && pan == 0.0f && !muted; }
 };
 
+// A feedback wire is heard one block late: what its plug-in played in the
+// last block (1.3 ms at 64 frames, 48 kHz), so it may bring a plug-in's
+// signal back to it. It is held to kFeedbackLimit, so it cannot run away.
+constexpr float kFeedbackLimit = 2.0f; // +6 dBFS
+
 struct Wire {
     Port from, to;
     WireGains gains;
     uint32_t id = 0; // given by the chain: the same wire keeps it through edits
+    bool feedback = false;
 };
 
 // Processors in series, the way chains were first described. Line 0 is fed
@@ -122,13 +128,15 @@ public:
     // Before activation. Returns the block's slot.
     size_t addBlock(std::unique_ptr<Processor> processor);
     // Before activation: adds a wire. False (with why) if an end does not
-    // exist, the two ports are already wired, or it would make a loop.
-    bool connect(Port from, Port to, WireGains gains = {}, std::string* error = nullptr);
+    // exist, the two ports are already wired, or it would make a loop (but
+    // for a feedback wire, which is heard a block late).
+    bool connect(Port from, Port to, WireGains gains = {}, std::string* error = nullptr, bool feedback = false);
     // Before activation: feeds slot's side-chain input with what source
     // passes on. False if that would make a loop.
     bool setSidechain(size_t slot, size_t source);
     // Whether wires fit blocks, of which those with keys[i] take a key:
-    // every end exists, no two wires join the same ports, no loop.
+    // every end exists, no two wires join the same ports, no loop other than
+    // through a feedback wire.
     bool checkWires(const std::vector<Wire>& wires, const std::vector<bool>& keys, std::string* error) const;
 
     // Before activation: whether a slot starts bypassed.

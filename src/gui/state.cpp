@@ -22,6 +22,8 @@ void Settings::load() {
     fullScreen = s.value("full_screen", fullScreen).toBool();
     wireTags = s.value("wire_tags", wireTags).toBool();
     favourites = s.value("favourites", favourites).toStringList();
+    feedbackWires = s.value("feedback_wires", feedbackWires).toBool();
+    takeCard = s.value("take_sound_card", takeCard).toBool();
 }
 
 void Settings::save() const {
@@ -33,6 +35,8 @@ void Settings::save() const {
     s.setValue("full_screen", fullScreen);
     s.setValue("wire_tags", wireTags);
     s.setValue("favourites", favourites);
+    s.setValue("feedback_wires", feedbackWires);
+    s.setValue("take_sound_card", takeCard);
 }
 
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
@@ -50,6 +54,12 @@ void AppState::onConnection(bool up) {
         link.request({{"cmd", "hello"}}, [this](const QJsonObject& r) {
             if (r.value("ok").toBool()) {
                 hello = r;
+                // What the engine did to get the sound card: closed REAPER, say.
+                const QJsonArray notes = r.value("audio_notes").toArray();
+                if (!notes.isEmpty()) {
+                    QString text = notes.first().toString();
+                    emit message(text.left(1).toUpper() + text.mid(1), false);
+                }
                 emit changed();
             }
         });

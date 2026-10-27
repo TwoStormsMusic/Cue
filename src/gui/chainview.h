@@ -53,6 +53,8 @@ public:
     void resume() { resume_ = true; }
     // The wire selected, by its place in the chain's wires, or -1.
     int selectedWire() const;
+    // While a wire is being drawn: what it would join where the finger is.
+    bool wiringTarget(PortInfo& to) const { return wiring_ && portAt(wiringAt_, wiringSource_, to); }
     void selectWire(int wire);
     // Takes away the selected wire or plug-in; false if there is none.
     bool deleteSelected();

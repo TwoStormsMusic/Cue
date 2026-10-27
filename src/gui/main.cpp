@@ -68,6 +68,8 @@ bool startEngine(const QString& file, const QString& socket, bool noAudio, AppSt
         args << "--socket" << socket;
     if (noAudio)
         args << "--audio" << "none";
+    if (!stateOf.settings.takeCard)
+        args << "--leave-device";
     QString program = cue;
     const QString setsid = QStandardPaths::findExecutable("setsid");
     if (!setsid.isEmpty()) {
