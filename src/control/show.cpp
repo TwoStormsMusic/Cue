@@ -324,7 +324,7 @@ struct Show::Impl {
         int chainIndex = -1;
         if (!chainName.empty()) {
             for (size_t i = 0; i < chainNames.size(); ++i)
-                if (same(chainNames[i], chainName))
+                if (!chainNames[i].empty() && same(chainNames[i], chainName))
                     chainIndex = static_cast<int>(i);
             if (chainIndex < 0) {
                 *error = "no chain named " + chainName;
@@ -886,7 +886,15 @@ struct Show::Impl {
             out.switchTo(p.chain);
         }
         runActions(p.actions);
-        int warm = p.warm;
+        warmFor(index);
+    }
+
+    // The chain kept warm while a preset plays: its own choice, or the next
+    // preset's that plays another chain.
+    void warmFor(int index) {
+        if (index < 0 || index >= static_cast<int>(presets.size()))
+            return;
+        int warm = presets[index].warm;
         if (warm == kWarmNext) {
             // The next preset that plays another chain.
             warm = -1;
@@ -1060,8 +1068,16 @@ struct Show::Impl {
             sc.program = ss.program;
             sc.firstPreset = static_cast<int>(presets.size());
             sc.numPresets = static_cast<int>(ss.presets.size());
-            for (const auto& c : ss.chains)
-                chainNames.push_back(c.name);
+            // By the engine's number for each chain: the rig's, or its
+            // place in the performance before the rig has numbered it.
+            std::vector<int> ids;
+            for (size_t c = 0; c < ss.chains.size(); ++c) {
+                const int id = ss.chains[c].id >= 0 ? ss.chains[c].id : chainBase + static_cast<int>(c);
+                ids.push_back(id);
+                if (static_cast<int>(chainNames.size()) <= id)
+                    chainNames.resize(id + 1);
+                chainNames[id] = ss.chains[c].name;
+            }
             for (const auto& ps : ss.presets) {
                 Preset p;
                 p.name = ps.name;
@@ -1073,9 +1089,9 @@ struct Show::Impl {
                 p.warm = same(warm, "none") ? kWarmNone : kWarmNext;
                 for (size_t c = 0; c < ss.chains.size(); ++c) {
                     if (same(ss.chains[c].name, ps.chain))
-                        p.chain = chainBase + static_cast<int>(c);
+                        p.chain = ids[c];
                     if (same(ss.chains[c].name, warm) && !same(warm, "next") && !same(warm, "none"))
-                        p.warm = chainBase + static_cast<int>(c);
+                        p.warm = ids[c];
                 }
                 presets.push_back(p);
             }
@@ -1348,11 +1364,24 @@ bool Show::reload(const Config& config, const std::vector<ShowPlugin>& plugins, 
         for (const auto& old : was.controls)
             if (same(k.name, old.name))
                 k.value = std::clamp(old.value, std::min(k.min, k.max), std::max(k.min, k.max));
+    // The preset playing is the one that plays the same chain, wherever
+    // chains added, moved or taken out have put it.
+    const bool stays = next->preset >= 0 && next->preset < static_cast<int>(next->presets.size()) &&
+                      next->presets[next->preset].chain == was.activeChain;
+    for (size_t i = 0; i < next->presets.size() && !stays; ++i)
+        if (was.preset >= 0 && next->presets[i].chain == was.activeChain) {
+            next->preset = static_cast<int>(i);
+            next->scene = next->presets[i].scene;
+            break;
+        }
     if (next->preset >= static_cast<int>(next->presets.size()))
         next->preset = next->presets.empty() ? -1 : 0;
     if (next->scene >= static_cast<int>(next->scenes.size()))
         next->scene = next->scenes.empty() ? -1 : 0;
     d_ = std::move(next);
+    // Which chain is warm may have changed with it.
+    if (d_->warmChain != -2)
+        d_->warmFor(d_->preset);
     d_->refresh();
     return true;
 }
@@ -1433,6 +1462,11 @@ bool Show::run(const std::string& action, std::string* error) {
     d_->runAction(a);
     d_->refresh();
     return true;
+}
+
+int Show::presetChain(int index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return index >= 0 && index < static_cast<int>(d_->presets.size()) ? d_->presets[index].chain : -1;
 }
 
 int Show::preset() const {

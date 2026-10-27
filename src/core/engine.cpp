@@ -52,13 +52,52 @@ Engine::Engine(EngineSettings settings) : settings_(settings) {}
 
 Engine::~Engine() { deactivate(); }
 
-int Engine::addChain(std::unique_ptr<Chain> chain) {
+int Engine::addChain(std::unique_ptr<Chain> chain, bool spare) {
     Slot slot;
     slot.chain = std::move(chain);
     slot.stats = std::make_unique<ChainStats>();
     slot.clean = std::make_unique<std::atomic<uint8_t>>(kClean);
     chains_.push_back(std::move(slot));
+    spare_.push_back(spare);
+    fresh_.push_back(spare);
+    if (!spare)
+        used_ = chains_.size();
     return static_cast<int>(chains_.size()) - 1;
+}
+
+int Engine::claimChain(size_t input, int preferred) {
+    if (!activated_ || input >= std::max<size_t>(settings_.numInputs, 1))
+        return -1;
+    // A chain whose tail is still ringing out is processed, input and all:
+    // not yet, unless it keeps its input.
+    auto idle = [&](size_t i) { return spare_[i] && static_cast<ChainState>(chains_[i].stats->state.load()) == ChainState::Idle; };
+    int chosen = -1;
+    if (preferred >= 0 && static_cast<size_t>(preferred) < chains_.size() && spare_[preferred] &&
+        (idle(preferred) || chains_[preferred].chain->input() == input))
+        chosen = preferred;
+    for (size_t i = 0; i < chains_.size() && chosen < 0; ++i)
+        if (fresh_[i])
+            chosen = static_cast<int>(i);
+    for (size_t i = 0; i < chains_.size() && chosen < 0; ++i)
+        if (idle(i))
+            chosen = static_cast<int>(i);
+    if (chosen < 0)
+        return -1;
+    // Idle, so the audio thread does not read its input until a switch,
+    // which comes through the command queue after this.
+    if (chains_[chosen].chain->input() != input)
+        chains_[chosen].chain->setInput(input);
+    spare_[chosen] = fresh_[chosen] = false;
+    used_ = std::max(used_, static_cast<size_t>(chosen) + 1);
+    return chosen;
+}
+
+void Engine::releaseChain(int chain) {
+    if (chain < 0 || static_cast<size_t>(chain) >= chains_.size())
+        return;
+    spare_[chain] = true;
+    while (used_ > 0 && spare_[used_ - 1])
+        --used_;
 }
 
 bool Engine::activate() {

@@ -367,6 +367,48 @@ It lists every file as it opens it, then every plug-in, the TwoStorms ones and t
 
 Play while you do all of this, then check the status line: still `xruns 0`. **Send** anything skipped that should not be, and what feels wrong.
 
+## 15. Chains and scenes (0.9.0)
+
+0.9.0 has everything of steps 13 and 14 too (`bin/cue-app --version` should say 0.9.0). Copy your `.cue` first. Try each on the touchscreen and with a mouse.
+
+**First, the five checks 0.6.2 left** (step 12 has the details). Please do these before anything else:
+
+1. With a TwoStorms editor open, **Close editor** and the panel's sliders work on the first tap.
+2. Typing into a TwoStorms editor's text box, and a Neural DSP one's, works.
+3. Tapping a chain twice plays it; tapping a plug-in twice switches it off or on.
+4. On a chain that is not playing, wires are green where sound would pass and grey where it would not.
+5. **Undo**, Ctrl+Z and Ctrl+Y (redo) work.
+
+**Then steps 13 and 14**, if you have not done them with 0.7.0 or 0.8.0.
+
+**New chains.** On the chain view, while a chain plays:
+
+- **+ Chain** (bottom left): a new empty chain at the end of the list, shown, its input wired to both outputs. Nothing you hear changes.
+- Put a plug-in or two on it, then tap it twice in the list: it plays, like any other.
+- Show another chain and tap **Duplicate** (under the board): a copy just after it ("Slap 2"), sounding the same. Move a parameter on the copy: the original keeps its own.
+- **Undo** takes the copy out; **Redo** brings it back.
+- **Copy from scene…** (once you have two scenes) copies a chain from another scene into this one.
+
+**A chain's settings**, under the board:
+
+- **Name**: tap it, type, Enter (Esc leaves it as it was). The list and the stage view follow.
+- **Selected by**: pick a pedal. The menu says what else each pedal does. Pick one another chain uses: that chain loses it, and **Undo** gives it back. Press the pedal on the FCB: this chain plays.
+- **FCB display**: up to 3 letters, shown on the FCB while it plays.
+- **Keep warm while … plays**: pick a chain. Play this one, then switch to the one you picked: it comes in at once, with no pre-roll. The list says "warm" beside it.
+- **When selected, do**: **+ Action** and pick "Wah = Auto" (or one of yours). Play another chain, turn Wah off, play this one again: Wah goes to Auto. Tap the chip to take it out or move it.
+- **Move**: up, down, or into another scene. **Take out**: gone (not the chain playing; Cue says why). **Undo** brings it back with its plug-ins and settings.
+
+**Scenes.**
+
+- **+ Scene** (bottom left): a new scene after this one, with one empty chain; its settings are shown under the board so you can name it. The picker at the top of the column lists it.
+- Pick your first scene in the picker, then the **Scene** tab under the board, then **Duplicate**: a copy of the whole scene, every chain with its plug-in settings and pedals.
+- Give the copy a pedal in its **Selected by**, and switch scenes with the FCB. The stage view shows the scene's chains.
+- **Take out** the copy (not while it plays): its chains go. **Undo** brings it all back.
+
+**Save and open again.** **Save**, quit the app and the engine, start them again: the chains, scenes and settings are as you left them, and the pedals and displays work.
+
+**Rig check.** Play for 30 minutes, switching chains every few seconds, and add or copy a chain now and then while you play. **Send** the status line at the end: still `xruns 0`. Send too anything that feels wrong or that you would lay out differently.
+
 ## What passes
 
 | Check | Pass when |
@@ -388,5 +430,6 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 | App costs nothing | 30 minutes with the app on the stage view: still `xruns 0` |
 | Routing | Wiring, inserting and removing while playing makes no click; fader moves on a wire are smooth; 30 minutes of it, still `xruns 0` |
 | Plug-in browser | `cue scan` finds every plug-in REAPER has, skips nothing that works, and is quick the second time; adding from the list works on any chain |
+| Chains and scenes | Adding, copying or taking out a chain or a scene while playing makes no click and no gap; pedals, displays and warm chains follow; 30 minutes of it, still `xruns 0` |
 
 If a plug-in takes most of a period in one block, `cue run` prints a `slow block:` line naming it, and `cue bench` names each chain's slowest plug-in. Each xrun gets an `xrun` line: when it happened, how long the block before it took and how late it started, and the slowest block around it with each chain's time. A late start with a short block points at something else holding the CPU; a long block points at the plug-ins. The status line's `margin` is the least audio left to play when a block was written: the closer to 0, the closer to an xrun. A stall in the first quarter second, before anything is heard, gets a `start-up:` line instead and is not counted. If you hear a pop, send those lines and tell me which chain you switched from and to, and whether it was at the press or a moment later. A pop a moment later points at a VST3 delay that did not clear its buffer.

@@ -20,7 +20,8 @@ struct LiveRig {
     EditorHost* editors = nullptr;
 };
 
-// A chain by the engine's number (scene by scene), or nullptr.
+// A chain by the engine's number (its id; before the rig has numbered
+// them, its place scene by scene), or nullptr.
 ChainSpec* chainSpec(Config& config, int chain);
 
 // Main thread. Each returns false with why, and then nothing has changed.

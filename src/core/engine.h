@@ -101,7 +101,9 @@ public:
     ~Engine();
 
     // Main thread, before audio starts. Takes ownership; returns the index.
-    int addChain(std::unique_ptr<Chain> chain);
+    // A spare chain (empty) waits to be claimed by a chain added while the
+    // engine plays: chains are never added or taken away once it runs.
+    int addChain(std::unique_ptr<Chain> chain, bool spare = false);
     bool activate();
     void deactivate();
     // Main thread, after activate and before audio starts: runs every chain
@@ -110,8 +112,20 @@ public:
     // when the chain is first switched to.
     void prime(float milliseconds);
 
-    size_t numChains() const { return chains_.size(); }
+    // The chains up to the last one in use (spares after it are not counted).
+    size_t numChains() const { return used_; }
+    // Every chain, spares too.
+    size_t capacity() const { return chains_.size(); }
     Chain& chain(size_t i) { return *chains_[i].chain; }
+    // Main thread, once active: a spare chain for a new one, now in use and
+    // fed by input: preferred if it is spare and idle, else the first one
+    // never used, else any idle one. -1 if none is left. It plays silence
+    // until an edit gives it blocks and wires.
+    int claimChain(size_t input, int preferred = -1);
+    // Main thread: a chain an edit has emptied, no longer played or warm,
+    // spare again.
+    void releaseChain(int chain);
+    bool inUse(size_t i) const { return i < spare_.size() && !spare_[i]; }
     const EngineSettings& settings() const { return settings_; }
 
     // Any non-real-time thread.
@@ -231,6 +245,10 @@ private:
     EngineSettings settings_;
     std::vector<Slot> chains_;
     bool activated_ = false;
+    // Main thread: which chains are spare, which of them were never used,
+    // and how many there are up to the last one in use.
+    std::vector<bool> spare_, fresh_;
+    size_t used_ = 0;
 
     int active_ = -1;
     int pending_ = -1;

@@ -9,9 +9,11 @@ namespace cue {
 ChainSpec* chainSpec(Config& config, int chain) {
     int c = 0;
     for (auto& scene : config.scenes)
-        for (auto& cs : scene.chains)
-            if (c++ == chain)
+        for (auto& cs : scene.chains) {
+            if (cs.id >= 0 ? cs.id == chain : c == chain)
                 return &cs;
+            ++c;
+        }
     return nullptr;
 }
 

@@ -57,10 +57,13 @@ struct WireInfo {
 };
 
 struct ChainInfo {
-    int index = 0; // the engine's number: chains are numbered scene by scene
+    // The engine's number for it, which stays while the engine plays,
+    // whatever is added, moved or taken out around it.
+    int index = 0;
     int scene = 0;
     QString name, display, warm, input;
-    int pedal = 0;
+    int pedal = 0, program = -1;
+    QStringList onSelect; // actions, as a config writes them
     QVector<PluginInfo> blocks;
     QVector<WireInfo> wires;
     int numPlugins() const { return blocks.size(); }
@@ -85,8 +88,13 @@ struct Flow {
 Flow flowOf(const ChainInfo& c, const std::function<bool(int slot)>& bypassed, bool inputsMuted, int numOutputs);
 
 struct SceneInfo {
-    QString name;
-    QVector<int> chains; // engine numbers
+    QString name, display;
+    int pedal = 0, program = -1;
+    QVector<int> chains; // engine numbers, in order
+};
+
+struct TriggerInfo {
+    QString name, scene; // scene: only there; empty: everywhere
 };
 
 struct ControlInfo {
@@ -102,12 +110,16 @@ struct Performance {
     QString name;
     QStringList inputs, outputs;
     QVector<SceneInfo> scenes;
-    QVector<ChainInfo> chains;
+    QVector<ChainInfo> chains; // scene by scene, in order
     QVector<ControlInfo> controls;
+    QVector<TriggerInfo> triggers;
     QString tunerInput;
 
     static Performance fromJson(const QJsonObject& performance);
     const ControlInfo* control(const QString& name) const;
+    // A chain by its number, or nullptr.
+    const ChainInfo* chain(int index) const;
+    ChainInfo* chain(int index);
 };
 
 struct ChainStatus {

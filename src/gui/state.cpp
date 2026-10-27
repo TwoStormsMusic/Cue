@@ -137,9 +137,7 @@ void AppState::setFavourite(const ScannedPlugin& p, bool on) {
     emit catalogChanged();
 }
 
-const ChainInfo* AppState::chain(int index) const {
-    return index >= 0 && index < perf.chains.size() ? &perf.chains[index] : nullptr;
-}
+const ChainInfo* AppState::chain(int index) const { return perf.chain(index); }
 
 QVector<int> AppState::sceneChains() const {
     const int scene = status.valid ? status.scene : 0;
@@ -172,9 +170,10 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
     } else if (r.contains("wire")) {
         setWire(request.value("chain").toInt(-1), r.value("wire").toObject());
     } else if (request.value("cmd").toString() == "place") {
-        const int chain = request.value("chain").toInt(-1), slot = request.value("slot").toInt(-1);
-        if (chain >= 0 && chain < perf.chains.size() && slot >= 0 && slot < perf.chains[chain].blocks.size()) {
-            PluginInfo& b = perf.chains[chain].blocks[slot];
+        ChainInfo* c = perf.chain(request.value("chain").toInt(-1));
+        const int slot = request.value("slot").toInt(-1);
+        if (c && slot >= 0 && slot < c->blocks.size()) {
+            PluginInfo& b = c->blocks[slot];
             b.placed = true;
             b.at = QPointF(request.value("x").toDouble(), request.value("y").toDouble());
             emit changed();
@@ -184,9 +183,10 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
 
 // A wire's gains, as the engine has them now.
 void AppState::setWire(int chain, const QJsonObject& wj) {
-    if (chain < 0 || chain >= perf.chains.size())
+    ChainInfo* found = perf.chain(chain);
+    if (!found)
         return;
-    ChainInfo& c = perf.chains[chain];
+    ChainInfo& c = *found;
     auto port = [&](const QJsonValue& v, bool from) {
         if (v.isDouble())
             return PortInfo::block(v.toInt(), !from && wj.value("key").toBool());
@@ -204,7 +204,7 @@ void AppState::setWire(int chain, const QJsonObject& wj) {
 }
 
 void AppState::select(int chain) {
-    link.request({{"cmd", "select"}, {"index", chain}}, [this](const QJsonObject& r) { check(r, "Could not play that chain"); });
+    link.request({{"cmd", "select"}, {"chain", chain}}, [this](const QJsonObject& r) { check(r, "Could not play that chain"); });
 }
 
 void AppState::step(int delta) {

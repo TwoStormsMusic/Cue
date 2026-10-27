@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace cue::gui {
 
@@ -139,16 +140,23 @@ Performance Performance::fromJson(const QJsonObject& j) {
         const QJsonObject sj = scenes[s].toObject();
         SceneInfo scene;
         scene.name = sj.value("name").toString();
+        scene.display = sj.value("display").toString();
+        scene.pedal = sj.value("pedal").toInt();
+        scene.program = sj.value("program").toInt(-1);
         for (const QJsonValue& cv : sj.value("chains").toArray()) {
             const QJsonObject cj = cv.toObject();
             ChainInfo c;
-            c.index = index++;
+            // A file's chains, before an engine numbers them, by their place.
+            c.index = cj.value("index").toInt(index);
+            ++index;
             c.scene = s;
             c.name = cj.value("name").toString();
             c.display = cj.value("display").toString();
             c.warm = cj.value("warm").toString("next");
             c.input = cj.value("input").toString(perf.inputs.first());
             c.pedal = cj.value("pedal").toInt();
+            c.program = cj.value("program").toInt(-1);
+            c.onSelect = strings(cj.value("on_select"));
             for (const QJsonValue& pv : cj.value("blocks").toArray()) {
                 const QJsonObject pj = pv.toObject();
                 PluginInfo p;
@@ -209,8 +217,19 @@ Performance Performance::fromJson(const QJsonObject& j) {
         c.mutes = !cj.value("mute").toArray().isEmpty();
         perf.controls << c;
     }
+    for (const QJsonValue& v : j.value("triggers").toArray())
+        perf.triggers << TriggerInfo{v.toObject().value("name").toString(), v.toObject().value("scene").toString()};
     return perf;
 }
+
+const ChainInfo* Performance::chain(int index) const {
+    for (const ChainInfo& c : chains)
+        if (c.index == index)
+            return &c;
+    return nullptr;
+}
+
+ChainInfo* Performance::chain(int index) { return const_cast<ChainInfo*>(std::as_const(*this).chain(index)); }
 
 const ControlInfo* Performance::control(const QString& name) const {
     for (const ControlInfo& c : controls)
@@ -231,7 +250,9 @@ Status Status::fromJson(const QJsonObject& j) {
     s.periodMs = j.value("period_ms").toDouble();
     s.bufferMs = j.value("buffer_ms").toDouble();
     s.scene = j.value("scene").toObject().value("index").toInt();
-    s.selected = j.value("selected").toObject().value("index").toInt(-1);
+    // The chain playing, by its number (an older engine's: the preset's).
+    const QJsonObject selected = j.value("selected").toObject();
+    s.selected = selected.value("chain").toInt(selected.value("index").toInt(-1));
     s.selectedName = j.value("selected").toObject().value("name").toString();
     s.muted = j.value("muted").toBool();
     s.display = j.value("display").toString();

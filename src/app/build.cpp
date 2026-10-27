@@ -203,7 +203,7 @@ void captureState(Processor& p, PluginSpec& ps) {
     }
 }
 
-bool buildRig(Config& config, Rig& rig, std::string* error) {
+bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains) {
     EngineSettings es = config.engine;
     es.sampleRate = config.audio.rate;
     es.maxFrames = config.audio.period;
@@ -222,6 +222,7 @@ bool buildRig(Config& config, Rig& rig, std::string* error) {
         std::printf("scene '%s'\n", scene.name.c_str());
         for (ChainSpec& cs : scene.chains) {
             const int chainIndex = static_cast<int>(rig.chainNames.size());
+            cs.id = chainIndex;
             std::printf("  chain '%s'\n", cs.name.c_str());
             auto chain = std::make_unique<Chain>(cs.name, config.outputs.size(), config.mix);
             chain->setInput(cs.inputIndex);
@@ -274,6 +275,11 @@ bool buildRig(Config& config, Rig& rig, std::string* error) {
             rig.engine->addChain(std::move(chain));
             rig.chainNames.push_back(cs.name);
         }
+    }
+    // Empty, for chains added while it plays.
+    for (size_t i = 0; i < spareChains; ++i) {
+        rig.engine->addChain(std::make_unique<Chain>("", config.outputs.size(), config.mix), true);
+        rig.chainNames.emplace_back();
     }
 
     rig.bypassedNow.reset(new std::atomic<bool>[rig.plugins.size()]);

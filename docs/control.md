@@ -50,11 +50,11 @@ reply repeats:
 | `hello` | | `cue` (version), `protocol` (1), `performance`, `file`, `audio` (a description), `audio_settings` (`device`, `rate`, `period`, `periods`), `midi` (`enabled`, `in`, `profile`, `ports` connected) |
 | `status` | | `status`: as the status event below |
 | `performance` | | `performance`: the .cue's performance.json, without states |
-| `select` | `chain` (a name), `index` (from 0) or `step` (+1, -1) | `selected`: `index`, `name` |
+| `select` | `chain` (a name, or its number as `performance` gives it), `index` (its place among all the chains, scene by scene, from 0) or `step` (+1, -1) | `selected`: `index`, `name`, `chain` (its number) |
 | `do` | `action` | |
 | `save` | `path` (optional: else the .cue it was loaded from) | `path`, `warnings` |
 | `tuner` | any of `reference` (415-466 Hz), `range` (guitar, bass, vocals, any), `tolerance` (cents), `names` (sharps, flats) | `tuner`: as the tuner event; kept with the performance when it is saved |
-| `plugin` | `chain` (from 0, scene by scene), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text`, and `tied` when a control's `drive` (`control`, what it `follows`, its `pedal`) or a trigger's `param` action (`trigger`) moves it; `shown` once the app has picked parameters |
+| `plugin` | `chain` (its number: the chain's `index` in `performance`), `slot` (the plug-in's place in the chain, line by line, from 0, as performance.json lists them) | `plugin`: `label`, `name`, `format`, `bypassed`, `editor` (it has one of its own), `editor_open`, and `params`: `id`, `name`, `module`, `min`, `max`, `default`, `steps`, `value` now and its `text`, and `tied` when a control's `drive` (`control`, what it `follows`, its `pedal`) or a trigger's `param` action (`trigger`) moves it; `shown` once the app has picked parameters |
 | `bypass` | `chain`, `slot`, `bypassed` (true or false) | `plugin` as above; kept when the performance is saved |
 | `param` | `chain`, `slot`, `param` (the parameter's `id` from `plugin`), `value` (the plug-in's own value for CLAP, 0 to 1 for VST3) | `text`: how the plug-in writes that value; kept in its state when saved |
 | `editor` | `chain`, `slot`, `open` (true to open, false to close; true by default); from an app on the same screen, `above` (its X11 window) and `display` (its `DISPLAY`) | `plugin` as above. The window opens on the screen of the computer running the engine, not the app's, so it is the stage computer that shows it. With `above` it stays over the app's window and never takes its focus |
@@ -66,6 +66,16 @@ reply repeats:
 | `unwire` | `chain`, `from`, `to`, `key` | `performance` |
 | `wires` | `chain`, `wires` (each as for `wire`) | `performance`: the chain wired so, all at once |
 | `place` | `chain`, `slot`, `x`, `y` | nothing: where the block is drawn, kept when saved |
+| `add-chain` | `scene` (from 0), optional `at` (its place in the scene; the end if left out), `name`, `copy` (a chain's number: its plug-ins with their states as they are now, its wires and its settings), `input` (an empty chain's, by name) | `chain` (its number), `warnings`, `performance`. An empty chain has its input wired to every output, named `Chain N`; a copy in the same scene is named `Slap 2`. A copy keeps its pedal only in another scene where that pedal is free, and never a program change. Up to 64 chains can be added while it runs; saved and started again, there is room for 64 more |
+| `remove-chain` | `chain`, optional `token` | `performance`. Refused for the chain playing and the last chain of a scene. With a `token`, it is kept (with its plug-ins' states) for `restore-chain` |
+| `restore-chain` | `token` | `chain` (its number again, unless a chain added since has taken it), `performance` |
+| `set-chain` | `chain` and any of `name`, `display` (up to 3 characters), `pedal` (1-10; 0 or null for none), `program` (0-127; -1 or null for none), `warm` (`next`, `none`, or a chain of its scene by name), `on_select` (a list of actions, as [config.md](config.md) writes them) | `warnings` (a pedal another control also uses, say), `performance`. A pedal given to a chain is taken from any other chain of its scene that had it; a program change from any other chain. A new name is followed by every chain that kept it warm by name |
+| `move-chain` | `chain`, `scene`, `at` (its place there; -1 for the end) | `performance`. Refused for the last chain of a scene |
+| `add-scene` | optional `at` (-1 for the end), `name`, `copy` (a scene: each chain as `add-chain` copies one, pedals kept, and the triggers that work only there) | `scene`, `chains` (their numbers), `performance`. Without `copy`, it has one empty chain |
+| `remove-scene` | `scene`, optional `token` | `performance`. Refused for the scene playing and the only scene. Every chain of it goes, and the triggers that work only there; with a `token`, all of it is kept for `restore-scene` |
+| `restore-scene` | `token` | `scene`, `performance` |
+| `set-scene` | `scene` and any of `name`, `display`, `pedal`, `program` | `warnings`, `performance`. A pedal or program change is taken from any other scene that had it. A new name is followed by the triggers that work only there |
+| `move-scene` | `scene`, `at` | `performance` |
 | `plugins` | optional `scan`: `changed` (new and changed files), `all`, or one file's path; optional `folders` (the user's folders to look in, kept on this machine) | `plugins`: `scanning`, `done`, `total`, `current` (the file being opened), `scanned_at` (seconds since 1970), `folders` (`clap`, `vst3`: the usual ones; `extra`: the user's), and `files`: each `path`, `format`, `error` when it was skipped, and its `plugins`: `format`, `path`, `id`, `name`, `vendor`, `version`, `categories`, `bridged` (through yabridge), and when the scan made it, `opened` with `sidechain`, `editor` and `midi`; `error` for one that fell over as it was made |
 | `quit` | | |
 | `subscribe`, `unsubscribe` | `events`: `["status", "log", "tuner", "performance", "wire", "scan", "plugins"]` | `events` now subscribed |
@@ -74,9 +84,10 @@ Events have an `event` field instead of an `id`:
 
 - `status`, about 30 times a second: `dsp` (`avg`, `max`: % of a block's time),
   `margin_ms` (null until measured; never with `--audio none`), `xruns`,
-  `period_ms`, `buffer_ms`, `scene` and `selected` (`index`, `name`), `muted`,
+  `period_ms`, `buffer_ms`, `scene` (`index`, `name`) and `selected` (`index`,
+  `name`, `chain`: as `select` answers), `muted`,
   `display`, `leds` (pedals 1-10), `controls` (`name`, `value`, `text`),
-  `chains` (`name`, `state`: idle, pre-roll, warm, active, tail (ringing out) or
+  `chains`, by number (`name`, empty for a number no chain has; `state`: idle, pre-roll, warm, active, tail (ringing out) or
   stopping; `avg_us`, `max_us` per block since the last event; `bypassed`: the
   slots bypassed now), and `levels`: `inputs` and `outputs`, each `name` and
   `peak_db`, the highest peak since the event before (-120 for silence).
@@ -90,8 +101,8 @@ Events have an `event` field instead of an `id`:
   `input`, `reference`, `range`, `tolerance`, `names`. The tuner only listens
   while a client is subscribed to it, so it costs nothing otherwise.
 - `performance`: the performance, as the `performance` command answers it,
-  each time a plug-in is added, taken out or put back, or a chain's wires
-  change.
+  each time a plug-in is added, taken out or put back, a chain's wires
+  change, or a chain or scene is added, set, moved or taken out.
 - `wire`: `chain` and `wire` (as the `wire` command answers it), when only a
   wire's level, width, pan or mute changed.
 - `scan`: how far a plug-in scan is (`scanning`, `done`, `total`, `current`),
@@ -111,6 +122,14 @@ nothing changes. A playing chain's wiring changes between a 10 ms fade out
 and a fade in; gains move with a short ramp and no fade; a chain not playing
 changes at once. In the performance JSON each block says `has_key` when the
 plug-in has a side-chain input.
+
+Each chain has a number, its `index` in the performance JSON, which
+`plugin`, `bypass`, `wire` and the rest take as `chain`. Loaded, the chains
+are numbered scene by scene from 0; a chain added later takes a number of
+its own, and none is ever renumbered while Cue runs, whatever is added,
+moved or taken out around it. Saved and loaded again, they are numbered in
+order again. A chain added, copied or put back while another plays is
+loaded and warmed beside it, and the one playing never stops.
 
 Everything runs on `cue run`'s main thread, never on the audio thread: a slow
 or stuck client cannot cause a click. A client that stops reading is

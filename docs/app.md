@@ -100,10 +100,36 @@ or that no output hears is loaded but not processed, drawn grey and marked
 and back in over 10 ms, a level, width or pan moves smoothly with no fade at
 all, and a chain not playing changes at once.
 
+The column on the left lists one scene's chains: the scene is picked at its
+top (a green dot when it is the scene playing), and the list shows which
+chain is playing and which is kept warm. **+ Chain** adds an empty chain to
+the scene, its input wired to every output. **Copy from scene…** lists the
+other scenes' chains: the one picked is copied into this scene with its
+plug-ins as they sound now, its wiring and its settings (its pedal too, if
+no chain here has it). **+ Scene** adds a scene after this one, with one
+empty chain. All of it happens while a chain plays: a new chain is loaded and
+warmed beside it, and nothing you hear stops.
+
+Under the board are the shown chain's settings:
+its **name**, the FCB pedal that **selects** it (the menu says what else
+each pedal does; a pedal given to it is taken from the chain here that had
+it), its 3-letter **FCB display**, the chain **kept warm while it plays**
+(the next one, none, or one you pick, so the switch to it is instant), and
+**when selected, do**: the actions done each time it is picked, each a chip
+(tap one to take it out or move it; **+ Action** offers the controls' values
+or one typed, such as `group Reset`). **Duplicate** copies the chain just
+after itself; **Move** puts it earlier, later or into another scene; **Take
+out** takes it away (not the chain playing, nor the last of a scene). The
+**Scene** tab beside the title gives the scene's name, pedal and display the
+same way, and its own **Duplicate** (every chain, plug-in settings, pedals and
+the triggers that work only there), **Move** and **Take out**.
+
 **Undo** takes back what you changed here (a slider, a bypass, the parameters
-picked, a wire, a plug-in added, moved or taken out), showing where, and
+picked, a wire, a plug-in added, moved or taken out, a chain or scene added,
+copied, set, moved or taken out), showing where, and
 **Redo** makes it again; what a pedal or a plug-in's own editor changes is
-not in it. A plug-in taken out comes back with its settings and its wires.
+not in it. A plug-in taken out comes back with its settings and its wires;
+a chain or a scene with everything it had.
 **Save** saves the performance, plug-in settings, wiring and where each
 block is drawn included, to its `.cue` file.
 

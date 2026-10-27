@@ -216,6 +216,36 @@ private slots:
         QCOMPARE(p.control("Effect 1")->values, (QStringList{"off", "on"}));
         QVERIFY(p.control("Tuner")->mutes);
         QCOMPARE(p.chains[0].plugin(1)->label, QString("Darkglass Ultra"));
+
+        // A live performance: chains by the engine's numbers, which need
+        // not follow their places, and each scene's and chain's settings.
+        const Performance live = Performance::fromJson(parse(R"({"name": "Live", "inputs": ["Bass"], "outputs": ["FOH"],
+          "scenes": [{"name": "Verse", "display": "VRS", "pedal": 3, "program": 12, "chains": [
+                       {"name": "Bright", "index": 6, "pedal": 7, "program": 4, "on_select": ["Wah = on", "group Reset"], "warm": "none"},
+                       {"name": "Clean", "index": 0}]},
+                     {"name": "Chorus", "chains": [{"name": "Dirty", "index": 2}]}],
+          "triggers": [{"name": "Hold", "scene": "Chorus"}, {"name": "Panic"}]})"));
+        QCOMPARE(live.scenes[0].chains, (QVector<int>{6, 0}));
+        QCOMPARE(live.scenes[1].chains, (QVector<int>{2}));
+        QCOMPARE(live.scenes[0].display, QString("VRS"));
+        QCOMPARE(live.scenes[0].pedal, 3);
+        QCOMPARE(live.scenes[0].program, 12);
+        QCOMPARE(live.scenes[1].program, -1);
+        const ChainInfo* bright = live.chain(6);
+        QVERIFY(bright);
+        QCOMPARE(bright->name, QString("Bright"));
+        QCOMPARE(bright->scene, 0);
+        QCOMPARE(bright->program, 4);
+        QCOMPARE(bright->warm, QString("none"));
+        QCOMPARE(bright->onSelect, (QStringList{"Wah = on", "group Reset"}));
+        QCOMPARE(live.chain(2)->scene, 1);
+        QVERIFY(!live.chain(1));
+        QCOMPARE(live.triggers.size(), 2);
+        QCOMPARE(live.triggers[0].scene, QString("Chorus"));
+        QVERIFY(live.triggers[1].scene.isEmpty());
+        // The engine's status names the chain playing by its number.
+        const Status st = Status::fromJson(parse(R"({"scene": {"index": 0}, "selected": {"index": 0, "name": "Bright", "chain": 6}})"));
+        QCOMPARE(st.selected, 6);
     }
 
     // Green: sound from the input would pass on its way to an output, if
@@ -482,7 +512,7 @@ private slots:
         Surface* v = w.view("stage");
         v->grab();
         click(v, v->hitRect("chain 3"));
-        QCOMPARE(link.last("select").value("index").toInt(), 3);
+        QCOMPARE(link.last("select").value("chain").toInt(), 3);
         click(v, v->hitRect("control Effect 1"));
         QCOMPARE(link.last("do").value("action").toString(), QString("Effect 1 = toggle"));
         click(v, v->hitRect("control Wah = Auto"));
@@ -1097,6 +1127,242 @@ private slots:
         QVERIFY(v->isVisible());
     }
 
+    // The column and the settings under the board, tap by tap: new chains
+    // and copies, a chain's pedal, name, display, warm chain and actions,
+    // its scene's, new scenes, moves and chains taken out; each undone.
+    void chain_view_makes_chains_and_scenes_and_sets_them() {
+        // The engine's answers: what adding makes, as it would number it.
+        QJsonObject perf = parse(kPerformance);
+        auto emptyChain = [](const QString& name, int index) {
+            return QJsonObject{{"name", name}, {"index", index}, {"warm", "next"}, {"blocks", QJsonArray()},
+                               {"wires", QJsonArray{QJsonObject{{"from", "Bass"}, {"to", "FOH"}}, QJsonObject{{"from", "Bass"}, {"to", "Amp"}}}}};
+        };
+        FakeLink link;
+        link.answer = [&](const QJsonObject& r) -> QJsonObject {
+            const QString cmd = r.value("cmd").toString();
+            QJsonArray scenes = perf.value("scenes").toArray();
+            if (cmd == "add-chain") {
+                const int scene = r.value("scene").toInt(), id = scene == 0 ? 5 : 7;
+                QJsonObject sc = scenes[scene].toObject();
+                QJsonArray chains = sc.value("chains").toArray();
+                chains.append(emptyChain(r.contains("copy") ? "Slap 2" : "Chain 6", id));
+                sc["chains"] = chains;
+                scenes[scene] = sc;
+                perf["scenes"] = scenes;
+                return {{"ok", true}, {"chain", id}, {"performance", perf}};
+            }
+            if (cmd == "add-scene") {
+                scenes.append(QJsonObject{{"name", "Scene 2"}, {"chains", QJsonArray{emptyChain("Chain 1", 6)}}});
+                perf["scenes"] = scenes;
+                return {{"ok", true}, {"scene", 1}, {"chains", QJsonArray{6}}, {"performance", perf}};
+            }
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        QCOMPARE(v->shownChain(), 1);
+        QCOMPARE(v->shownScene(), 0);
+        auto tap = [v](const QString& id) {
+            v->grab();
+            click(v, v->hitRect(id));
+            v->grab();
+        };
+        auto pick = [v](const QString& item) {
+            const int i = v->menuItems().indexOf(item);
+            QVERIFY2(i >= 0, qPrintable(item + " is not in " + v->menuItems().join(", ")));
+            // Tapped, as a finger would.
+            v->grab();
+            const QRectF list = v->hitRect("menu");
+            QVERIFY(!list.isEmpty());
+            click(v, QRectF(list.left(), list.top() + i * list.height() / v->menuItems().size(), list.width(), 4));
+        };
+
+        // + Chain: an empty one at the end of the scene, shown; undone it is
+        // taken out and kept, redone it comes back.
+        tap("new chain");
+        QJsonObject add = link.last("add-chain");
+        QCOMPARE(add.value("scene").toInt(), 0);
+        QVERIFY(!add.contains("copy"));
+        QCOMPARE(v->shownChain(), 5);
+        QCOMPARE(s.perf.scenes[0].chains.last(), 5);
+        QVERIFY(v->hitRect("show 5").isValid());
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        const QJsonObject removed = link.last("remove-chain");
+        QCOMPARE(removed.value("chain").toInt(), 5);
+        const QString token = removed.value("token").toString();
+        QVERIFY(!token.isEmpty());
+        QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
+        QCOMPARE(link.last("restore-chain").value("token").toString(), token);
+
+        // Duplicate: the chain shown, just after it.
+        tap("show 1");
+        QCOMPARE(v->shownChain(), 1);
+        tap("copy this chain");
+        add = link.last("add-chain");
+        QCOMPARE(add.value("copy").toInt(), 1);
+        QCOMPARE(add.value("at").toInt(), 2);
+        tap("show 1");
+
+        // The pedal: a menu that says what else each does; one taken from
+        // another chain goes back to it when undone.
+        tap("chain pedal");
+        QVERIFY(v->menuOpen());
+        QCOMPARE(v->menuItems().first(), QString("None"));
+        QVERIFY(v->menuItems().contains("FCB pedal 8"));
+        shot(v, "chains-pedal-menu");
+        pick("FCB pedal 8");
+        QVERIFY(!v->menuOpen());
+        QJsonObject set = link.last("set-chain");
+        QCOMPARE(set.value("chain").toInt(), 1);
+        QCOMPARE(set.value("pedal").toInt(), 8);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.sent[link.sent.size() - 2].value("chain").toInt(), 1);
+        QCOMPARE(link.sent[link.sent.size() - 2].value("pedal").toInt(), 7);
+        QCOMPARE(link.sent.last().value("chain").toInt(), 2);
+        QCOMPARE(link.sent.last().value("pedal").toInt(), 8);
+
+        // The name and display are typed; Esc lets go without keeping it.
+        tap("chain name");
+        QCOMPARE(v->entryField(), QString("chain name"));
+        shot(v, "chains-typing");
+        v->typeEntry("Slap Bright");
+        QCOMPARE(v->entryField(), QString());
+        set = link.last("set-chain");
+        QCOMPARE(set.value("name").toString(), QString("Slap Bright"));
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("set-chain").value("name").toString(), QString("Slap"));
+        tap("chain display");
+        QCOMPARE(v->entryField(), QString("chain display"));
+        v->typeEntry("SLB");
+        QCOMPARE(link.last("set-chain").value("display").toString(), QString("SLB"));
+        const int sent = link.sent.size();
+        tap("chain display");
+        QTest::keyClick(&w, Qt::Key_Escape);
+        QCOMPARE(v->entryField(), QString());
+        QCOMPARE(link.sent.size(), sent);
+        QCOMPARE(w.current(), QString("chains"));
+
+        // The chain kept warm while it plays.
+        tap("chain warm");
+        QCOMPARE(v->menuItems().mid(0, 3), QStringList({"The next chain", "None", "Punk"}));
+        pick("None");
+        QCOMPARE(link.last("set-chain").value("warm").toString(), QString("none"));
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("set-chain").value("warm").toString(), QString("next"));
+
+        // What selecting it does: a control's value, or one typed.
+        tap("add action");
+        QVERIFY(v->menuItems().contains("Wah = Auto"));
+        QVERIFY(!v->menuItems().contains("Mix = 0"));
+        pick("Wah = Auto");
+        QCOMPARE(link.last("set-chain").value("on_select").toArray(), QJsonArray{"Wah = Auto"});
+        tap("add action");
+        pick("Type an action…");
+        v->grab();
+        QCOMPARE(v->entryField(), QString("add action"));
+        v->typeEntry("group Reset");
+        QCOMPARE(link.last("set-chain").value("on_select").toArray(), QJsonArray{"group Reset"});
+        // Esc closes a menu before anything else.
+        tap("chain pedal");
+        QVERIFY(v->menuOpen());
+        QTest::keyClick(&w, Qt::Key_Escape);
+        QVERIFY(!v->menuOpen());
+        QCOMPARE(w.current(), QString("chains"));
+        // A tap elsewhere closes it too, and does nothing else.
+        tap("chain warm");
+        const int before = link.sent.size();
+        click(v, v->hitRect("show 0"));
+        QVERIFY(!v->menuOpen());
+        QCOMPARE(v->shownChain(), 1);
+        QCOMPARE(link.sent.size(), before);
+
+        // Moved down one, and back.
+        tap("move chain");
+        QCOMPARE(v->menuItems(), QStringList({"Up", "Down"}));
+        pick("Down");
+        QJsonObject move = link.last("move-chain");
+        QCOMPARE(move.value("chain").toInt(), 1);
+        QCOMPARE(move.value("scene").toInt(), 0);
+        QCOMPARE(move.value("at").toInt(), 2);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("move-chain").value("at").toInt(), 1);
+
+        // Taken out: the one beside it is shown; undone, it comes back.
+        tap("show 0");
+        tap("remove chain");
+        const QJsonObject out = link.last("remove-chain");
+        QCOMPARE(out.value("chain").toInt(), 0);
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("restore-chain").value("token").toString(), out.value("token").toString());
+
+        // The scene's settings.
+        tap("strip scene");
+        QCOMPARE(v->strip(), ChainView::Strip::Scene);
+        shot(v, "chains-scene-settings");
+        tap("scene pedal");
+        pick("FCB pedal 3");
+        set = link.last("set-scene");
+        QCOMPARE(set.value("scene").toInt(), 0);
+        QCOMPARE(set.value("pedal").toInt(), 3);
+        tap("scene name");
+        v->typeEntry("Verse");
+        QCOMPARE(link.last("set-scene").value("name").toString(), QString("Verse"));
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(link.last("set-scene").value("name").toString(), QString("Cue Template"));
+
+        // + Scene: after this one, its chain and its settings shown; undone,
+        // taken out and kept.
+        tap("strip chain");
+        tap("new scene");
+        QCOMPARE(link.last("add-scene").value("at").toInt(), 1);
+        QCOMPARE(v->shownChain(), 6);
+        QCOMPARE(v->shownScene(), 1);
+        QCOMPARE(v->strip(), ChainView::Strip::Scene);
+        tap("strip chain");
+        QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+        const QJsonObject gone = link.last("remove-scene");
+        QCOMPARE(gone.value("scene").toInt(), 1);
+        QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
+        QCOMPARE(link.last("restore-scene").value("token").toString(), gone.value("token").toString());
+
+        // Copy from scene: the other scenes' chains, into this one.
+        tap("copy chain");
+        QVERIFY(v->menuItems().contains("Slap"));
+        QVERIFY(!v->menuItems().contains("Chain 1"));
+        shot(v, "chains-copy-menu");
+        pick("Slap");
+        add = link.last("add-chain");
+        QCOMPARE(add.value("scene").toInt(), 1);
+        QCOMPARE(add.value("copy").toInt(), 1);
+        QVERIFY(!add.contains("at"));
+        QCOMPARE(v->shownChain(), 7);
+
+        // The scene picker: another scene shows its chain playing.
+        tap("scenes");
+        QCOMPARE(v->menuItems(), QStringList({"Cue Template", "Scene 2", "+ New scene"}));
+        shot(v, "chains-scenes-menu");
+        pick("Cue Template");
+        QCOMPARE(v->shownScene(), 0);
+        QCOMPARE(v->shownChain(), 1);
+        // Moved into the other scene.
+        tap("move chain");
+        pick("To scene Scene 2");
+        move = link.last("move-chain");
+        QCOMPARE(move.value("scene").toInt(), 1);
+        QCOMPARE(move.value("at").toInt(), -1);
+
+        // Every view's taps stay on the screen with a menu open.
+        tap("chain warm");
+        for (const QString& id : v->hitIds())
+            QVERIFY2(QRectF(v->rect()).adjusted(-1, -1, 1, 1).contains(v->hitRect(id)), qPrintable(id));
+    }
+
     void the_catalog_reads_what_the_scan_found() {
         const Catalog c = Catalog::fromJson(parse(kCatalog));
         QVERIFY(c.valid && !c.scanning);
@@ -1481,6 +1747,102 @@ private slots:
         QVERIFY(r.value("ok").toBool());
         QCOMPARE(s.perf.chains[1].plugin(trim)->at, QPointF(500, 300));
         QVERIFY(s.status.valid);
+        QCOMPARE(s.status.selected, 1);
+
+        // Chains and scenes, live: a chain added and one copied while
+        // another plays, set, played, moved, taken out and put back; a scene
+        // copied, played, and taken out and put back.
+        auto ok = [](const QJsonObject& reply) { return reply.value("ok").toBool(); };
+        r = ask({{"cmd", "add-chain"}, {"scene", 0}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        const int fresh = r.value("chain").toInt(-1);
+        QCOMPARE(fresh, 5);
+        QCOMPARE(s.perf.scenes[0].chains.last(), fresh);
+        QCOMPARE(s.chain(fresh)->name, QString("Chain 6"));
+        QCOMPARE(s.chain(fresh)->numPlugins(), 0);
+        QCOMPARE(s.chain(fresh)->outputsUsed().size(), 2);
+        r = ask({{"cmd", "add-chain"}, {"scene", 0}, {"copy", 1}, {"at", 2}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        const int copy = r.value("chain").toInt(-1);
+        QCOMPARE(copy, 6);
+        QCOMPARE(s.perf.scenes[0].chains.indexOf(copy), 2);
+        QCOMPARE(s.chain(copy)->name, QString("Slap 2"));
+        QCOMPARE(s.chain(copy)->numPlugins(), s.chain(1)->numPlugins());
+        QCOMPARE(s.chain(copy)->wires.size(), s.chain(1)->wires.size());
+        QCOMPARE(s.chain(copy)->pedal, 0); // Slap keeps its own
+        QCOMPARE(s.chain(1)->pedal, 7);
+        // A pedal given to it is taken from the chain that had it.
+        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"pedal", 7}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.chain(copy)->pedal, 7);
+        QCOMPARE(s.chain(1)->pedal, 0);
+        r = ask({{"cmd", "set-chain"}, {"chain", 1}, {"pedal", 7}});
+        QCOMPARE(s.chain(1)->pedal, 7);
+        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"name", "Slap Bright"}, {"display", "SLB"}, {"warm", "Punk"},
+                 {"on_select", QJsonArray{"Effect 1 = on"}}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        const ChainInfo* bright = s.chain(copy);
+        QCOMPARE(bright->name, QString("Slap Bright"));
+        QCOMPARE(bright->display, QString("SLB"));
+        QCOMPARE(bright->warm, QString("Punk"));
+        QCOMPARE(bright->onSelect, QStringList{"Effect 1 = on"});
+        r = ask({{"cmd", "set-chain"}, {"chain", copy}, {"name", "Punk"}});
+        QVERIFY(!ok(r));
+        // Played: it is the chain the engine says is playing, its action done.
+        link.request({{"cmd", "do"}, {"action", "Effect 1 = off"}});
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.control("Effect 1")->value, 0.0, 3000);
+        s.select(copy);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, copy, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.control("Effect 1")->value, 1.0, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.warmChain(), 0, 3000);
+        r = ask({{"cmd", "move-chain"}, {"chain", copy}, {"scene", 0}, {"at", 0}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.scenes[0].chains.first(), copy);
+        QCOMPARE(s.status.selected, copy);
+        // Not while it plays; then out, and back with its number.
+        r = ask({{"cmd", "remove-chain"}, {"chain", copy}, {"token", "bright"}});
+        QVERIFY(!ok(r));
+        QVERIFY2(r.value("error").toString().contains("playing"), qPrintable(r.value("error").toString()));
+        s.select(1);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, 1, 3000);
+        r = ask({{"cmd", "remove-chain"}, {"chain", copy}, {"token", "bright"}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QVERIFY(!s.chain(copy));
+        QCOMPARE(s.perf.scenes[0].chains.size(), 6);
+        r = ask({{"cmd", "restore-chain"}, {"token", "bright"}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(r.value("chain").toInt(), copy);
+        QCOMPARE(s.perf.scenes[0].chains.first(), copy);
+        QCOMPARE(s.chain(copy)->name, QString("Slap Bright"));
+        // A scene copied: every chain, with new numbers and the pedals kept.
+        r = ask({{"cmd", "add-scene"}, {"copy", 0}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(r.value("scene").toInt(), 1);
+        QCOMPARE(s.perf.scenes.size(), 2);
+        QCOMPARE(s.perf.scenes[1].name, QString("Cue Template 2"));
+        QCOMPARE(s.perf.scenes[1].chains.size(), 7);
+        const int other = s.perf.scenes[1].chains[2];
+        QCOMPARE(s.chain(other)->name, QString("Slap"));
+        QCOMPARE(s.chain(other)->pedal, 7);
+        s.select(other);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.scene, 1, 3000);
+        QCOMPARE(s.status.selected, other);
+        r = ask({{"cmd", "remove-scene"}, {"scene", 1}, {"token", "copy"}});
+        QVERIFY(!ok(r));
+        s.select(1);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.scene, 0, 3000);
+        r = ask({{"cmd", "set-scene"}, {"scene", 1}, {"name", "Chorus"}, {"display", "CHO"}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.scenes[1].display, QString("CHO"));
+        r = ask({{"cmd", "remove-scene"}, {"scene", 1}, {"token", "copy"}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.scenes.size(), 1);
+        QVERIFY(!s.chain(other));
+        r = ask({{"cmd", "restore-scene"}, {"token", "copy"}});
+        QVERIFY2(ok(r), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.scenes.size(), 2);
+        QCOMPARE(s.perf.scenes[1].name, QString("Chorus"));
+        QCOMPARE(s.perf.scenes[1].chains.size(), 7);
         QCOMPARE(s.status.selected, 1);
 
         // The engine stops: the app says so and waits; it starts again: the app is back.

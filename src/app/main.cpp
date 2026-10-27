@@ -15,6 +15,7 @@
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
+#include "app/arrange.h"
 #include "app/build.h"
 #include "app/config.h"
 #include "app/cpu.h"
@@ -55,6 +56,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -124,7 +126,9 @@ struct Window {
         }
     }
     double avgUs() const { return cycles ? ns / 1000.0 / cycles : 0.0; }
-    double chainAvgUs(size_t i) const { return chainBlocks[i] ? chainNs[i] / 1000.0 / chainBlocks[i] : 0.0; }
+    // A chain added since the window began has nothing in it yet.
+    double chainAvgUs(size_t i) const { return i < chainBlocks.size() && chainBlocks[i] ? chainNs[i] / 1000.0 / chainBlocks[i] : 0.0; }
+    double chainMaxUs(size_t i) const { return i < chainMaxNs.size() ? chainMaxNs[i] / 1000.0 : 0.0; }
 };
 
 // Takes a sample: the counters' growth since the last one, and the peaks
@@ -204,7 +208,7 @@ std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
         if (state == ChainState::Idle)
             continue;
         std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), w.chainAvgUs(i),
-                      w.chainMaxNs[i] / 1000.0);
+                      w.chainMaxUs(i));
         s += buf;
     }
     return s;
@@ -240,7 +244,7 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
     j["buffer_ms"] = periodNs / 1e6 * config.audio.periods;
     const int preset = show.preset(), scene = show.scene();
     j["scene"] = {{"index", scene}, {"name", show.sceneName(scene)}};
-    j["selected"] = {{"index", preset}, {"name", show.presetName(preset)}};
+    j["selected"] = {{"index", preset}, {"name", show.presetName(preset)}, {"chain", show.presetChain(preset)}};
     j["muted"] = show.muted();
     j["display"] = show.display();
     Json leds = Json::array();
@@ -256,7 +260,7 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
         chains.push_back({{"name", rig.chainNames[i]},
                           {"state", toString(static_cast<ChainState>(engine.stats(i).state.load()))},
                           {"avg_us", w.chainAvgUs(i)},
-                          {"max_us", w.chainMaxNs[i] / 1000.0},
+                          {"max_us", w.chainMaxUs(i)},
                           {"bypassed", Json::array()}});
     for (size_t k = 0; k < rig.plugins.size(); ++k)
         if (rig.bypassedNow[k].load(std::memory_order_relaxed))
@@ -473,6 +477,41 @@ std::unique_ptr<PluginScanner> makeScanner();
 Json pluginsJson(const PluginScanner& scanner);
 Json scanProgressJson(const PluginScanner& scanner);
 
+// Empty chains the engine keeps ready for chains added while it plays: it
+// never adds one once it runs. A chain taken out leaves its own spare.
+constexpr size_t kSpareChains = 64;
+
+// What removals took out, by the token the app gave, so an undo can put it
+// back. Past 100, the oldest go first.
+template <typename T>
+struct Kept {
+    std::map<std::string, T> items;
+    std::deque<std::string> order;
+    void keep(const std::string& token, T item) {
+        if (token.empty())
+            return;
+        if (!items.count(token))
+            order.push_back(token);
+        items[token] = std::move(item);
+        if (order.size() > 100) {
+            items.erase(order.front());
+            order.pop_front();
+        }
+    }
+    const T* find(const std::string& token) const {
+        const auto it = items.find(token);
+        return it == items.end() ? nullptr : &it->second;
+    }
+};
+
+// A message from the show about something the app made has no file line
+// to start with.
+std::string tidy(std::string why) {
+    while (why.rfind(": ", 0) == 0)
+        why.erase(0, 2);
+    return why;
+}
+
 struct RunOptions {
     bool noAudio = false;   // --audio none: no sound card, the engine on a timer
     std::string socket;     // --socket PATH; empty: the default
@@ -483,9 +522,14 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     Config config;
     if (!load(path, config))
         return 2;
-    Rig rig;
     std::string err;
-    if (!buildRig(config, rig, &err)) {
+    // Each chain with a preset of its own, as a .cue has them, so chains can
+    // be added, moved and taken out while it plays. An INI config whose
+    // presets share a chain plays as it is.
+    if (Config arranged = config; presetsToChains(arranged, &err))
+        config = std::move(arranged);
+    Rig rig;
+    if (!buildRig(config, rig, &err, kSpareChains)) {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
@@ -567,28 +611,33 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     EditorHost editors;
     // Changes to the chains while they play.
     LiveRig live{config, rig, show, &editors};
-    // What removals took out, by the token the app gave, so an undo can put
-    // them back. The oldest go first.
     // The plug-ins on this machine, scanned when the app asks.
     auto scanner = makeScanner();
-    std::map<std::string, Removed> removedPlugins;
-    std::deque<std::string> removedOrder;
-    // The performance as the app sees it: the file's, and which plug-ins
-    // have a side-chain input to wire into.
+    Kept<Removed> removedPlugins;
+    Kept<RemovedChain> removedChains;
+    Kept<RemovedScene> removedScenes;
+    // The performance as the app sees it: the file's, each chain's number
+    // (its index, which stays while it plays), and which plug-ins have a
+    // side-chain input to wire into.
     auto livePerformance = [&](Json& out, std::string* why) {
         std::string text;
         if (!performanceText(config, text, why))
             return false;
         out = Json::parse(text);
-        int c = 0;
-        for (Json& scene : out.at("scenes"))
-            for (Json& chain : scene.at("chains")) {
+        Json& scenes = out.at("scenes");
+        for (size_t s = 0; s < scenes.size() && s < config.scenes.size(); ++s)
+            for (Json& chain : scenes[s].at("chains")) {
+                const std::string name = chain.value("name", std::string());
+                int id = -1;
+                for (const ChainSpec& cs : config.scenes[s].chains)
+                    if (lower(cs.name) == lower(name))
+                        id = cs.id;
+                chain["index"] = id;
                 int slot = 0;
                 for (Json& block : chain.at("blocks")) {
-                    if (Processor* p = rig.at(c, slot++); p && p->hasSidechain())
+                    if (Processor* p = rig.at(id, slot++); p && p->hasSidechain())
                         block["has_key"] = true;
                 }
-                ++c;
             }
         return true;
     };
@@ -636,6 +685,15 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (index < 0 || index >= static_cast<int>(show.numPresets()))
                     return refuse("there is no chain number " + std::to_string(index + 1));
                 show.selectPreset(index);
+            } else if (req.contains("chain") && req.at("chain").is_number_integer()) {
+                // By the chain's own number, as performance lists it.
+                const int chain = req.at("chain").get<int>();
+                for (int i = 0; i < static_cast<int>(show.numPresets()) && index < 0; ++i)
+                    if (show.presetChain(i) == chain)
+                        index = i;
+                if (index < 0)
+                    return refuse("there is no chain number " + std::to_string(chain + 1));
+                show.selectPreset(index);
             } else {
                 const std::string name = req.value("chain", "");
                 for (int i = 0; i < static_cast<int>(show.numPresets()) && index < 0; ++i)
@@ -645,7 +703,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     return refuse("no chain named '" + name + "'");
                 show.selectPreset(index);
             }
-            reply["selected"] = {{"index", show.preset()}, {"name", show.presetName(show.preset())}};
+            reply["selected"] = {{"index", show.preset()}, {"name", show.presetName(show.preset())}, {"chain", show.presetChain(show.preset())}};
         } else if (cmd == "do") {
             if (!show.run(req.at("action").get<std::string>(), &err))
                 return refuse(err);
@@ -735,10 +793,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         } else if (cmd == "add" || cmd == "remove" || cmd == "restore" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
             // restore: the chain is the one it was taken out of.
             const std::string token = req.value("token", std::string());
-            const auto taken = removedPlugins.find(token);
-            if (cmd == "restore" && taken == removedPlugins.end())
+            const Removed* taken = removedPlugins.find(token);
+            if (cmd == "restore" && !taken)
                 return refuse("nothing taken out is kept as '" + token + "'");
-            const int chain = cmd == "restore" ? taken->second.chain : req.at("chain").get<int>();
+            const int chain = cmd == "restore" ? taken->chain : req.at("chain").get<int>();
             ChainSpec* cs = chainSpec(config, chain);
             if (!cs)
                 return refuse("there is no chain number " + std::to_string(chain + 1));
@@ -781,19 +839,11 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 Removed removed;
                 if (!removePlugin(live, chain, req.at("slot").get<size_t>(), &removed, &why))
                     return refuse(why);
-                if (!token.empty()) {
-                    if (!removedPlugins.count(token))
-                        removedOrder.push_back(token);
-                    removedPlugins[token] = std::move(removed);
-                    if (removedOrder.size() > 100) {
-                        removedPlugins.erase(removedOrder.front());
-                        removedOrder.pop_front();
-                    }
-                }
+                removedPlugins.keep(token, std::move(removed));
             } else if (cmd == "restore") {
-                if (!restorePlugin(live, taken->second, &why))
+                if (!restorePlugin(live, *taken, &why))
                     return refuse(why);
-                reply["slot"] = taken->second.slot;
+                reply["slot"] = taken->slot;
             } else if (cmd == "wire" || cmd == "unwire") {
                 WireSpec w;
                 if (!wireOf(req, config, *cs, w, &why))
@@ -834,6 +884,101 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 reply["performance"] = now;
                 service.publish("performance", now);
             }
+        } else if (cmd == "add-chain" || cmd == "remove-chain" || cmd == "restore-chain" || cmd == "set-chain" || cmd == "move-chain" ||
+                   cmd == "add-scene" || cmd == "remove-scene" || cmd == "restore-scene" || cmd == "set-scene" || cmd == "move-scene") {
+            const std::string token = req.value("token", std::string());
+            auto text = [&](const char* key) { return std::optional<std::string>(req.at(key).get<std::string>()); };
+            // A number, or none (null).
+            auto number = [&](const char* key, int none) { return std::optional<int>(req.at(key).is_null() ? none : req.at(key).get<int>()); };
+            const auto warningsBefore = show.warnings();
+            std::string why;
+            bool ok = false;
+            if (cmd == "add-chain") {
+                NewChain what;
+                what.scene = req.at("scene").get<int>();
+                what.at = req.value("at", -1);
+                what.name = req.value("name", std::string());
+                what.copy = req.value("copy", -1);
+                what.input = req.value("input", std::string());
+                int id = -1;
+                if ((ok = addChain(live, what, &id, &why)))
+                    reply["chain"] = id;
+            } else if (cmd == "remove-chain") {
+                RemovedChain removed;
+                if ((ok = removeChain(live, req.at("chain").get<int>(), &removed, &why)))
+                    removedChains.keep(token, std::move(removed));
+            } else if (cmd == "restore-chain") {
+                const RemovedChain* removed = removedChains.find(token);
+                if (!removed)
+                    return refuse("nothing taken out is kept as '" + token + "'");
+                int id = -1;
+                if ((ok = restoreChain(live, *removed, &id, &why)))
+                    reply["chain"] = id;
+            } else if (cmd == "set-chain") {
+                ChainSettings set;
+                if (req.contains("name"))
+                    set.name = text("name");
+                if (req.contains("display"))
+                    set.display = text("display");
+                if (req.contains("warm"))
+                    set.warm = text("warm");
+                if (req.contains("pedal"))
+                    set.pedal = number("pedal", 0);
+                if (req.contains("program"))
+                    set.program = number("program", -1);
+                if (req.contains("on_select"))
+                    set.onSelect = req.at("on_select").get<std::vector<std::string>>();
+                ok = setChain(live, req.at("chain").get<int>(), set, &why);
+            } else if (cmd == "move-chain") {
+                ok = moveChain(live, req.at("chain").get<int>(), req.at("scene").get<int>(), req.value("at", -1), &why);
+            } else if (cmd == "add-scene") {
+                NewScene what;
+                what.at = req.value("at", -1);
+                what.name = req.value("name", std::string());
+                what.copy = req.value("copy", -1);
+                int index = -1;
+                std::vector<int> ids;
+                if ((ok = addScene(live, what, &index, &ids, &why))) {
+                    reply["scene"] = index;
+                    reply["chains"] = ids;
+                }
+            } else if (cmd == "remove-scene") {
+                RemovedScene removed;
+                if ((ok = removeScene(live, req.at("scene").get<int>(), &removed, &why)))
+                    removedScenes.keep(token, std::move(removed));
+            } else if (cmd == "restore-scene") {
+                const RemovedScene* removed = removedScenes.find(token);
+                if (!removed)
+                    return refuse("nothing taken out is kept as '" + token + "'");
+                if ((ok = restoreScene(live, *removed, &why)))
+                    reply["scene"] = std::min<size_t>(removed->at, config.scenes.size() - 1);
+            } else if (cmd == "set-scene") {
+                SceneSettings set;
+                if (req.contains("name"))
+                    set.name = text("name");
+                if (req.contains("display"))
+                    set.display = text("display");
+                if (req.contains("pedal"))
+                    set.pedal = number("pedal", 0);
+                if (req.contains("program"))
+                    set.program = number("program", -1);
+                ok = setScene(live, req.at("scene").get<int>(), set, &why);
+            } else {
+                ok = moveScene(live, req.at("scene").get<int>(), req.value("at", -1), &why);
+            }
+            if (!ok)
+                return refuse(tidy(why));
+            // What the show now thinks may be a mistake: a pedal two things use.
+            Json warnings = Json::array();
+            for (const auto& w : show.warnings())
+                if (std::find(warningsBefore.begin(), warningsBefore.end(), w) == warningsBefore.end())
+                    warnings.push_back(tidy(w));
+            reply["warnings"] = warnings;
+            Json now;
+            if (livePerformance(now, &why)) {
+                reply["performance"] = now;
+                service.publish("performance", now);
+            }
         } else if (cmd == "plugins") {
             // The user's folders first, then a scan if asked for.
             std::string why;
@@ -853,7 +998,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         } else {
             refuse("unknown command '" + cmd +
                    "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
-                   "place, plugins, quit, subscribe, unsubscribe)");
+                   "place, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
+                   "plugins, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {

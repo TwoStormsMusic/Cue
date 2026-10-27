@@ -79,6 +79,11 @@ struct TapSpec {
 
 struct ChainSpec {
     std::string name;
+    // The engine's number for it while it plays, which stays the same when
+    // chains are added, moved or taken out: the rig numbers the chains it
+    // loads scene by scene, in order, and one added later takes a spare.
+    // -1 until then.
+    int id = -1;
     // The performance input that feeds it: its name, or in1, in2...; empty
     // = the first. finishConfig finds inputIndex.
     std::string input;

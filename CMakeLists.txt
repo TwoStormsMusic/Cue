@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cue VERSION 0.8.0 LANGUAGES C CXX)
+project(cue VERSION 0.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,6 +85,7 @@ add_executable(cue
   src/app/main.cpp
   src/app/build.cpp
   src/app/edit.cpp
+  src/app/arrange.cpp
   src/app/config.cpp
   src/app/cuefile.cpp
   src/app/service.cpp
@@ -140,6 +141,7 @@ if(CUE_BUILD_APP)
       src/gui/tunerview.cpp
       src/gui/board.cpp
       src/gui/chainview.cpp
+      src/gui/chainsettings.cpp
       src/gui/pluginsview.cpp
       src/gui/settingsview.cpp
       src/gui/mainwindow.cpp
@@ -158,7 +160,7 @@ endif()
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp tests/test_scan.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/scan.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp tests/test_scan.cpp tests/test_arrange.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/scan.cpp src/app/build.cpp src/app/edit.cpp src/app/arrange.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

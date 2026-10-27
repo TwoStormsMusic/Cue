@@ -258,6 +258,8 @@ void ChainView::showChain(int chain) {
     // Another than the one playing stays shown when the playing one changes.
     followPlaying_ = chain == s.playing();
     if (chain != chain_) {
+        commitEntry();
+        closeMenu();
         chain_ = chain;
         selectSlot(-1);
         fit();
@@ -348,7 +350,10 @@ void ChainView::setParam(const QJsonObject& param, double value, bool done) {
 }
 
 void ChainView::wheelEvent(QWheelEvent* e) {
-    if (listRect_.contains(e->position())) {
+    if (menu_) {
+        menuScroll_ = std::clamp(menuScroll_ - e->angleDelta().y() / 120.0 * 42 * u, 0.0, menuMax_);
+        update();
+    } else if (listRect_.contains(e->position())) {
         scroll_ = std::clamp(scroll_ - e->angleDelta().y() / 120.0 * 60 * u, 0.0, scrollMax_);
         update();
     } else if (canvasRect_.contains(e->position())) {
@@ -402,6 +407,17 @@ void ChainView::fit() {
 }
 
 bool ChainView::event(QEvent* e) {
+    if (e->type() == QEvent::TouchBegin) {
+        // A finger on a line being typed in is the line's, as a mouse.
+        auto* te = static_cast<QTouchEvent*>(e);
+        if (!te->points().isEmpty() && qobject_cast<QLineEdit*>(childAt(te->points().first().position().toPoint()))) {
+            e->ignore();
+            return false;
+        }
+    }
+    // A tap anywhere else keeps what was typed.
+    if ((e->type() == QEvent::MouseButtonPress || e->type() == QEvent::TouchBegin) && !entryFor_.isEmpty())
+        commitEntry();
     switch (e->type()) {
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
@@ -473,9 +489,10 @@ bool ChainView::event(QEvent* e) {
 
 void ChainView::paint(QPainter& p) {
     const Performance& perf = s.perf;
+    entryPlaced_ = false;
     QString subtitle;
     if (const ChainInfo* c = s.chain(chain_); c && c->scene < perf.scenes.size())
-        subtitle = "Scene " + perf.scenes[c->scene].name;
+        subtitle = "Scene: " + perf.scenes[c->scene].name;
     const double top = header(p, perf.valid ? perf.name : "Cue", subtitle, enginePills(),
                               {{"undo", "Undo", [this] { s.undo(); }, s.canUndo() ? color::text : color::dim},
                                {"redo", "Redo", [this] { s.redo(); }, s.canRedo() ? color::text : color::dim},
@@ -501,9 +518,10 @@ void ChainView::paint(QPainter& p) {
         p.setPen(color::muted);
         p.setFont(typeface(Face::Text, 16 * u));
         p.drawText(mid, Qt::AlignCenter, s.perf.valid ? "No chain playing yet" : "Loading the performance…");
+        drawMenu(p);
         return;
     }
-    // Title, then the canvas, then the legend.
+    // Title, then the canvas, then the chain's settings.
     p.setPen(color::text);
     p.setFont(typeface(Face::Display, 30 * u, QFont::DemiBold));
     const QString title = "Chain: " + c->name;
@@ -524,63 +542,18 @@ void ChainView::paint(QPainter& p) {
     }
     draw::text(p, QRectF(mid.left() + titleW + 14 * u, mid.top(), std::max(0.0, right - mid.left() - titleW - 14 * u), 40 * u),
                Qt::AlignLeft | Qt::AlignVCenter, what);
-    const double legendH = 64 * u;
-    canvas(p, QRectF(mid.left(), mid.top() + 54 * u, mid.width(), mid.height() - 54 * u - legendH - 10 * u), *c);
-    legend(p, QRectF(mid.left(), mid.bottom() - legendH, mid.width(), legendH));
+    const double stripH = stripHeight(*c, mid.width());
+    canvas(p, QRectF(mid.left(), mid.top() + 54 * u, mid.width(), mid.height() - 54 * u - stripH - 14 * u), *c);
+    settingsStrip(p, QRectF(mid.left(), mid.bottom() - stripH, mid.width(), stripH), *c);
     panel(p, QRectF(W - panelW, top, panelW, H - top), *c);
-}
-
-void ChainView::sidebar(QPainter& p, const QRectF& r) {
-    const double pad = 14 * u;
-    double y = r.top() + 18 * u;
-    QFont label = typeface(Face::Text, 12 * u, QFont::DemiBold);
-    label.setLetterSpacing(QFont::AbsoluteSpacing, 1.5 * u);
-    p.setFont(label);
-    p.setPen(color::muted);
-    p.drawText(QRectF(r.left() + pad, y, r.width(), 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "CHAINS");
-    y += 28 * u;
-    const int playing = s.playing(), warm = s.status.valid ? s.status.warmChain() : -1;
-    const double rowH = 44 * u;
-    for (int sc = 0; sc < s.perf.scenes.size(); ++sc) {
-        const SceneInfo& scene = s.perf.scenes[sc];
-        if (s.perf.scenes.size() > 1) {
-            p.setPen(color::text2);
-            p.setFont(typeface(Face::Text, 14 * u, QFont::DemiBold));
-            draw::text(p, QRectF(r.left() + pad, y, r.width() - 2 * pad, 30 * u), Qt::AlignLeft | Qt::AlignVCenter, "Scene: " + scene.name);
-            y += 32 * u;
-        }
-        for (int index : scene.chains) {
-            const ChainInfo* c = s.chain(index);
-            if (!c || y > r.bottom() - rowH)
-                continue;
-            const QRectF row(r.left() + 10 * u, y, r.width() - 20 * u, rowH - 4 * u);
-            const QString id = QString("show %1").arg(index);
-            const bool shown = index == chain_;
-            if (shown || isPressed(id))
-                draw::card(p, row, 8 * u, shown ? QColor(0x2A, 0x1A, 0x0A) : color::raised, QColor());
-            p.setPen(shown ? color::orange : color::text);
-            p.setFont(typeface(Face::Text, 16 * u, shown ? QFont::DemiBold : QFont::Normal));
-            const QString tag = index == playing ? "playing" : index == warm ? "warm" : QString();
-            const double tagW = tag.isEmpty() ? 0 : 64 * u;
-            draw::text(p, row.adjusted(14 * u, 0, -tagW - 8 * u, 0), Qt::AlignLeft | Qt::AlignVCenter, c->name);
-            if (!tag.isEmpty()) {
-                p.setPen(index == playing ? color::orange : color::muted);
-                p.setFont(typeface(Face::Text, 12 * u));
-                p.drawText(row.adjusted(0, 0, -10 * u, 0), Qt::AlignRight | Qt::AlignVCenter, tag);
-            }
-            // A tap shows the chain; a double tap plays it too.
-            hit(id, row, [this, id, index] {
-                if (doubleTap(id) && index != s.playing()) {
-                    s.select(index);
-                    followPlaying_ = true;
-                } else {
-                    followPlaying_ = index == s.playing();
-                }
-                showChain(index);
-            });
-            y += rowH;
-        }
-    }
+    // A menu goes over everything; a line being typed in whose field is no
+    // longer drawn goes.
+    drawMenu(p);
+    if (!entryFor_.isEmpty() && !entryPlaced_)
+        QTimer::singleShot(0, this, [this] {
+            if (!entryPlaced_)
+                endEntry();
+        });
 }
 
 QPointF ChainView::toScreen(QPointF board) const { return origin(scaleNow()) + (board - boardTopLeft_) * scaleNow(); }
@@ -993,6 +966,13 @@ void ChainView::selectWire(int wire) {
 }
 
 bool ChainView::deselect() {
+    // A menu open, or a line being typed in, goes first.
+    if (menu_ || !entryFor_.isEmpty()) {
+        closeMenu();
+        entryCancelled_ = true;
+        endEntry();
+        return true;
+    }
     const bool any = slot_ >= 0 || wireOn_ || picker_ != Picker::None;
     letGo_.stop();
     selectSlot(-1);
@@ -1393,14 +1373,25 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
     const double w = r.width() - 2 * pad;
     listRect_ = {};
     if (!pi) {
+        // How the board works, then what its shapes and colours mean.
         p.setPen(color::muted);
         p.setFont(typeface(Face::Text, 15 * u));
-        p.drawText(QRectF(r.left() + pad, y, w, r.bottom() - y - 20 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+        const QRectF help(r.left() + pad, y, w, r.bottom() - y - 20 * u);
+        QRectF used;
+        p.drawText(help, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
                    "Tap a plug-in to see its parameters; tap it twice to switch it on or off.\n\n"
                    "Drag a plug-in to move it. Drag from a dot to draw a wire: inputs are on the left, outputs on the right, and the "
                    "small triangle is a side-chain input (key).\n\n"
                    "Tap a wire to set its level, width and pan; its + puts a plug-in on it. + Plug-in adds one to the board.\n\n"
-                   "Delete takes away what is selected, and undo puts it back.");
+                   "Delete takes away what is selected, and undo puts it back.",
+                   &used);
+        y = used.bottom() + 26 * u;
+        if (y + 120 * u < r.bottom()) {
+            p.setFont(label);
+            p.setPen(color::muted);
+            p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "KEY");
+            legend(p, QRectF(r.left() + pad, y + 24 * u, w, r.bottom() - y - 44 * u));
+        }
         if (search_)
             search_->hide();
         return;

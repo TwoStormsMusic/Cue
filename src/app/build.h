@@ -26,13 +26,14 @@ struct RigPlugin {
 
 // Everything loaded from a config: the engine with its chains, plus the
 // plug-ins that need main-thread servicing. Chains are numbered scene by
-// scene, in config order, as the show expects.
+// scene, in config order, as loaded; chains added later take spare ones
+// (ChainSpec::id says which).
 struct Rig {
     std::unique_ptr<Engine> engine;
     std::vector<ClapProcessor*> clapPlugins;
     std::vector<Vst3Processor*> vst3Plugins;
-    std::vector<RigPlugin> plugins;
-    std::vector<std::string> chainNames;
+    std::vector<RigPlugin> plugins; // by chain, then slot
+    std::vector<std::string> chainNames; // by engine chain; empty for a spare
     // Whether each of plugins is bypassed now, as the show or the app last
     // switched it. Any thread.
     std::unique_ptr<std::atomic<bool>[]> bypassedNow;
@@ -60,8 +61,9 @@ std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* erro
 
 // Loads every plug-in of every chain and activates the engine. Prints what
 // it loads. On failure returns false with the reason. A plug-in's
-// `sidechain =` becomes a wire into its key.
-bool buildRig(Config& config, Rig& rig, std::string* error);
+// `sidechain =` becomes a wire into its key. Each chain gets its id, and
+// the engine spareChains empty ones besides, for chains added as it plays.
+bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains = 0);
 
 // A plug-in for a chain that is playing: loaded, activated for the engine,
 // with its state and params set. Not yet in any chain.

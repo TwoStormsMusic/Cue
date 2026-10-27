@@ -13,6 +13,12 @@
 // it. Delete takes away what is selected. Undo takes back what was changed
 // here, wiring and plug-ins added or taken out too. Save keeps it all in
 // the .cue file.
+//
+// The column on the left lists the chains of one scene (picked at its top)
+// and makes new chains and scenes, or copies chains from other scenes. Under
+// the board are the shown chain's settings (its name, pedal, display, the
+// chain kept warm while it plays and what selecting it does) or its scene's;
+// each can be copied, moved or taken out there (chainsettings.cpp).
 
 #include "gui/board.h"
 #include "gui/surface.h"
@@ -24,6 +30,8 @@
 #include <QPainterPath>
 #include <QSet>
 #include <QTimer>
+
+#include <optional>
 
 class QLineEdit;
 
@@ -73,6 +81,35 @@ public:
     void setShowAll(bool all);
     void setShown(const QVector<int>& ids);
 
+    // The scene the column lists: the shown chain's. Showing another shows
+    // its chain playing, else its first.
+    int shownScene() const;
+    void showScene(int scene);
+    // What the settings under the board are for.
+    enum class Strip { Chain, Scene };
+    Strip strip() const { return strip_; }
+    void setStrip(Strip what);
+    // Chains and scenes, asked of the engine and kept for undo. A new chain
+    // goes into the shown scene (copy: a chain to copy, from any scene); a
+    // new scene after the shown one (copy: a scene to copy). settings are
+    // as set-chain and set-scene take them (docs/control.md).
+    void newChain(int copy = -1);
+    void removeChain(int chain);
+    void setChain(int chain, const QJsonObject& settings);
+    void moveChain(int chain, int scene, int at);
+    void newScene(int copy = -1);
+    void removeScene(int scene);
+    void setScene(int scene, const QJsonObject& settings);
+    void moveScene(int scene, int at);
+    // The menu open (a field's choices), its items as listed, and picking one.
+    bool menuOpen() const { return menu_.has_value(); }
+    QStringList menuItems() const;
+    void pickMenu(int item);
+    // A field being typed in (a name, a display, an action): where, and
+    // what typing there and pressing Enter does.
+    QString entryField() const;
+    void typeEntry(const QString& text);
+
 protected:
     void paint(QPainter& p) override;
     void showEvent(QShowEvent* e) override;
@@ -84,6 +121,35 @@ private:
     void sidebar(QPainter& p, const QRectF& r);
     void canvas(QPainter& p, const QRectF& r, const ChainInfo& c);
     void legend(QPainter& p, const QRectF& r);
+    // The settings under the board, and their height.
+    double stripHeight(const ChainInfo& c, double width) const;
+    void settingsStrip(QPainter& p, const QRectF& r, const ChainInfo& c);
+    void chainFields(QPainter& p, const QRectF& r, const ChainInfo& c);
+    void sceneFields(QPainter& p, const QRectF& r, int scene);
+    // A setting: its label, and a box with its value that a tap opens (a
+    // menu, with ▾, or typing).
+    void field(QPainter& p, const QString& id, const QRectF& r, const QString& label, const QString& value, bool menu,
+               std::function<void()> tap);
+    struct MenuItem {
+        QString text, detail;
+        bool checked = false;
+        std::function<void()> pick; // none: said, not picked
+    };
+    void openMenu(const QString& id, const QRectF& under, QVector<MenuItem> items);
+    void closeMenu();
+    void drawMenu(QPainter& p);
+    void startEntry(const QString& id, const QString& text, const QString& placeholder, int maxLength,
+                    std::function<void(const QString&)> done);
+    void placeEntry(const QString& id, const QRectF& r);
+    // Keeps what was typed (Enter, or a tap elsewhere); endEntry lets it go.
+    void commitEntry();
+    void endEntry();
+    // Asks for a change to the chains or scenes; what it warns of is said.
+    void arrange(const QJsonObject& request, const QString& failed, std::function<void(const QJsonObject&)> done);
+    // The settings named, as they are now: what an undo sets back.
+    QJsonObject chainNow(const ChainInfo& c, const QJsonObject& settings) const;
+    QJsonObject sceneNow(int scene, const QJsonObject& settings) const;
+    QVector<MenuItem> pedalItems(int now, const std::function<void(int)>& pick, const QString& self, bool scene) const;
     void panel(QPainter& p, const QRectF& r, const ChainInfo& c);
     void requestPlugin();
     void setParam(const QJsonObject& param, double value, bool done);
@@ -191,6 +257,22 @@ private:
     double dragY_ = 0, dragGrab_ = 0;
     QSet<QString> closed_, opened_; // sections folded or unfolded by hand
     QLineEdit* search_ = nullptr;
+
+    // The chains and scenes.
+    Strip strip_ = Strip::Chain;
+    struct Menu {
+        QString id; // the field it hangs from
+        QRectF under;
+        QVector<MenuItem> items;
+    };
+    std::optional<Menu> menu_;
+    double menuScroll_ = 0, menuMax_ = 0, menuScrollFrom_ = 0;
+    QPointF menuPress_;
+    bool menuPressing_ = false, menuMoved_ = false;
+    QLineEdit* entry_ = nullptr;
+    QString entryFor_;
+    bool entryPlaced_ = false, entryCancelled_ = false;
+    std::function<void(const QString&)> entryDone_;
 };
 
 } // namespace cue::gui
