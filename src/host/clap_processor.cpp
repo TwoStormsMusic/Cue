@@ -96,8 +96,10 @@ std::vector<ClapPluginInfo> scanClapFile(const std::string& path, std::string* e
         const clap_plugin_descriptor_t* d = f->get_plugin_descriptor(f, i);
         if (!d)
             continue;
-        result.push_back({path, d->id ? d->id : "", d->name ? d->name : "", d->vendor ? d->vendor : "",
-                          d->version ? d->version : ""});
+        ClapPluginInfo info{path, d->id ? d->id : "", d->name ? d->name : "", d->vendor ? d->vendor : "", d->version ? d->version : "", {}};
+        for (const char* const* f = d->features; f && *f; ++f)
+            info.features.push_back(*f);
+        result.push_back(std::move(info));
     }
     return result;
 }

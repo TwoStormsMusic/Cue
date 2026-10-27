@@ -16,6 +16,7 @@ namespace cue {
 
 struct ClapPluginInfo {
     std::string path, id, name, vendor, version;
+    std::vector<std::string> features; // "audio-effect", "delay", ...
 };
 
 // Lists the plug-ins inside one .clap file.

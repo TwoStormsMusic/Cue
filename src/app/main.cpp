@@ -23,6 +23,7 @@
 #include "app/doctor.h"
 #include "app/edit.h"
 #include "app/rpp.h"
+#include "app/scan.h"
 #include "control/show.h"
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
@@ -468,6 +469,10 @@ bool load(const std::string& path, Config& config) {
     return true;
 }
 
+std::unique_ptr<PluginScanner> makeScanner();
+Json pluginsJson(const PluginScanner& scanner);
+Json scanProgressJson(const PluginScanner& scanner);
+
 struct RunOptions {
     bool noAudio = false;   // --audio none: no sound card, the engine on a timer
     std::string socket;     // --socket PATH; empty: the default
@@ -564,6 +569,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     LiveRig live{config, rig, show, &editors};
     // What removals took out, by the token the app gave, so an undo can put
     // them back. The oldest go first.
+    // The plug-ins on this machine, scanned when the app asks.
+    auto scanner = makeScanner();
     std::map<std::string, Removed> removedPlugins;
     std::deque<std::string> removedOrder;
     // The performance as the app sees it: the file's, and which plug-ins
@@ -827,12 +834,26 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 reply["performance"] = now;
                 service.publish("performance", now);
             }
+        } else if (cmd == "plugins") {
+            // The user's folders first, then a scan if asked for.
+            std::string why;
+            if (req.contains("folders")) {
+                std::vector<std::string> folders;
+                for (const auto& d : req.at("folders"))
+                    folders.push_back(d.get<std::string>());
+                if (!scanner->setExtraFolders(folders, &why))
+                    return refuse(why);
+            }
+            const std::string scan = req.value("scan", std::string());
+            if (!scan.empty() && !scanner->start(scan, &why))
+                return refuse(why);
+            reply["plugins"] = pluginsJson(*scanner);
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
             refuse("unknown command '" + cmd +
                    "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
-                   "place, quit, subscribe, unsubscribe)");
+                   "place, plugins, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {
@@ -868,6 +889,11 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         editors.pump();
         // What edits replaced, now that the audio thread is done with it.
         engine.collect();
+        // A plug-in scan: how far it is, and what it found once it ends.
+        if (scanner->takeProgressed() && service.subscribed("scan"))
+            service.publish("scan", scanProgressJson(*scanner));
+        if (scanner->takeFinished() && service.subscribed("plugins"))
+            service.publish("plugins", pluginsJson(*scanner));
         EngineEvent ev;
         while (engine.nextEvent(ev)) {
         }
@@ -1602,6 +1628,83 @@ int cmdCtl(int argc, char** argv) {
     return 0;
 }
 
+// This program, to run its scan helper.
+std::string selfExe() {
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    return n > 0 ? std::string(buf, static_cast<size_t>(n)) : "cue";
+}
+
+std::unique_ptr<PluginScanner> makeScanner() {
+    return std::make_unique<PluginScanner>(std::vector<std::string>{selfExe(), "scan-file"}, PluginScanner::defaultCache(),
+                                           PluginScanner::defaultSettings());
+}
+
+// What the scan found, where it looked and how far it is, for the app.
+Json pluginsJson(const PluginScanner& scanner) {
+    const auto pr = scanner.progress();
+    const PluginFolders folders = scanner.folders();
+    Json j = {{"scanning", pr.scanning}, {"done", pr.done}, {"total", pr.total}, {"current", pr.current}, {"scanned_at", pr.scannedAt}};
+    j["folders"] = {{"clap", folders.clap}, {"vst3", folders.vst3}, {"extra", scanner.extraFolders()}};
+    Json files = Json::array();
+    for (const ScannedFile& f : scanner.files())
+        files.push_back(toJson(f));
+    j["files"] = files;
+    return j;
+}
+
+Json scanProgressJson(const PluginScanner& scanner) {
+    const auto pr = scanner.progress();
+    return {{"scanning", pr.scanning}, {"done", pr.done}, {"total", pr.total}, {"current", pr.current}, {"scanned_at", pr.scannedAt}};
+}
+
+// Every plug-in in the usual folders and the user's, each file in a helper.
+int cmdScanAll(bool all) {
+    auto scanner = makeScanner();
+    std::string err;
+    if (!scanner->start(all ? "all" : "changed", &err)) {
+        std::fprintf(stderr, "scan: %s\n", err.c_str());
+        return 1;
+    }
+    std::signal(SIGINT, onSignal);
+    std::string shown;
+    for (;;) {
+        const auto pr = scanner->progress();
+        if (!pr.scanning)
+            break;
+        if (g_quit) {
+            scanner->stop();
+            std::printf("\nstopped\n");
+            return 1;
+        }
+        if (pr.current != shown && !pr.current.empty()) {
+            shown = pr.current;
+            std::printf("[%zu/%zu] %s\n", pr.done + 1, pr.total, shown.c_str());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    size_t plugins = 0, skipped = 0;
+    for (const ScannedFile& f : scanner->files()) {
+        if (!f.error.empty()) {
+            ++skipped;
+            std::printf("skipped  %s: %s\n", f.path.c_str(), f.error.c_str());
+            continue;
+        }
+        for (const FoundPlugin& p : f.plugins) {
+            if (!p.error.empty()) {
+                ++skipped;
+                std::printf("skipped  %s (%s): %s\n", p.name.c_str(), f.path.c_str(), p.error.c_str());
+                continue;
+            }
+            ++plugins;
+            std::printf("%-5s %-32s %-20s %s%s\n", p.format == "clap" ? "CLAP" : "VST3", p.name.c_str(), p.vendor.c_str(),
+                        p.bridged ? "(yabridge) " : "", (p.path + (p.format == "clap" ? "#" + p.id : "")).c_str());
+        }
+    }
+    std::printf("%zu plug-in(s), %zu skipped; kept in %s\n", plugins, skipped, PluginScanner::defaultCache().c_str());
+    return 0;
+}
+
 int cmdScan(const std::string& path) {
     std::string err;
     if (path.size() > 5 && path.compare(path.size() - 5, 5, ".vst3") == 0) {
@@ -1685,6 +1788,7 @@ int usage() {
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
                  "  cue check <config.ini|file.cue> [--no-load] [--rig rig.json]\n"
+                 "  cue scan [--all]           (every plug-in in the usual folders; --all opens unchanged files again)\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
@@ -1750,8 +1854,12 @@ int main(int argc, char** argv) {
     }
     if (cmd == "params" && argc >= 3)
         return cmdParams(argv[2]);
-    if (cmd == "scan" && argc >= 3)
+    if (cmd == "scan-file" && argc >= 5)
+        return scanFileMain(argv[2], argv[3], std::atoi(argv[4]), argc >= 6 ? std::strtoul(argv[5], nullptr, 10) : 0);
+    if (cmd == "scan" && argc >= 3 && argv[2][0] != '-')
         return cmdScan(argv[2]);
+    if (cmd == "scan")
+        return cmdScanAll(argc >= 3 && std::strcmp(argv[2], "--all") == 0);
     if (cmd == "midi-monitor")
         return cmdMidiMonitor(argc >= 3 && argv[2][0] != '-' ? argv[2] : "any");
     if (cmd == "fcb-test" && argc >= 3)

@@ -89,6 +89,7 @@ add_executable(cue
   src/app/cuefile.cpp
   src/app/service.cpp
   src/app/rpp.cpp
+  src/app/scan.cpp
   src/control/show.cpp
   src/app/cpu.cpp
   src/app/doctor.cpp
@@ -156,18 +157,19 @@ endif()
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp tests/test_scan.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/scan.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     CUE_TEST_CLAP="$<TARGET_FILE:cue_test_plugins>"
     CUE_TEST_VST3="${TEST_VST3_BUNDLE}"
-    CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>")
+    CUE_TEST_VST3_SO="$<TARGET_FILE:cue_test_vst3>"
+    CUE_BIN="$<TARGET_FILE:cue>")
   if(X11_FOUND)
     # The editor tests look at the windows the way a window manager would.
     target_compile_definitions(cue_tests PRIVATE CUE_HAVE_X11)
   endif()
-  add_dependencies(cue_tests cue_test_plugins cue_test_vst3)
+  add_dependencies(cue_tests cue_test_plugins cue_test_vst3 cue)
   target_link_options(cue_tests PRIVATE -static-libstdc++ -static-libgcc)
   add_test(NAME cue_tests COMMAND cue_tests)
 

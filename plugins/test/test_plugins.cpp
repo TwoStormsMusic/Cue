@@ -23,11 +23,14 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -473,7 +476,14 @@ void onMainThread(const clap_plugin_t*) {}
 
 uint32_t factoryCount(const clap_plugin_factory_t*) { return kNumDescs; }
 const clap_plugin_descriptor_t* factoryDesc(const clap_plugin_factory_t*, uint32_t i) { return i < kNumDescs ? kDescs[i] : nullptr; }
+// For the scanner's tests: a copy of this file named scan-crash-open falls
+// over as it is opened, scan-hang-open never answers, and scan-crash-make
+// falls over as a plug-in is made.
+std::string g_file;
+
 const clap_plugin_t* factoryCreate(const clap_plugin_factory_t*, const clap_host_t* host, const char* id) {
+    if (g_file.find("scan-crash-make") != std::string::npos)
+        std::abort();
     for (uint32_t i = 0; i < kNumDescs; ++i) {
         if (std::strcmp(id, kDescs[i]->id) != 0)
             continue;
@@ -493,7 +503,14 @@ const clap_plugin_t* factoryCreate(const clap_plugin_factory_t*, const clap_host
 }
 const clap_plugin_factory_t kFactory = {factoryCount, factoryDesc, factoryCreate};
 
-bool entryInit(const char*) { return true; }
+bool entryInit(const char* path) {
+    g_file = path ? path : "";
+    if (g_file.find("scan-crash-open") != std::string::npos)
+        std::abort();
+    while (g_file.find("scan-hang-open") != std::string::npos)
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    return true;
+}
 void entryDeinit() {}
 const void* entryFactory(const char* id) { return !std::strcmp(id, CLAP_PLUGIN_FACTORY_ID) ? &kFactory : nullptr; }
 
