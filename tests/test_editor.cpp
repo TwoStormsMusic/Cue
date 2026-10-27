@@ -221,8 +221,15 @@ TEST(editor_stays_over_the_apps_window_and_leaves_it_the_focus) {
     if (plain)
         XFree(plain);
 
-    editors.closeAll();
+    // The app closes: its editors close too, and the plug-in plays on.
     XDestroyWindow(d, app);
+    XSync(d, False);
+    for (int i = 0; i < 50 && editors.isOpen(*gain); ++i) {
+        editors.pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK_MSG(!editors.isOpen(*gain), "the editor stayed open after the app's window went");
+    CHECK(!gain->editorOpen());
     XCloseDisplay(d);
 }
 #endif

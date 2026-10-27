@@ -222,6 +222,10 @@ struct Writer {
                 wj["feedback"] = true;
             if (w.jump)
                 wj["jump"] = true;
+            if (w.jump && w.jumpOut.size() == 2)
+                wj["jump_out"] = w.jumpOut;
+            if (w.jump && w.jumpIn.size() == 2)
+                wj["jump_in"] = w.jumpIn;
             wires.push_back(wj);
         }
         j["wires"] = wires;
@@ -506,6 +510,8 @@ struct Reader {
             w.gains.muted = wj.value("muted", false);
             w.feedback = wj.value("feedback", false);
             w.jump = wj.value("jump", false);
+            w.jumpOut = wj.value("jump_out", std::vector<double>());
+            w.jumpIn = wj.value("jump_in", std::vector<double>());
             if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1)
                 throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
             c.wires.push_back(w);

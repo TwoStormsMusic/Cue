@@ -1095,13 +1095,28 @@ private slots:
             QVERIFY(back >= 0);
             shown->wires[back].jump = true;
             const QPainterPath jump = Board(*shown, 2).path(shown->wires[back]);
-            QCOMPARE(jump.elementCount(), 4);
+            QCOMPARE(jump.pointAtPercent(0), Board(*shown, 2).outPoint(shown->wires[back].from));
+            QCOMPARE(jump.pointAtPercent(1), Board(*shown, 2).inPoint(PortInfo::block(ir)));
             QTest::keyClick(&w, Qt::Key_Escape);
-            tapAt(Board(*shown, 2).inPoint(PortInfo::block(ir)) - QPointF(Board::jumpStub / 2, 0));
+            tapAt(Board(*shown, 2).jumpInAt(shown->wires[back]));
             QCOMPARE(v->selectedWire(), back);
             QTest::keyClick(&w, Qt::Key_Escape);
+            // Its letter goes where it is dragged, undone like the rest.
+            v->grab();
+            const QRectF letter = v->hitRect(QString("jump %1 in").arg(back));
+            QVERIFY(!letter.isEmpty());
+            drag(letter.center(), letter.center() + QPointF(-20, 40));
+            const QJsonObject moved = link.last("wire");
+            QVERIFY(moved.value("jump").toBool());
+            // In board units, as far as the board is zoomed.
+            QVERIFY(moved.value("jump_in").toArray().at(0).toDouble() < -34 - 10);
+            QVERIFY(moved.value("jump_in").toArray().at(1).toDouble() > 20);
+            QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+            QCOMPARE(link.last("wire").value("jump_in").toArray().at(1).toDouble(), 0.0);
+            shown->wires[back].jumpIn = QPointF(-34, 40);
             v->grab();
             shot(v, "routing-jump");
+            shown->wires[back].jumpIn = QPointF(-34, 0);
             shown->wires[back].jump = false;
             tapAt(b.path(slap.wires[gw]).pointAtPercent(0.5));
             QCOMPARE(v->selectedWire(), gw);
@@ -1238,6 +1253,59 @@ private slots:
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
         QCOMPARE(link.last("place").value("y").toDouble(), b.block[4].y());
         QCOMPARE(s.chain(1)->blocks[4].at, b.block[4]);
+
+        // Several at once: Shift-click, or Select for a finger; a drag of
+        // one moves them all, as one change.
+        v->grab();
+        QTest::keyClick(&w, Qt::Key_Escape);
+        v->grab();
+        QTest::mouseClick(v, Qt::LeftButton, {}, v->hitRect("block 0").center().toPoint());
+        v->grab();
+        QTest::mouseClick(v, Qt::LeftButton, Qt::ShiftModifier, v->hitRect("block 1").center().toPoint());
+        QCOMPARE(v->group(), (QSet<int>{0, 1}));
+        v->grab();
+        shot(v, "routing-group");
+        QTest::keyClick(&w, Qt::Key_Escape);
+        QVERIFY(v->group().isEmpty());
+        v->grab();
+        click(v, v->hitRect("select"));
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        v->grab();
+        click(v, v->hitRect("block 2"));
+        QCOMPARE(v->group(), (QSet<int>{0, 2}));
+        {
+            const int places = count("place");
+            const QPointF b0 = s.chain(1)->blocks[0].at, b2 = s.chain(1)->blocks[2].at;
+            v->grab();
+            const QPointF from = v->hitRect("block 2").center();
+            drag(from, from + QPointF(0, 60));
+            QCOMPARE(count("place"), places + 2);
+            QVERIFY(s.chain(1)->blocks[0].at.y() > b0.y() + 20);
+            QVERIFY(s.chain(1)->blocks[2].at.y() > b2.y() + 20);
+            QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
+            QCOMPARE(count("place"), places + 4);
+            QCOMPARE(s.chain(1)->blocks[0].at, b0);
+            QCOMPARE(s.chain(1)->blocks[2].at, b2);
+        }
+        // A box drawn across the board takes in every plug-in it touches.
+        QTest::keyClick(&w, Qt::Key_Escape);
+        v->grab();
+        const QRectF board = v->hitRect("canvas");
+        drag(board.topLeft() + QPointF(8, 8), board.bottomRight() - QPointF(8, 8));
+        QCOMPARE(v->group().size(), s.chain(1)->numPlugins());
+        v->grab();
+        click(v, v->hitRect("select"));
+        QTest::keyClick(&w, Qt::Key_Escape);
+
+        // The column of scenes and chains hides for room, and comes back.
+        v->grab();
+        click(v, v->hitRect("column"));
+        QVERIFY(!s.settings.chainColumn);
+        v->grab();
+        shot(v, "routing-no-column");
+        click(v, v->hitRect("column"));
+        QVERIFY(s.settings.chainColumn);
 
         // A plug-in taken out with its button; undo puts it back.
         v->grab();

@@ -287,7 +287,7 @@ void ChainView::settingsStrip(QPainter& p, const QRectF& r, const ChainInfo& c) 
     };
     if (strip_ == Strip::Chain) {
         const int id = c.index;
-        action("remove chain", "Take out", color::red, [this, id](QRectF) { removeChain(id); });
+        action("remove chain", "Remove", color::red, [this, id](QRectF) { removeChain(id); });
         action("move chain", "Move ▾", color::text, [this, id](QRectF under) {
             const ChainInfo* ch = s.chain(id);
             if (!ch)
@@ -308,7 +308,7 @@ void ChainView::settingsStrip(QPainter& p, const QRectF& r, const ChainInfo& c) 
         });
         action("copy this chain", "Duplicate", color::text, [this, id](QRectF) { newChain(id); });
     } else {
-        action("remove scene", "Take out", color::red, [this, scene](QRectF) { removeScene(scene); });
+        action("remove scene", "Remove", color::red, [this, scene](QRectF) { removeScene(scene); });
         action("move scene", "Move ▾", color::text, [this, scene](QRectF under) {
             const int n = s.perf.scenes.size();
             QVector<MenuItem> items;
@@ -799,8 +799,8 @@ void ChainView::removeChain(int chain) {
     const int beside = chains.size() < 2 ? -1 : chains[at + 1 < chains.size() ? at + 1 : at - 1];
     const QString token = newToken(token_), name = c->name;
     const QJsonObject take{{"cmd", "remove-chain"}, {"chain", chain}, {"token", token}};
-    arrange(take, "Not taken out", [this, chain, beside, name, take, token](const QJsonObject&) {
-        s.edited({"Took out chain " + name, chain, -1, {{"cmd", "restore-chain"}, {"token", token}}, take});
+    arrange(take, "Not removed", [this, chain, beside, name, take, token](const QJsonObject&) {
+        s.edited({"Removed chain " + name, chain, -1, {{"cmd", "restore-chain"}, {"token", token}}, take});
         if (s.chain(beside))
             showChain(beside);
     });
@@ -865,8 +865,8 @@ void ChainView::removeScene(int scene) {
     const int first = sc.chains.isEmpty() ? -1 : sc.chains.first();
     const QString token = newToken(token_), name = sc.name;
     const QJsonObject take{{"cmd", "remove-scene"}, {"scene", scene}, {"token", token}};
-    arrange(take, "Not taken out", [this, first, name, take, token](const QJsonObject&) {
-        s.edited({"Took out scene " + name, first, -1, {{"cmd", "restore-scene"}, {"token", token}}, take});
+    arrange(take, "Not removed", [this, first, name, take, token](const QJsonObject&) {
+        s.edited({"Removed scene " + name, first, -1, {{"cmd", "restore-scene"}, {"token", token}}, take});
         strip_ = Strip::Chain;
         showChain(s.playing());
     });

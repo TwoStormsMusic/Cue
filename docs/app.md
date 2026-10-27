@@ -74,7 +74,7 @@ window, the one it has in a DAW: Neural DSP through yabridge, the TwoStorms
 plug-ins, anything with an editor. It opens on the screen of the computer
 running the engine, which on stage is the one in front of you, and stays
 over the app (full screen too) until you close it; tapping the app does not
-hide it. What you change there is heard at once and kept by **Save**. The sound never waits on
+hide it. Closing the app closes its editors too (the sound plays on). What you change there is heard at once and kept by **Save**. The sound never waits on
 an editor: it is drawn between blocks, never on the audio thread, and
 closing one changes nothing about what is heard. **Play this chain** plays the chain shown.
 
@@ -94,11 +94,18 @@ held to +6 dBFS, so turn it down on the wire to keep it from building up. Tap a 
 as it comes, 0% folds left and right to mono) and **pan** (a balance: it
 turns one side down, never moves sound across), in that order; a double tap
 on a fader sets it back. **Mute**, **Insert** and **Delete** are under them,
-and **Draw as a jump**: the wire then leaves its plug-in as a short stub
-with a letter and comes in at the other end with the same letter, with no
-line between. A long chain can so run left to right on one row and go on
-left to right on the next. A jump is only how the board draws the wire: the
-sound, the .cue and anything made from it (an .RPP) are as for any wire.
+and **Jump Cut**: the wire then leaves its plug-in as a short stub to a
+letter and comes in at the other end from the same letter, with no line
+between. A long chain can so run left to right on one row and go on left
+to right on the next. Drag either letter anywhere, so jump cuts from one
+plug-in do not sit on each other; tap one to select its wire. A jump cut
+is only how the board draws the wire: the sound, the .cue and anything
+made from it (an .RPP) are as for any wire.
+
+To move several plug-ins at once, Shift-click them (or turn on **Select**,
+beside the zoom, and tap them), or Shift-drag (with **Select** on, drag)
+across open space: what the box touches joins the selection. Drag any of
+them and they all move, as one change to undo.
 A wire whose level, width or pan is changed is drawn thick, with a tag
 saying what is changed (Settings can hide the tags). The **+** on the
 selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
@@ -111,7 +118,8 @@ or that no output hears is loaded but not processed, drawn grey and marked
 and back in over 10 ms, a level, width or pan moves smoothly with no fade at
 all, and a chain not playing changes at once.
 
-The column on the left lists one scene's chains: the scene is picked at its
+The column on the left (the **‹** left of the chain's name hides it for
+room, **›** brings it back) lists one scene's chains: the scene is picked at its
 top (a green dot when it is the scene playing), and the list shows which
 chain is playing and which is kept warm. **+ Chain** adds an empty chain to
 the scene, its input wired to every output. **Copy from scene…** lists the
@@ -133,13 +141,13 @@ after itself; **Move** puts it earlier, later or into another scene; **Take
 out** takes it away (not the chain playing, nor the last of a scene). The
 **Scene** tab beside the title gives the scene's name, pedal and display the
 same way, and its own **Duplicate** (every chain, plug-in settings, pedals and
-the triggers that work only there), **Move** and **Take out**.
+the triggers that work only there), **Move** and **Remove**.
 
 **Undo** takes back what you changed here (a slider, a bypass, the parameters
-picked, a wire, a plug-in added, moved or taken out, a chain or scene added,
-copied, set, moved or taken out, and each knob turned in a plug-in's own
+picked, a wire, a plug-in added, moved or removed, a chain or scene added,
+copied, set, moved or removed, and each knob turned in a plug-in's own
 editor, from where it was grabbed to where it was let go), showing where, and
-**Redo** makes it again; what a pedal changes is not in it. A plug-in taken out comes back with its settings and its wires;
+**Redo** makes it again; what a pedal changes is not in it. A plug-in removed comes back with its settings and its wires;
 a chain or a scene with everything it had.
 **Save** saves the performance, plug-in settings, wiring and where each
 block is drawn included, to its `.cue` file.

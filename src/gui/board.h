@@ -40,8 +40,11 @@ struct Board {
     // triangle low on its left).
     QPointF outPoint(const PortInfo& p) const;
     QPointF inPoint(const PortInfo& p) const;
-    // A jump is two stubs: out of its source and into its end, jumpStub long.
-    static constexpr double jumpStub = 34;
+    // A jump cut is two stubs: out of its source to its letter, and from
+    // its letter into its end. The letters sit where the wire says, from
+    // the ports.
+    QPointF jumpOutAt(const WireInfo& w) const { return outPoint(w.from) + w.jumpOut; }
+    QPointF jumpInAt(const WireInfo& w) const { return inPoint(w.to) + w.jumpIn; }
     QPainterPath path(const WireInfo& w) const;
     QPainterPath path(QPointF from, QPointF to, int fromSlot = -1, int toSlot = -1) const;
     // The free place nearest to want for a new block.

@@ -37,6 +37,7 @@ struct EditorHost::Impl {
     bool tried = false;
     std::string why;
     std::vector<Window> windows;
+    ::Window owner = 0; // the app's window they are kept over: when it goes, they go
 
     bool connect(std::string* reason) {
         if (display)
@@ -68,8 +69,13 @@ struct EditorHost::Impl {
 
     // Over the app's window, which keeps the focus.
     void keepAbove(::Window w, unsigned long above) {
-        if (above)
-            XSetTransientForHint(display, w, static_cast<::Window>(above));
+        if (!above)
+            return;
+        XSetTransientForHint(display, w, static_cast<::Window>(above));
+        if (owner != above) {
+            owner = static_cast<::Window>(above);
+            XSelectInput(display, owner, StructureNotifyMask);
+        }
     }
 
     void resize(const Window& w, const EditorSize& size) {
@@ -218,9 +224,15 @@ void EditorHost::pump() {
     }
     // Then our own windows: a resize to pass on, or a close to obey.
     std::vector<Processor*> closing;
+    bool ownerGone = false;
     while (XPending(d)) {
         XEvent e;
         XNextEvent(d, &e);
+        // The app was closed (or stopped): its editors close with it.
+        if (e.type == DestroyNotify && impl_->owner && e.xdestroywindow.window == impl_->owner) {
+            ownerGone = true;
+            continue;
+        }
         Impl::Window* w = nullptr;
         for (Impl::Window& candidate : impl_->windows)
             if (candidate.window == e.xany.window)
@@ -242,6 +254,10 @@ void EditorHost::pump() {
     }
     for (Processor* p : closing)
         close(*p);
+    if (ownerGone) {
+        impl_->owner = 0;
+        closeAll();
+    }
     XFlush(d);
 }
 

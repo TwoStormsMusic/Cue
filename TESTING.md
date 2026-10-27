@@ -396,14 +396,14 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 - **FCB display**: up to 2 letters, shown on the FCB while it plays.
 - **Keep warm while … plays**: pick a chain. Play this one, then switch to the one you picked: it comes in at once, with no pre-roll. The list says "warm" beside it.
 - **When selected, do**: **+ Action** and pick "Wah = Auto" (or one of yours). Play another chain, turn Wah off, play this one again: Wah goes to Auto. Tap the chip to take it out or move it.
-- **Move**: up, down, or into another scene. **Take out**: gone (not the chain playing; Cue says why). **Undo** brings it back with its plug-ins and settings.
+- **Move**: up, down, or into another scene. **Remove**: gone (not the chain playing; Cue says why). **Undo** brings it back with its plug-ins and settings.
 
 **Scenes.**
 
 - **+ Scene** (bottom left): a new scene after this one, with one empty chain; its settings are shown under the board so you can name it. The picker at the top of the column lists it.
 - Pick your first scene in the picker, then the **Scene** tab under the board, then **Duplicate**: a copy of the whole scene, every chain with its plug-in settings and pedals.
 - Give the copy a pedal in its **Selected by**, and switch scenes with the FCB. The stage view shows the scene's chains.
-- **Take out** the copy (not while it plays): its chains go. **Undo** brings it all back.
+- **Remove** the copy (not while it plays): its chains go. **Undo** brings it all back.
 
 **Save and open again.** **Save**, quit the app and the engine, start them again: the chains, scenes and settings are as you left them, and the pedals and displays work.
 
@@ -438,6 +438,16 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 2. **Stage header.** Settings > **Stage shows**: tap CPU, Margin, Xruns, Sound card or Controller to hide or show each; the stage view follows. Xruns and an FCB that is not found still show when they happen.
 3. **Values while dragging.** Drag a Neural DSP parameter's slider in the panel: the value stays in the plug-in's own form ("-6.0 dB", "Off") while you drag, a moment behind your finger, rather than turning into %.
 4. **Jumps.** Lay a long chain out as two rows (drag the plug-ins), tap the wire that turns back from the end of the first row to the start of the second, and tap **Draw as a jump**: it becomes a lettered stub out of the first row's end and the same letter into the second row's start. Tap either stub to select it again. It sounds the same. **Undo**, **Save** and open again: it stays a jump.
+
+## 19. Column, Remove, jump cuts and moving several (0.9.4)
+
+`bin/cue-app --version` should say 0.9.4.
+
+1. **Column.** In Chains, the **‹** left of the chain's name hides the scenes and chains column; **›** brings it back, and the app remembers which.
+2. **Remove.** The chain and scene settings say **Remove** (not "Take out"), and undo says "Removed ...".
+3. **Editors close with the app.** Open two plug-in editors, then quit the app (Ctrl+Q or close its window): both editors close and the sound plays on. Start the app again: the chains are as they were.
+4. **Jump Cut.** Select a wire, tap **Jump Cut** (it lights up while on; tap again to make it a plain wire). Make two jump cuts from one plug-in: their letters start one above the other. Drag a letter somewhere else: it stays there after **Save** and opening again; **Undo** puts it back. The letters run A, B, C with none missing.
+5. **Moving several.** Shift-click two or three plug-ins (they all turn orange), drag one: they all move; **Undo** moves them all back. Shift-drag across open space: what the box touches is selected. On the touchscreen, turn on **Select** (beside the zoom), tap plug-ins or drag a box, then turn it off. Tap a plug-in on its own, or open space, to let go.
 
 ## What passes
 

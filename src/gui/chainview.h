@@ -46,6 +46,8 @@ public:
     // plug-in selected in it, -1 for none.
     int shownChain() const { return chain_; }
     int selectedSlot() const { return slot_; }
+    // Plug-ins selected together (Shift, or Select), to move at once.
+    const QSet<int>& group() const { return group_; }
     void showChain(int chain);
     void selectSlot(int slot);
     // The next time it is shown, it stays on the chain and what is selected
@@ -123,6 +125,10 @@ private:
     void sidebar(QPainter& p, const QRectF& r);
     void canvas(QPainter& p, const QRectF& r, const ChainInfo& c);
     void boardTools(QPainter& p, const QRectF& r);
+    void dragJump(int wire, bool out, QPointF pos, bool done);
+    // Several plug-ins selected, to move together: by Shift, or Select for touch.
+    bool adding() const;
+    void boxSelect(const QRectF& screenBox);
     void legend(QPainter& p, const QRectF& r);
     // The settings under the board, and their height.
     double stripHeight(const ChainInfo& c, double width) const;
@@ -222,6 +228,12 @@ private:
     QTimer letGo_;
     // A block being dragged, and blocks where they are until the engine has them.
     int dragBlock_ = -1;
+    int jumpDrag_ = -1;
+    QSet<int> group_;                 // plug-ins selected together, by slot
+    QHash<int, QPointF> groupFrom_;   // where each was when a drag of the group began
+    bool selectMode_ = false;         // the Select button: taps and drags select
+    bool banding_ = false;            // a drag on open space draws a box to select with
+    QPointF bandTo_; // a jump cut's letter being dragged: wire * 2, + 1 for where it leaves
     bool dragMoved_ = false;
     QPointF dragStart_, dragFrom_;
     QHash<int, QPointF> moving_;

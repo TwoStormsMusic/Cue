@@ -263,6 +263,8 @@ bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error)
             return fail(error, "the engine has no such wire");
         cs->wires[w].gains = wire.gains;
         cs->wires[w].jump = wire.jump;
+        cs->wires[w].jumpOut = wire.jumpOut;
+        cs->wires[w].jumpIn = wire.jumpIn;
         return true;
     }
     ChainSpec next = *cs;

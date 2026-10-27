@@ -279,6 +279,8 @@ void ChainView::showChain(int chain) {
 }
 
 void ChainView::selectSlot(int slot) {
+    if (slot < 0)
+        group_.clear();
     if (slot >= 0) {
         wireOn_ = false;
         picker_ = Picker::None;
@@ -516,12 +518,17 @@ void ChainView::paint(QPainter& p) {
                                {"settings", "Settings", [this] { emit navigate("settings"); }},
                                {"save", "Save", [this] { s.save(); }, color::onOrange, color::orange, color::orange}});
     const double W = width(), H = height();
-    const double sideW = std::clamp(230 * u, 150.0, W * 0.22), panelW = std::clamp(310 * u, 220.0, W * 0.3);
-    p.fillRect(QRectF(0, top, sideW, H - top), color::bg);
+    // The column of scenes and chains, unless it is hidden for room.
+    const bool column = s.settings.chainColumn;
+    const double sideW = column ? std::clamp(230 * u, 150.0, W * 0.22) : 0, panelW = std::clamp(310 * u, 220.0, W * 0.3);
     p.setPen(QPen(color::line, 1));
-    p.drawLine(QPointF(sideW - 0.5, top), QPointF(sideW - 0.5, H));
+    if (column) {
+        p.fillRect(QRectF(0, top, sideW, H - top), color::bg);
+        p.drawLine(QPointF(sideW - 0.5, top), QPointF(sideW - 0.5, H));
+    }
     p.drawLine(QPointF(W - panelW + 0.5, top), QPointF(W - panelW + 0.5, H));
-    sidebar(p, QRectF(0, top, sideW, H - top));
+    if (column)
+        sidebar(p, QRectF(0, top, sideW, H - top));
 
     if (!s.chain(chain_) && followPlaying_)
         chain_ = s.playing();
@@ -535,12 +542,22 @@ void ChainView::paint(QPainter& p) {
         drawMenu(p);
         return;
     }
-    // Title, then the canvas, then the chain's settings.
+    // Title, then the canvas, then the chain's settings. Left of the title,
+    // what hides or shows the column.
+    const double toggleW = 34 * u;
+    button(p, "column", QRectF(mid.left(), mid.top() + 6 * u, toggleW, 30 * u), column ? "‹" : "›",
+           [this] {
+               s.settings.chainColumn = !s.settings.chainColumn;
+               s.settings.save();
+               update();
+           },
+           color::text, color::border2, color::panel2, 18 * u);
+    const double titleX = mid.left() + toggleW + 12 * u;
     p.setPen(color::text);
     p.setFont(typeface(Face::Display, 30 * u, QFont::DemiBold));
     const QString title = "Chain: " + c->name;
     const double titleW = std::min(mid.width() * 0.6, QFontMetricsF(p.font()).horizontalAdvance(title) + 2);
-    draw::text(p, QRectF(mid.left(), mid.top(), titleW, 40 * u), Qt::AlignLeft | Qt::AlignVCenter, title);
+    draw::text(p, QRectF(titleX, mid.top(), titleW, 40 * u), Qt::AlignLeft | Qt::AlignVCenter, title);
     p.setPen(color::muted);
     p.setFont(typeface(Face::Text, 14 * u));
     const int n = c->numPlugins(), outs = c->outputsUsed().size();
@@ -549,7 +566,7 @@ void ChainView::paint(QPainter& p) {
         what = "plays " + c->input + " · " + what;
     // Off the board, at the right of the title row: + Plug-in, near the
     // panel it opens, and the zoom just left of it.
-    const double toolsW = 300 * u;
+    const double toolsW = 390 * u;
     double right = mid.right() - toolsW - 14 * u;
     if (c->index != s.playing()) {
         const double bw = 150 * u;
@@ -557,7 +574,7 @@ void ChainView::paint(QPainter& p) {
                color::border2, color::panel, 15 * u);
         right -= bw + 12 * u;
     }
-    draw::text(p, QRectF(mid.left() + titleW + 14 * u, mid.top(), std::max(0.0, right - mid.left() - titleW - 14 * u), 40 * u),
+    draw::text(p, QRectF(titleX + titleW + 14 * u, mid.top(), std::max(0.0, right - titleX - titleW - 14 * u), 40 * u),
                Qt::AlignLeft | Qt::AlignVCenter, what);
     const double stripH = stripHeight(*c, mid.width());
     canvas(p, QRectF(mid.left(), mid.top() + 54 * u, mid.width(), mid.height() - 54 * u - stripH - 14 * u), *c);
@@ -617,24 +634,37 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
 
     // Open space: a drag pans; a tap selects the wire under it, or lets go
     // of what is selected; a double tap fits the chain again.
+    // With Shift held, or Select on, a drag draws a box: what it touches
+    // is selected.
     hit("canvas", r, {}, [this](QPointF pos, bool done) {
         if (!panning_) {
             panning_ = true;
             panMoved_ = false;
             panStart_ = pos;
             panFrom_ = pan_;
+            banding_ = adding();
+            bandTo_ = pos;
             return;
         }
         if (!done) {
             if (!panMoved_ && QLineF(pos, panStart_).length() < 6 * u)
                 return;
             panMoved_ = true;
-            pan_ = panFrom_ + (pos - panStart_);
+            if (banding_)
+                bandTo_ = pos;
+            else
+                pan_ = panFrom_ + (pos - panStart_);
             clampPan();
             update();
             return;
         }
         panning_ = false;
+        if (banding_ && panMoved_) {
+            banding_ = false;
+            boxSelect(QRectF(panStart_, pos).normalized());
+            return;
+        }
+        banding_ = false;
         if (panMoved_ || pinching_)
             return;
         for (int i = wireShapes_.size() - 1; i >= 0; --i)
@@ -673,6 +703,14 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         QColor stroke;
     };
     QVector<Tag> tags;
+    // Jump cuts' letters, drawn over the blocks so none hides under one.
+    struct Letter {
+        int wire;
+        QString text;
+        QPointF out, in;
+        QColor col;
+    };
+    QVector<Letter> letters;
     int jumps = 0;
     for (int i = 0; i < c.wires.size(); ++i) {
         const WireInfo w = wireNow(c, i);
@@ -688,19 +726,8 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
             // The same letter where it leaves and where it comes in: A, B, ... Z, A2, ...
             const QString letter = QString(QChar('A' + jumps % 26)) + (jumps >= 26 ? QString::number(jumps / 26 + 1) : QString());
             ++jumps;
-            const double rad = std::max(8.0, 10 * k);
-            const QPointF out = at(B.outPoint(w.from) + QPointF(Board::jumpStub, 0)), in = at(B.inPoint(w.to) - QPointF(Board::jumpStub, 0));
-            p.setFont(typeface(Face::Mono, std::max(8.0, 11 * k), QFont::DemiBold));
-            for (const QPointF& end : {out + QPointF(rad, 0), in - QPointF(rad, 0)}) {
-                const double lw = std::max(2 * rad, QFontMetricsF(p.font()).horizontalAdvance(letter) + rad);
-                const QRectF tag(end.x() - lw / 2, end.y() - rad, lw, 2 * rad);
-                draw::card(p, tag, rad, color::panel, col);
-                p.setPen(col);
-                p.drawText(tag, Qt::AlignCenter, letter);
-                p.setBrush(Qt::NoBrush);
-                shape.addRoundedRect(tag.adjusted(-4, -4, 4, 4), rad, rad);
-            }
-            mid = (at(B.outPoint(w.from)) + out) / 2;
+            letters << Letter{i, letter, at(B.jumpOutAt(w)), at(B.jumpInAt(w)), col};
+            mid = (at(B.outPoint(w.from)) + at(B.jumpOutAt(w))) / 2;
         }
         wireShapes_ << shape;
         if (selected || (!w.neutral() && s.settings.wireTags))
@@ -714,7 +741,7 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         const PluginInfo& pi = c.blocks[b];
         const QPointF center = at(B.block[b]);
         const bool connected = flow.played.value(b);
-        const bool on = !bypassed(c.index, b), selected = b == slot_ && !wireOn_ && picker_ == Picker::None;
+        const bool on = !bypassed(c.index, b), selected = (b == slot_ || group_.contains(b)) && !wireOn_ && picker_ == Picker::None;
         const bool lit = on && connected;
         const QString id = QString("block %1").arg(b);
         const QColor stroke = selected ? color::orange : lit ? color::green : color::border2;
@@ -836,6 +863,33 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         }
     }
 
+    // A box being drawn to select with.
+    if (banding_ && panMoved_) {
+        const QRectF band = QRectF(panStart_, bandTo_).normalized();
+        p.setPen(QPen(color::orange, 1.5, Qt::DashLine));
+        p.setBrush(QColor(0xFF, 0x8A, 0x1F, 28));
+        p.drawRect(band);
+    }
+
+    // Jump cuts' letters, over everything but the tags. Each can be dragged
+    // anywhere; a tap selects its wire.
+    p.setFont(typeface(Face::Mono, std::max(8.0, 11 * k), QFont::DemiBold));
+    for (const Letter& l : letters) {
+        const double rad = std::max(9.0, 11 * k);
+        const double lw = std::max(2 * rad, QFontMetricsF(p.font()).horizontalAdvance(l.text) + rad);
+        for (const bool out : {true, false}) {
+            const QPointF c = out ? l.out : l.in;
+            const QRectF tag(c.x() - lw / 2, c.y() - rad, lw, 2 * rad);
+            draw::card(p, tag, rad, color::panel, l.col);
+            p.setPen(l.col);
+            p.drawText(tag, Qt::AlignCenter, l.text);
+            if (l.wire < wireShapes_.size())
+                wireShapes_[l.wire].addRoundedRect(tag.adjusted(-4, -4, 4, 4), rad, rad);
+            hit(QString("jump %1 %2").arg(l.wire).arg(out ? "out" : "in"), tag.adjusted(-4, -4, 4, 4).intersected(r), {},
+                [this, wire = l.wire, out](QPointF pos, bool done) { dragJump(wire, out, pos, done); });
+        }
+    }
+
     // On top, the tags: what is changed on a wire, as room allows (level,
     // then pan, then width); and on the selected wire, the + that puts a
     // plug-in on it.
@@ -928,6 +982,16 @@ void ChainView::boardTools(QPainter& p, const QRectF& r) {
     p.setPen(color::muted);
     p.setFont(typeface(Face::Mono, 12 * u));
     p.drawText(QRectF(x - 58 * u, y, 50 * u, bh), Qt::AlignRight | Qt::AlignVCenter, QString("%1%").arg(std::lround(scaleNow() / u * 100)));
+    // Select, for a finger, as Shift is for a mouse: taps add to the group,
+    // a drag on open space draws a box.
+    const double selW = 70 * u;
+    button(p, "select", QRectF(x - 58 * u - 12 * u - selW, y, selW, bh), "Select",
+           [this] {
+               selectMode_ = !selectMode_;
+               update();
+           },
+           selectMode_ ? color::onOrange : color::text, selectMode_ ? color::orange : color::border2, selectMode_ ? color::orange : color::panel2,
+           12 * u);
 }
 
 void ChainView::legend(QPainter& p, const QRectF& r) {
@@ -1063,8 +1127,24 @@ void ChainView::pin(const ChainInfo& c) {
             s.change(placeRequest(c.index, b, B.block[b]));
 }
 
+bool ChainView::adding() const { return selectMode_ || (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier); }
+
 void ChainView::tapBlock(int slot) {
     const QString id = QString("block %1").arg(slot);
+    if (adding()) {
+        // Into the group, or out of it; what was selected joins it.
+        letGo_.stop();
+        if (group_.isEmpty() && slot_ >= 0 && slot_ != slot && !wireOn_)
+            group_.insert(slot_);
+        if (!group_.remove(slot))
+            group_.insert(slot);
+        const QSet<int> keep = group_;
+        selectSlot(keep.contains(slot) ? slot : keep.isEmpty() ? -1 : *keep.begin());
+        group_ = keep;
+        update();
+        return;
+    }
+    group_.clear();
     if (doubleTap(id)) {
         letGo_.stop();
         selectSlot(slot);
@@ -1085,11 +1165,20 @@ void ChainView::dragBlock(int slot, QPointF pos, bool done) {
     }
     const Board B(*c, s.perf.outputs.size(), moving_);
     if (dragBlock_ != slot) {
-        // Pressed: a tap or a move, it is not yet clear which.
+        // Pressed: a tap or a move, it is not yet clear which. One of a
+        // group moves the group.
         dragBlock_ = slot;
         dragMoved_ = false;
         dragStart_ = pos;
         dragFrom_ = B.block[slot];
+        groupFrom_.clear();
+        if (group_.contains(slot) && group_.size() > 1) {
+            for (int m : group_)
+                if (m < B.block.size())
+                    groupFrom_[m] = B.block[m];
+        } else if (!adding()) {
+            group_.clear();
+        }
         return;
     }
     if (!done) {
@@ -1107,22 +1196,43 @@ void ChainView::dragBlock(int slot, QPointF pos, bool done) {
             }
         };
         for (int b = 0; b < B.block.size(); ++b)
-            if (b != slot)
+            if (b != slot && !groupFrom_.contains(b))
                 snap(B.block[b].y());
         snap(B.input.y());
         moving_[slot] = to;
+        for (auto m = groupFrom_.cbegin(); m != groupFrom_.cend(); ++m)
+            moving_[m.key()] = m.value() + (to - dragFrom_);
         update();
         return;
     }
     dragBlock_ = -1;
-    if (pinching_) {
+    if (pinching_ || !dragMoved_) {
         moving_.remove(slot);
+        for (int m : groupFrom_.keys())
+            moving_.remove(m);
+        if (!pinching_)
+            tapBlock(slot);
         update();
         return;
     }
-    if (!dragMoved_) {
-        moving_.remove(slot);
-        tapBlock(slot);
+    if (!groupFrom_.isEmpty()) {
+        // The group, as one change.
+        const int chain = c->index;
+        pin(*c);
+        QJsonArray before, after;
+        for (auto m = groupFrom_.cbegin(); m != groupFrom_.cend(); ++m) {
+            const int b = m.key();
+            const QPointF to = moving_.value(b, m.value());
+            before << placeRequest(chain, b, m.value());
+            after << placeRequest(chain, b, to);
+            s.change(placeRequest(chain, b, to), [this, b](const QJsonObject& r) {
+                moving_.remove(b);
+                s.check(r, "Not moved");
+                update();
+            });
+        }
+        s.edited({QString("Moved %1 plug-ins").arg(groupFrom_.size()), chain, slot, QJsonObject{{"cmd", "batch"}, {"requests", before}},
+                  QJsonObject{{"cmd", "batch"}, {"requests", after}}});
         return;
     }
     const QPointF to = moving_.value(slot, dragFrom_);
@@ -1136,6 +1246,59 @@ void ChainView::dragBlock(int slot, QPointF pos, bool done) {
         update();
     });
     s.edited({what, chain, slot, before, after});
+}
+
+// The plug-ins a box drawn on the board touches join the group.
+void ChainView::boxSelect(const QRectF& screenBox) {
+    const ChainInfo* c = s.chain(chain_);
+    if (!c)
+        return;
+    const Board B(*c, s.perf.outputs.size(), moving_);
+    const QRectF box(toBoard(screenBox.topLeft()), toBoard(screenBox.bottomRight()));
+    QSet<int> keep = group_;
+    if (keep.isEmpty() && slot_ >= 0 && !wireOn_)
+        keep.insert(slot_);
+    for (int b = 0; b < B.block.size(); ++b)
+        if (box.intersects(B.box(b)))
+            keep.insert(b);
+    if (keep.isEmpty()) {
+        update();
+        return;
+    }
+    selectSlot(keep.contains(slot_) ? slot_ : *keep.begin());
+    group_ = keep;
+    update();
+}
+
+// A jump cut's letter dragged to where it reads best; a tap selects its wire.
+void ChainView::dragJump(int wire, bool out, QPointF pos, bool done) {
+    const ChainInfo* c = s.chain(chain_);
+    if (!c || wire >= c->wires.size())
+        return;
+    if (jumpDrag_ != wire * 2 + out) {
+        jumpDrag_ = wire * 2 + out;
+        dragMoved_ = false;
+        dragStart_ = pos;
+        gainsFrom_ = wireNow(*c, wire);
+        return;
+    }
+    if (!dragMoved_ && QLineF(pos, dragStart_).length() < 6 * u) {
+        if (done) {
+            jumpDrag_ = -1;
+            selectWire(wire);
+        }
+        return;
+    }
+    dragMoved_ = true;
+    const Board B(*c, s.perf.outputs.size(), moving_);
+    WireInfo w = gainsFrom_;
+    const QPointF moved = (pos - dragStart_) / scaleNow();
+    const QPointF to = (out ? gainsFrom_.jumpOut : gainsFrom_.jumpIn) + moved;
+    // Whole units, so it saves as it shows.
+    (out ? w.jumpOut : w.jumpIn) = QPointF(std::round(to.x()), std::round(to.y()));
+    if (done)
+        jumpDrag_ = -1;
+    setGains(w, done);
 }
 
 void ChainView::dragWire(const PortInfo& port, bool source, QPointF pos, bool done) {
@@ -1257,7 +1420,7 @@ void ChainView::removeWire(int wire) {
     gainsNow_.reset();
     s.change(take, [this, chain, what, take, make](const QJsonObject& r) {
         if (s.check(r, "Not taken away"))
-            s.edited({"Took away " + what, chain, -1, make, take});
+            s.edited({"Removed " + what, chain, -1, make, take});
     });
     update();
 }
@@ -1272,11 +1435,11 @@ void ChainView::removePlugin(int slot) {
     const QJsonObject back{{"cmd", "restore"}, {"token", token}};
     pin(*c);
     s.change(take, [this, chain, slot, label, take, back](const QJsonObject& r) {
-        if (!s.check(r, "Not taken out"))
+        if (!s.check(r, "Not removed"))
             return;
         if (chain == chain_ && slot_ == slot)
             selectSlot(-1);
-        s.edited({"Took out " + label, chain, slot, back, take, -1});
+        s.edited({"Removed " + label, chain, slot, back, take, -1});
         update();
     });
 }
@@ -1388,7 +1551,8 @@ void ChainView::setGains(const WireInfo& w, bool done) {
     if (done) {
         const WireInfo& was = gainsFrom_;
         if (!was.same(w)) {
-            const QString what = w.jump != was.jump     ? (w.jump ? "Jump for " : "Wire for ")
+            const QString what = w.jump != was.jump     ? (w.jump ? "Jump cut for " : "No jump cut for ")
+                                 : w.jumpOut != was.jumpOut || w.jumpIn != was.jumpIn ? "Moved the jump cut of "
                                  : w.muted != was.muted ? (w.muted ? "Muted " : "Unmuted ")
                                  : was.levelDb != w.levelDb ? "Level of "
                                  : was.width != w.width                        ? "Width of "
@@ -1411,6 +1575,25 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
             search_->hide();
         listRect_ = {};
         wirePanel(p, r, c);
+        return;
+    }
+    if (group_.size() > 1) {
+        if (search_)
+            search_->hide();
+        listRect_ = {};
+        const double pad = 18 * u;
+        QFont label = typeface(Face::Text, 12 * u, QFont::DemiBold);
+        label.setLetterSpacing(QFont::AbsoluteSpacing, 1.5 * u);
+        p.setFont(label);
+        p.setPen(color::muted);
+        p.drawText(QRectF(r.left() + pad, r.top() + 20 * u, r.width(), 18 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                   QString("%1 PLUG-INS SELECTED").arg(group_.size()));
+        p.setPen(color::text2);
+        p.setFont(typeface(Face::Text, 14 * u));
+        p.drawText(QRectF(r.left() + pad, r.top() + 50 * u, r.width() - 2 * pad, 200 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                   "Drag any of them to move them all. Shift-click (or, with Select on, tap) a plug-in to add it or leave it out; "
+                   "Shift-drag (or drag with Select on) across open space to add what the box touches. Tap a plug-in on its own, or "
+                   "open space, to let go of the group.");
         return;
     }
     const double pad = 18 * u;
@@ -1652,23 +1835,36 @@ void ChainView::wirePanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
            color::border2, color::panel2, 14 * u);
     y += bh + gap;
     // Only how it is drawn: the sound is the same.
-    button(p, "wire jump", QRectF(r.left() + pad, y, w, bh), wire.jump ? "Draw as a wire" : "Draw as a jump",
+    button(p, "wire jump", QRectF(r.left() + pad, y, w, bh), "Jump Cut",
            [this] {
                const ChainInfo* c = s.chain(chain_);
-               if (!c || selectedWire() < 0)
+               const int i = selectedWire();
+               if (!c || i < 0)
                    return;
-               WireInfo w = wireNow(*c, selectedWire());
+               WireInfo w = wireNow(*c, i);
                gainsFrom_ = w;
                w.jump = !w.jump;
+               if (w.jump) {
+                   // Clear of the other jump cuts from the same dot and into the same one.
+                   int outs = 0, ins = 0;
+                   for (int o = 0; o < c->wires.size(); ++o)
+                       if (o != i && c->wires[o].jump) {
+                           outs += c->wires[o].from == w.from;
+                           ins += c->wires[o].to == w.to;
+                       }
+                   w.jumpOut = QPointF(34, 26.0 * outs);
+                   w.jumpIn = QPointF(-34, 26.0 * ins);
+               }
                setGains(w, true);
            },
-           color::text, color::border2, color::panel2, 14 * u);
+           wire.jump ? color::onOrange : color::text, wire.jump ? color::orange : color::border2, wire.jump ? color::orange : color::panel2,
+           14 * u);
     y += bh + 16 * u;
     p.setPen(color::muted);
     p.setFont(typeface(Face::Text, 13 * u));
     p.drawText(QRectF(r.left() + pad, y, w, r.bottom() - y - 10 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-               "A jump leaves its plug-in and comes in at the other end by a letter, with no line between: a long chain can go on "
-               "row after row. Two wires from one dot are copies of the same sound, each with its own level, width and pan. Wires into one input add "
+               "A jump cut leaves its plug-in and comes in at the other end by a letter, with no line between: a long chain can go "
+               "on row after row. Drag a letter to move it. Two wires from one dot are copies of the same sound, each with its own level, width and pan. Wires into one input add "
                "together. Delete takes the wire away.");
 }
 

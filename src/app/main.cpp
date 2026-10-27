@@ -337,9 +337,14 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
             w.gains = had.gains;
             w.feedback = had.feedback;
             w.jump = had.jump;
+            w.jumpOut = had.jumpOut;
+            w.jumpIn = had.jumpIn;
         }
     w.feedback = req.value("feedback", w.feedback);
     w.jump = req.value("jump", w.jump);
+    for (auto [key, at] : {std::pair{"jump_out", &w.jumpOut}, std::pair{"jump_in", &w.jumpIn}})
+        if (req.contains(key) && req.at(key).is_array() && req.at(key).size() == 2)
+            *at = req.at(key).get<std::vector<double>>();
     w.gains.levelDb = req.value("level_db", w.gains.levelDb);
     w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
     w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
@@ -894,6 +899,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     Json wj = {{"from", req.at("from")}, {"to", req.at("to")}, {"level_db", w.gains.levelDb},
                                {"width", std::round(w.gains.width * 1000) / 10}, {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted},
                                {"jump", w.jump}};
+                    if (w.jumpOut.size() == 2)
+                        wj["jump_out"] = w.jumpOut;
+                    if (w.jumpIn.size() == 2)
+                        wj["jump_in"] = w.jumpIn;
                     if (w.to.key)
                         wj["key"] = true;
                     reply["wire"] = wj;

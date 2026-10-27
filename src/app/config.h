@@ -58,6 +58,8 @@ struct WireSpec {
     std::string where;
     bool feedback = false; // heard a block late, so it may close a loop (see Wire)
     bool jump = false;     // only how the board draws it: out at its source, in at its end, by a letter
+    // ...and where its two letters are, from the ports, in board units: the app's to say (empty: where it puts them).
+    std::vector<double> jumpOut, jumpIn;
 };
 
 // A line of plug-ins in series, as an INI config and a version 1 .cue file

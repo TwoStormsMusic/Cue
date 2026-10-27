@@ -44,6 +44,16 @@ QJsonValue PortInfo::json(const QStringList& outputs) const {
     return index >= 0 && index < outputs.size() ? outputs[index] : QString("out%1").arg(index + 1);
 }
 
+void WireInfo::readJump(const QJsonObject& wj) {
+    jump = wj.value("jump").toBool();
+    auto point = [&](const char* key, QPointF def) {
+        const QJsonArray a = wj.value(key).toArray();
+        return a.size() == 2 ? QPointF(a[0].toDouble(), a[1].toDouble()) : def;
+    };
+    jumpOut = point("jump_out", {34, 0});
+    jumpIn = point("jump_in", {-34, 0});
+}
+
 QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QString& cmd) const {
     QJsonObject r{{"cmd", cmd}, {"chain", chain}, {"from", from.json(outputs)}, {"to", to.json(outputs)}};
     if (to.key)
@@ -56,6 +66,10 @@ QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QStri
         if (feedback)
             r["feedback"] = true;
         r["jump"] = jump;
+        if (jump) {
+            r["jump_out"] = QJsonArray{jumpOut.x(), jumpOut.y()};
+            r["jump_in"] = QJsonArray{jumpIn.x(), jumpIn.y()};
+        }
     }
     return r;
 }
@@ -220,7 +234,7 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 w.pan = wj.value("pan").toDouble(0);
                 w.muted = wj.value("muted").toBool();
                 w.feedback = wj.value("feedback").toBool();
-                w.jump = wj.value("jump").toBool();
+                w.readJump(wj);
                 c.wires << w;
             }
             scene.chains << c.index;
