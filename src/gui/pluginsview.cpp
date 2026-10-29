@@ -300,7 +300,7 @@ void PluginsView::sidebar(QPainter& p, const QRectF& r) {
         draw::text(p, row.adjusted(10 * u, 0, -10 * u - countW, 0), Qt::AlignLeft | Qt::AlignVCenter, it.text);
         if (it.count >= 0) {
             p.setPen(color::dim);
-            p.setFont(typeface(Face::Mono, 12 * u));
+            p.setFont(typeface(Face::Mono, 13 * u));
             p.drawText(row.adjusted(0, 0, -10 * u, 0), Qt::AlignRight | Qt::AlignVCenter, QString::number(it.count));
         }
         sideItems_.append({row, it.tap});
@@ -414,7 +414,7 @@ void PluginsView::list(QPainter& p, const QRectF& r) {
         p.setFont(typeface(Face::Text, 14 * u));
         p.setPen(color::text2);
         draw::text(p, cells[1], Qt::AlignLeft | Qt::AlignVCenter, sp.vendor);
-        p.setFont(typeface(Face::Mono, 12 * u));
+        p.setFont(typeface(Face::Mono, 13 * u));
         p.setPen(color::muted);
         draw::text(p, cells[2], Qt::AlignLeft | Qt::AlignVCenter, formatText(sp));
         p.setFont(typeface(Face::Text, 13 * u));
@@ -462,7 +462,7 @@ void PluginsView::list(QPainter& p, const QRectF& r) {
         const double f = cat.total > 0 ? std::clamp(double(cat.done) / cat.total, 0.0, 1.0) : 0;
         draw::card(p, QRectF(bar.left(), bar.top(), std::max(bar.height(), bar.width() * f), bar.height()), 3 * u, color::orange, QColor());
         p.setPen(color::muted);
-        p.setFont(typeface(Face::Mono, 12 * u));
+        p.setFont(typeface(Face::Mono, 13 * u));
         draw::text(p, QRectF(hint.left(), bar.bottom() + 6 * u, hint.width(), 22 * u), Qt::AlignLeft | Qt::AlignVCenter,
                    cat.current.isEmpty() ? QString("Scanning…") : "Opening " + cat.current.section('/', -1));
     } else {
@@ -545,7 +545,7 @@ void PluginsView::details(QPainter& p, const QRectF& r) {
         p.setFont(typeface(Face::Text, 13 * u));
         p.drawText(QRectF(r.left() + pad, y, keyW, 20 * u), Qt::AlignLeft | Qt::AlignTop, k);
         const bool mono = k == "ID" || k == "File";
-        p.setFont(mono ? typeface(Face::Mono, 11.5 * u) : typeface(Face::Text, 13 * u, QFont::Medium));
+        p.setFont(mono ? typeface(Face::Mono, 12.5 * u) : typeface(Face::Text, 13 * u, QFont::Medium));
         p.setPen(color::text2);
         const QRectF vr(r.left() + pad + keyW, y, w - keyW, r.bottom() - buttonsH - y);
         const QRectF used = p.boundingRect(vr, Qt::AlignLeft | Qt::AlignTop | Qt::TextWrapAnywhere, v);
@@ -597,7 +597,7 @@ void PluginsView::foldersPanel(QPainter& p, const QRectF& r) {
         y += used.height() + 10 * u;
     };
     para("On the computer running the engine, Cue looks in these and every folder inside them:", color::text2);
-    p.setFont(typeface(Face::Mono, 11.5 * u));
+    p.setFont(typeface(Face::Mono, 12.5 * u));
     p.setPen(color::muted);
     for (const QString& d : cat.usual) {
         draw::text(p, QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, d);
@@ -607,7 +607,7 @@ void PluginsView::foldersPanel(QPainter& p, const QRectF& r) {
     para(cat.extra.isEmpty() ? "And in folders you add:" : "And in yours:", color::text2);
     for (int i = 0; i < cat.extra.size(); ++i) {
         const double rbw = 78 * u;
-        p.setFont(typeface(Face::Mono, 11.5 * u));
+        p.setFont(typeface(Face::Mono, 12.5 * u));
         p.setPen(color::text);
         draw::text(p, QRectF(r.left() + pad, y, w - rbw - 8 * u, 34 * u), Qt::AlignLeft | Qt::AlignVCenter, cat.extra[i]);
         button(p, QString("remove folder %1").arg(i), QRectF(r.right() - pad - rbw, y, rbw, 34 * u), "Remove",

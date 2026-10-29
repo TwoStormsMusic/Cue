@@ -144,7 +144,10 @@ public:
     bool bypassed(size_t slot) const { return blocks_[slot]->bypassed; }
     // Before activation: what a bypassed slot passes on. Thru (the default)
     // passes its input on untouched; mute passes silence.
-    void setMuteOnBypass(size_t slot, bool mute) { blocks_[slot]->muteOnBypass = mute; }
+    void setMuteOnBypass(size_t slot, bool mute) {
+        blocks_[slot]->muteOnBypass = mute;
+        blocks_[slot]->thru.set(mute ? 0.0f : 1.0f);
+    }
     bool muteOnBypass(size_t slot) const { return blocks_[slot]->muteOnBypass; }
 
     // Main thread. Allocates every buffer the audio thread will need.
@@ -200,6 +203,9 @@ public:
     // is not being processed; only the slot's flags change. Slots are
     // numbered as in the last plan the chain was given.
     void setBypass(size_t slot, bool bypassed, uint32_t fadeFrames, bool idle = false);
+    // Audio thread: changes what a slot passes on while bypassed, fading
+    // between its input and silence when it is heard.
+    void changeMuteOnBypass(size_t slot, bool mute, uint32_t fadeFrames, bool idle = false);
     // Moves a wire's gains to new ones over fadeFrames.
     void setWireGains(uint32_t wire, WireGains gains, uint32_t fadeFrames);
     // For idle and resting chains: delivers queued parameter changes without processing.
@@ -235,6 +241,7 @@ private:
         Ramp wet{1.0f};    // 1 = processed, 0 = bypassed
         bool bypassed = false;
         bool muteOnBypass = false;
+        Ramp thru{1.0f};         // how much of its input it passes while bypassed: 1 thru, 0 mute
         bool hasKey = false;     // takes a side-chain input
         bool activated = false;  // by the chain
         bool draining = false;   // bypassed, still ringing out on silence

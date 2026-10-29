@@ -36,6 +36,7 @@ struct Removed {
     size_t slot = 0;
     PluginSpec spec;             // with its state as it was taken out
     std::vector<WireSpec> wires; // the chain's wires with it there
+    std::vector<LooseSpec> loose; // and its loose ones
     size_t blocks = 0;           // how many the chain had with it
 };
 
@@ -50,8 +51,10 @@ bool restorePlugin(LiveRig& live, const Removed& removed, std::string* error);
 // move with a short fade rather than a swap).
 bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error);
 bool removeWire(LiveRig& live, int chain, Port from, Port to, std::string* error);
-// A chain's wires all at once: what an undo puts back.
-bool setWires(LiveRig& live, int chain, const std::vector<WireSpec>& wires, std::string* error);
+// A chain's wires all at once: what an undo puts back. With loose, its
+// loose wires too (pulling a plug-in out, plugging one in); without wires,
+// only those, which change nothing heard.
+bool setWires(LiveRig& live, int chain, const std::vector<WireSpec>* wires, const std::vector<LooseSpec>* loose, std::string* error);
 // Where the routing board draws a plug-in.
 bool placePlugin(LiveRig& live, int chain, size_t slot, double x, double y, std::string* error);
 

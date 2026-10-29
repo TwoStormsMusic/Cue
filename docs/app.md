@@ -60,7 +60,7 @@ wire that carries sound to an output (or would, in a chain not playing);
 grey is bypassed or silent, and every wire while the inputs are muted;
 orange is what you selected. Tap a chain in the list to see it, tap it twice
 to play it. The wheel, two fingers or the **−**,
-**Fit** and **+** buttons (right of the chain's name, beside **+ Plug-in**) zoom; dragging open space or two fingers move it; a
+**Fit** and **+** buttons (right of the chain's name, beside **Select** and **+ Plug-in**) zoom; dragging open space or two fingers move it; a
 double tap on open space fits the whole chain again. Tap a block to move its
 parameters with sliders; tap it twice to switch it on or off. Tap a value to type
 one ("-3 dB", "250 ms": the plug-in reads it), and tap it twice to set it back to
@@ -103,7 +103,7 @@ is only how the board draws the wire: the sound, the .cue and anything
 made from it (an .RPP) are as for any wire.
 
 To move several plug-ins at once, Shift-click them (or turn on **Select**,
-beside the zoom, and tap them), or Shift-drag (with **Select** on, drag)
+beside **+ Plug-in**, and tap them), or Shift-drag (with **Select** on, drag)
 across open space: what the box touches joins the selection. Drag any of
 them and they all move, as one change to undo.
 A wire whose level, width or pan is changed is drawn thick, with a tag
@@ -112,7 +112,19 @@ selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
 room. **+ Plug-in** adds one to the board unwired. Both offer your
 favourite plug-ins, those the performance already has and the built-ins
 (gain, drive, lowpass, delay), and **Browse all plug-ins** for the rest. **Remove** on a block's panel, or Delete,
-takes a plug-in out with its wires. A plug-in that the input does not reach
+takes a plug-in out with its wires, joining what fed it to what it fed.
+**Pull out** takes it off its wires instead, as you would unplug a pedal:
+it moves just off them, and its wires stay where its dots were, attached to
+nothing (dashed grey, ending in a ring) and carrying nothing. Drag a
+plug-in so its input or output dot comes near a loose end and it goes onto
+it, and stays there unless you keep dragging it away; let go there and the
+wire plugs into it, with the level, width and pan it had. Or drag a loose
+end onto a dot. Tap a loose wire to select it; **Remove** (or Delete)
+throws it away. A plug-in with no wires dragged over a wire lights the
+wire: let go and it goes onto it, as **Insert** does.
+**When bypassed** on a block's panel says what it passes on while
+bypassed: **Thru** (its input, untouched) or **Mute** (nothing), as
+`bypass_mode` does; switched while it plays, it fades. A plug-in that the input does not reach
 or that no output hears is loaded but not processed, drawn grey and marked
 "not connected". The sound changes as you wire: a playing chain fades out
 and back in over 10 ms, a level, width or pan moves smoothly with no fade at

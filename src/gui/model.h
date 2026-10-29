@@ -63,6 +63,23 @@ struct WireInfo {
     QJsonObject request(int chain, const QStringList& outputs, const QString& cmd = "wire") const;
 };
 
+// A wire attached at one end only, left where a plug-in was pulled out:
+// it carries nothing until its loose end is plugged into something. from:
+// it leaves port, so its loose end wants an input; else it arrives at port.
+struct LooseInfo {
+    PortInfo port;
+    bool from = true;
+    QPointF at; // the loose end, in board units
+    double levelDb = 0, width = 100, pan = 0;
+    bool muted = false, feedback = false;
+    // As the wires request lists it.
+    QJsonObject json(const QStringList& outputs) const;
+    // The wire it makes, plugged into other; and the loose one a wire leaves
+    // when its end at side (from or to) is pulled out, lying at at.
+    WireInfo plugged(const PortInfo& other) const;
+    static LooseInfo of(const WireInfo& w, bool keepFrom, QPointF at);
+};
+
 struct ChainInfo {
     // The engine's number for it, which stays while the engine plays,
     // whatever is added, moved or taken out around it.
@@ -73,6 +90,7 @@ struct ChainInfo {
     QStringList onSelect; // actions, as a config writes them
     QVector<PluginInfo> blocks;
     QVector<WireInfo> wires;
+    QVector<LooseInfo> loose;
     int numPlugins() const { return blocks.size(); }
     const PluginInfo* plugin(int slot) const;
     // The wire between two ports, by its place in wires, or -1.

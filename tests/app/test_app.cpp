@@ -603,6 +603,19 @@ private slots:
         const QJsonObject bypass = link.last("bypass");
         QCOMPARE(bypass.value("slot").toInt(), 0);
         QCOMPARE(bypass.value("bypassed").toBool(), true);
+        // What it passes while bypassed: Thru is on, Mute switches it, and
+        // undo puts it back.
+        v->grab();
+        const int bypasses = static_cast<int>(std::count_if(link.sent.begin(), link.sent.end(), [](const QJsonObject& r) { return r.value("cmd") == "bypass"; }));
+        click(v, v->hitRect("bypass thru"));
+        QCOMPARE(link.last("bypass").value("bypassed").toBool(), true); // nothing sent
+        click(v, v->hitRect("bypass mute"));
+        QCOMPARE(link.last("bypass").value("mode").toString(), QString("mute"));
+        QVERIFY(!link.last("bypass").contains("bypassed"));
+        s.undo();
+        QCOMPARE(link.last("bypass").value("mode").toString(), QString("thru"));
+        QCOMPARE(static_cast<int>(std::count_if(link.sent.begin(), link.sent.end(), [](const QJsonObject& r) { return r.value("cmd") == "bypass"; })),
+                 bypasses + 2);
         // Another chain from the list, and play it.
         v->grab();
         click(v, v->hitRect("show 0"));
@@ -694,6 +707,12 @@ private slots:
         QCOMPARE(v->zoom(), 1.0);
         QCOMPARE(v->pan(), QPointF());
         v->grab();
+        // The board's buttons are one size, Select just left of + Plug-in.
+        const QRectF add = v->hitRect("add"), select = v->hitRect("select");
+        for (const char* id : {"select", "zoom in", "fit", "zoom out"})
+            QCOMPARE(v->hitRect(id).height(), add.height());
+        QVERIFY(select.right() < add.left() && add.left() - select.right() < 10);
+        QVERIFY(v->hitRect("zoom in").right() < select.left());
         click(v, v->hitRect("zoom in"));
         QVERIFY(v->zoom() > 1.2);
         v->grab();
@@ -772,6 +791,13 @@ private slots:
         click(v, v->hitRect("pick 112"));
         v->grab();
         QCOMPARE(v->shownParams().last(), 112);
+        // Further down the list.
+        if (v->hitRect("pick 115").isEmpty()) {
+            const QPointF at = v->hitRect("pick 112").center();
+            QWheelEvent wheel(at, v->mapToGlobal(at), {}, QPoint(0, -240), Qt::NoButton, {}, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(v, &wheel);
+            v->grab();
+        }
         click(v, v->hitRect("pick 115"));
         QVERIFY(v->shownParams().contains(115));
         shot(v, "chains-all-params");
@@ -1856,6 +1882,123 @@ private slots:
 
     // The app against the real engine: it plays, switches, reads plug-ins,
     // and finds the engine again after it was stopped and started.
+    void a_plugin_pulled_out_leaves_loose_wires_that_plug_back_in() {
+        // The engine, as far as the board needs it: places and wires kept,
+        // and the performance sent back with them.
+        FakeLink link;
+        QJsonObject perf = parse(kPerformance);
+        auto slapOf = [](QJsonObject& p, const std::function<void(QJsonObject&)>& change) {
+            QJsonArray scenes = p["scenes"].toArray();
+            QJsonObject scene = scenes[0].toObject();
+            QJsonArray chains = scene["chains"].toArray();
+            QJsonObject slap = chains[1].toObject();
+            change(slap);
+            chains[1] = slap;
+            scene["chains"] = chains;
+            scenes[0] = scene;
+            p["scenes"] = scenes;
+        };
+        link.answer = [&](const QJsonObject& r) -> QJsonObject {
+            if (r.value("cmd") == "place")
+                slapOf(perf, [&](QJsonObject& c) {
+                    QJsonArray blocks = c["blocks"].toArray();
+                    QJsonObject b = blocks[r.value("slot").toInt()].toObject();
+                    b["x"] = r.value("x");
+                    b["y"] = r.value("y");
+                    blocks[r.value("slot").toInt()] = b;
+                    c["blocks"] = blocks;
+                });
+            if (r.value("cmd") == "wires") {
+                slapOf(perf, [&](QJsonObject& c) {
+                    c["wires"] = r.value("wires");
+                    c["loose"] = r.value("loose");
+                });
+                return {{"ok", true}, {"performance", perf}};
+            }
+            return {{"ok", true}};
+        };
+        auto wired = [](const QJsonObject& r, int from, int to) {
+            for (const QJsonValue& v : r.value("wires").toArray())
+                if (v.toObject().value("from").toInt(-1) == from && v.toObject().value("to").toInt(-1) == to)
+                    return true;
+            return false;
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        QCOMPARE(v->shownChain(), 1);
+        auto drag = [v](QPointF from, QPointF to) {
+            QTest::mousePress(v, Qt::LeftButton, {}, from.toPoint());
+            for (int i = 1; i <= 4; ++i)
+                QTest::mouseMove(v, (from + (to - from) * i / 4).toPoint());
+            QTest::mouseRelease(v, Qt::LeftButton, {}, to.toPoint());
+        };
+
+        // The Wah pulled out: Gain Stage's wire into it and its wire on to
+        // Act stay, loose where its dots were, and it moves off them.
+        v->grab();
+        click(v, v->hitRect("block 1"));
+        QCOMPARE(v->selectedSlot(), 1);
+        v->grab();
+        const QPointF wasAt = Board(*s.chain(1), 2).block[1];
+        click(v, v->hitRect("pull out"));
+        const QJsonObject pulled = link.last("wires");
+        QVERIFY(!wired(pulled, 0, 1) && !wired(pulled, 1, 2) && wired(pulled, 2, 3));
+        const QJsonArray loose = pulled.value("loose").toArray();
+        QCOMPARE(loose.size(), 2);
+        QCOMPARE(loose[0].toObject().value("from").toInt(), 0);
+        QCOMPARE(loose[1].toObject().value("to").toInt(), 2);
+        QCOMPARE(s.chain(1)->loose.size(), 2);
+        QVERIFY(QLineF(s.chain(1)->blocks[1].at, wasAt).length() > 50);
+        QVERIFY(QLineF(s.chain(1)->loose[0].at, Board(*s.chain(1), 2, {{1, wasAt}}).inPoint(PortInfo::block(1))).length() < 0.1);
+        v->grab();
+        QVERIFY(!v->hitRect("loose 0").isEmpty() && !v->hitRect("loose 1").isEmpty());
+        shot(v, "routing-pulled-out");
+
+        // Dragged back near where it was, it goes onto the loose ends, and
+        // they plug into it.
+        const QPointF block = v->hitRect("block 1").center(), in = v->hitRect("port in 1").center();
+        const QPointF end = v->hitRect("loose 0").center();
+        drag(block, block + (end - in) + QPointF(6, -5));
+        const QJsonObject back = link.last("wires");
+        QVERIFY(wired(back, 0, 1) && wired(back, 1, 2));
+        QVERIFY(back.value("loose").toArray().isEmpty());
+        QVERIFY(s.chain(1)->loose.isEmpty());
+        QVERIFY(QLineF(s.chain(1)->blocks[1].at, wasAt).length() < 0.2);
+        // Undone, it is out again.
+        s.undo();
+        QCOMPARE(link.last("wires").value("loose").toArray().size(), 2);
+        QCOMPARE(s.chain(1)->loose.size(), 2);
+
+        // A loose end dragged onto a dot plugs in there: Gain Stage into Act.
+        v->grab();
+        drag(v->hitRect("loose 0").center(), v->hitRect("port in 2").center());
+        QVERIFY(wired(link.last("wires"), 0, 2));
+        QCOMPARE(s.chain(1)->loose.size(), 1);
+        // The other, tapped, is selected; Remove takes it away.
+        v->grab();
+        click(v, v->hitRect("loose 0"));
+        v->grab();
+        click(v, v->hitRect("remove loose"));
+        QVERIFY(s.chain(1)->loose.isEmpty());
+
+        // The Wah has no wires now: dropped on the wire from IR Loader to
+        // Chorus, it goes onto it.
+        v->grab();
+        const ChainInfo now = *s.chain(1);
+        const Board nb(now, 2);
+        const int ir = now.wire(PortInfo::block(3), PortInfo::block(4));
+        QVERIFY(ir >= 0);
+        drag(v->hitRect("block 1").center(), v->toScreen(nb.path(now.wires[ir]).pointAtPercent(0.5)) + QPointF(3, 4));
+        const QJsonObject onto = link.last("wires");
+        QVERIFY(wired(onto, 3, 1) && wired(onto, 1, 4) && !wired(onto, 3, 4));
+    }
+
     void with_the_engine() {
         QTemporaryDir dir;
         QFile demo(fromEnv("CUE_CONFIGS", CUE_SOURCE_DIR "/configs") + "/app-demo.ini");
@@ -1938,6 +2081,27 @@ private slots:
             [&] { QTRY_VERIFY_WITH_TIMEOUT(!reply.isEmpty(), 5000); }();
             return reply;
         };
+        // What the bypassed plug-in passes on, mute then thru again: the
+        // performance says so, and it stays bypassed.
+        QJsonObject mode = ask({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"mode", "mute"}});
+        QVERIFY2(mode.value("ok").toBool(), qPrintable(mode.value("error").toString()));
+        QVERIFY(s.perf.chains[1].plugin(2)->muteOnBypass);
+        QVERIFY(s.status.bypassed(1, 2));
+        mode = ask({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"mode", "thru"}});
+        QVERIFY(mode.value("ok").toBool());
+        QVERIFY(!s.perf.chains[1].plugin(2)->muteOnBypass);
+        QVERIFY(!ask({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"mode", "loud"}}).value("ok").toBool());
+        // Loose wires: kept with the chain and sent back, changing nothing heard.
+        QJsonObject loose = ask({{"cmd", "wires"}, {"chain", 1},
+                                 {"loose", QJsonArray{QJsonObject{{"from", 0}, {"x", 10}, {"y", 20}, {"level_db", -6}},
+                                                      QJsonObject{{"to", "FOH"}, {"x", 300}, {"y", 20}}}}});
+        QVERIFY2(loose.value("ok").toBool(), qPrintable(loose.value("error").toString()));
+        QCOMPARE(s.perf.chains[1].loose.size(), 2);
+        QCOMPARE(s.perf.chains[1].loose[0].levelDb, -6.0);
+        QCOMPARE(s.perf.chains[1].loose[1].port, PortInfo::output(0));
+        QVERIFY(!ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{QJsonObject{{"from", 0}, {"to", 1}}}}}).value("ok").toBool());
+        QVERIFY(ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{}}}).value("ok").toBool());
+        QVERIFY(s.perf.chains[1].loose.isEmpty());
         s.select(1);
         QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, 1, 3000);
         const int had = s.perf.chains[1].numPlugins();

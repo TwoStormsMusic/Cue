@@ -390,3 +390,51 @@ tap = out2
     CHECK(s.audio.outputChannels == (std::vector<unsigned>{1, 0, 2}));
     CHECK(s.warnings.size() == 1 && s.warnings[0].find("In-ear") != std::string::npos);
 }
+
+TEST(cue_file_keeps_loose_wires) {
+    // A plug-in pulled out of the middle of a chain: its wires stay, each
+    // attached at one end, with where the other end lies and its gains.
+    const std::string dir = tempDir();
+    Config ini;
+    std::string err;
+    CHECK_MSG(parseConfigText(R"(
+[performance Loose]
+inputs = Bass
+outputs = FOH, Amp
+[audio]
+device = hw:Test
+[chain Clean]
+plugin = builtin:gain 1
+plugin = builtin:gain 0.5
+)", dir + "/loose.ini", ini, &err), "%s", err.c_str());
+    ChainSpec& clean = ini.scenes.at(0).chains.at(0);
+    LooseSpec out;
+    out.port = Port::block(0);
+    out.from = true;
+    out.x = 120.25;
+    out.y = -40;
+    out.gains.levelDb = -6;
+    LooseSpec in;
+    in.port = Port::block(1, true);
+    in.from = false;
+    in.x = 300;
+    in.y = 80;
+    in.gains.pan = -0.5f;
+    in.feedback = true;
+    LooseSpec amp;
+    amp.port = Port::output(1);
+    amp.from = false;
+    clean.loose = {out, in, amp};
+    CHECK_MSG(saveCue(ini, dir + "/loose.cue", &err), "%s", err.c_str());
+    CHECK_MSG(saveRig(ini, dir + "/rig.json", &err), "%s", err.c_str());
+
+    Config c;
+    CHECK_MSG(loadPerformance(dir + "/loose.cue", dir + "/rig.json", c, &err), "%s", err.c_str());
+    const std::vector<LooseSpec>& loose = c.scenes.at(0).chains.at(0).loose;
+    CHECK(loose.size() == 3);
+    if (loose.size() != 3)
+        return;
+    CHECK(loose[0].from && loose[0].port == Port::block(0) && loose[0].x == 120.3 && loose[0].y == -40 && loose[0].gains.levelDb == -6);
+    CHECK(!loose[1].from && loose[1].port == Port::block(1, true) && loose[1].gains.pan == -0.5f && loose[1].feedback);
+    CHECK(!loose[2].from && loose[2].port == Port::output(1) && loose[2].gains.neutral());
+}

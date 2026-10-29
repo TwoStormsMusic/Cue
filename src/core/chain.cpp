@@ -421,6 +421,7 @@ Chain::PlanPtr Chain::prepare(ChainEdit& edit, std::string* error) {
             b->bypassed = a.bypassed;
             b->wet.set(a.bypassed ? 0.0f : 1.0f);
             b->muteOnBypass = a.muteOnBypass;
+            b->thru.set(a.muteOnBypass ? 0.0f : 1.0f);
             allocate(*b);
             added.push_back(b->processor.get());
         }
@@ -534,6 +535,18 @@ void Chain::holdTails(bool hold, uint32_t fadeFrames, uint32_t minTail) {
         else
             b.inGain.dbTo(1.0f, fadeFrames);
     }
+}
+
+void Chain::changeMuteOnBypass(size_t slot, bool mute, uint32_t fadeFrames, bool idle) {
+    Plan* p = latest();
+    if (!p || slot >= p->slots.size())
+        return;
+    Block& b = *p->slots[slot];
+    b.muteOnBypass = mute;
+    if (idle || !b.processing)
+        b.thru.set(mute ? 0.0f : 1.0f);
+    else
+        b.thru.linearTo(mute ? 0.0f : 1.0f, fadeFrames);
 }
 
 void Chain::setBypass(size_t slot, bool bypassed, uint32_t fadeFrames, bool idle) {
@@ -673,9 +686,19 @@ void Chain::processBlock(Block& b, const float* const* input, uint32_t frames) {
             drain(b, frames);
         else
             b.processor->flushIdle();
-        // Thru: the signal passes untouched. Mute: nothing passes.
-        for (int c = 0; c < kChainChannels; ++c)
-            b.res[c] = b.muteOnBypass ? silence_[c] : input[c];
+        // Thru: the signal passes untouched. Mute: nothing passes. Between
+        // the two, while switching, a fade.
+        if (b.thru.done()) {
+            for (int c = 0; c < kChainChannels; ++c)
+                b.res[c] = b.thru.value() == 0.0f ? silence_[c] : input[c];
+            return;
+        }
+        b.thru.render(gainScratch_.data(), frames);
+        for (int c = 0; c < kChainChannels; ++c) {
+            for (uint32_t n = 0; n < frames; ++n)
+                b.out[c][n] = input[c][n] * gainScratch_[n];
+            b.res[c] = b.out[c];
+        }
         return;
     }
     const bool fading = !b.wet.done() || b.wet.value() != 1.0f;
@@ -693,7 +716,13 @@ void Chain::processBlock(Block& b, const float* const* input, uint32_t frames) {
     b.processor->process(in, b.out, frames);
     if (fading) {
         b.wet.render(wetScratch_.data(), frames);
-        if (b.muteOnBypass) {
+        if (!b.thru.done()) {
+            // Switching between thru and mute during the bypass fade.
+            b.thru.render(gainScratch_.data(), frames);
+            for (int c = 0; c < kChainChannels; ++c)
+                for (uint32_t n = 0; n < frames; ++n)
+                    b.out[c][n] = wetScratch_[n] * b.out[c][n] + (1.0f - wetScratch_[n]) * gainScratch_[n] * input[c][n];
+        } else if (b.thru.value() == 0.0f) {
             for (int c = 0; c < kChainChannels; ++c)
                 for (uint32_t n = 0; n < frames; ++n)
                     b.out[c][n] *= wetScratch_[n];
@@ -702,6 +731,8 @@ void Chain::processBlock(Block& b, const float* const* input, uint32_t frames) {
                 for (uint32_t n = 0; n < frames; ++n)
                     b.out[c][n] = input[c][n] + wetScratch_[n] * (b.out[c][n] - input[c][n]);
         }
+    } else {
+        b.thru.skip(frames);
     }
     for (int c = 0; c < kChainChannels; ++c)
         b.res[c] = b.out[c];

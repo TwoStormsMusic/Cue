@@ -90,6 +90,11 @@ A `.cue` file is a zip:
   not processed. `x` and `y` are where the app's routing board draws a
   block the user put somewhere; a block without them is laid out from its
   wires.
+- **Loose wires.** `loose` (left out when there are none) lists wires
+  attached at one end only, left where a plug-in was pulled out of them:
+  each has `from` or `to` (as a wire's), `key`, `x` and `y` (where its loose
+  end lies on the board) and the wire's `level_db`, `width`, `pan`, `muted`
+  and `feedback`, kept for when it is plugged in again. They carry nothing.
 - **Format 1** files (Cue 0.4 to 0.6) have `lines` and `outputs` instead: the
   main line first, then branches, each taking a copy of the line named in
   `from` (`""` is the main line) after that many of its plug-ins, and each

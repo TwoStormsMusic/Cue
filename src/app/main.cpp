@@ -359,6 +359,30 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
     return true;
 }
 
+// A loose wire as the app sends it: "from" or "to" (the end still
+// attached), where its other end is, and its gains.
+bool looseOf(const Json& req, const Config& config, const ChainSpec& cs, LooseSpec& l, std::string* error) {
+    l.from = req.contains("from");
+    if (l.from == req.contains("to")) {
+        *error = "a loose wire has one end: from, or to";
+        return false;
+    }
+    if (!portOf(req.at(l.from ? "from" : "to"), l.from, req.value("key", false), config, cs, l.port, error))
+        return false;
+    l.x = req.value("x", 0.0);
+    l.y = req.value("y", 0.0);
+    l.gains.levelDb = req.value("level_db", 0.0f);
+    l.gains.width = req.value("width", 100.0f) / 100.0f;
+    l.gains.pan = req.value("pan", 0.0f) / 100.0f;
+    l.gains.muted = req.value("muted", false);
+    l.feedback = req.value("feedback", false);
+    if (l.gains.width < 0 || l.gains.width > 2 || l.gains.pan < -1 || l.gains.pan > 1) {
+        *error = "a wire's width is 0 to 200 % and its pan -100 to 100";
+        return false;
+    }
+    return true;
+}
+
 // A plug-in for the app: what it is, whether it is bypassed, and its
 // parameters with their values now.
 Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const std::vector<Show::ParamTie>& ties, const EditorHost* editors = nullptr) {
@@ -777,9 +801,31 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             Processor* p = rig.plugins[k].processor;
             if (cmd == "bypass") {
                 // Saved with the performance, like a change made in the file.
-                const bool bypassed = req.at("bypassed").get<bool>();
-                output.setBypass(chain, slot, bypassed);
-                ps->bypassed = bypassed;
+                // "bypassed" switches it; "mode" (thru or mute) is what it
+                // passes on while bypassed.
+                if (!req.contains("bypassed") && !req.contains("mode"))
+                    return refuse("bypass needs bypassed or mode");
+                if (req.contains("mode")) {
+                    const std::string mode = req.at("mode").get<std::string>();
+                    if (mode != "thru" && mode != "mute")
+                        return refuse("a bypass mode is thru or mute");
+                    ps->muteOnBypass = mode == "mute";
+                    rig.engine->setMuteOnBypass(chain, slot, ps->muteOnBypass);
+                }
+                if (req.contains("bypassed")) {
+                    const bool bypassed = req.at("bypassed").get<bool>();
+                    output.setBypass(chain, slot, bypassed);
+                    ps->bypassed = bypassed;
+                }
+                if (req.contains("mode")) {
+                    // Everyone watching sees what it now does.
+                    std::string why;
+                    Json now;
+                    if (livePerformance(now, &why)) {
+                        reply["performance"] = now;
+                        service.publish("performance", now);
+                    }
+                }
             } else if (cmd == "param") {
                 // "param", not "id": a request's "id" is its number on the socket.
                 const uint32_t id = req.at("param").get<uint32_t>();
@@ -912,15 +958,27 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     return;
                 }
             } else if (cmd == "wires") {
-                // The chain's wires all at once, as the performance lists them.
+                // The chain's wires all at once, as the performance lists
+                // them, and or its loose ones.
+                if (!req.contains("wires") && !req.contains("loose"))
+                    return refuse("wires needs wires or loose");
                 std::vector<WireSpec> wires;
-                for (const Json& wj : req.at("wires")) {
-                    WireSpec w;
-                    if (!wireOf(wj, config, *cs, w, &why))
-                        return refuse(why);
-                    wires.push_back(w);
-                }
-                if (!setWires(live, chain, wires, &why))
+                std::vector<LooseSpec> loose;
+                if (req.contains("wires"))
+                    for (const Json& wj : req.at("wires")) {
+                        WireSpec w;
+                        if (!wireOf(wj, config, *cs, w, &why))
+                            return refuse(why);
+                        wires.push_back(w);
+                    }
+                if (req.contains("loose"))
+                    for (const Json& lj : req.at("loose")) {
+                        LooseSpec l;
+                        if (!looseOf(lj, config, *cs, l, &why))
+                            return refuse(why);
+                        loose.push_back(l);
+                    }
+                if (!setWires(live, chain, req.contains("wires") ? &wires : nullptr, req.contains("loose") ? &loose : nullptr, &why))
                     return refuse(why);
             } else {
                 // Only where it is drawn: the app that asked knows.

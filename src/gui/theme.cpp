@@ -29,8 +29,11 @@ void loadFonts() {
 QFont typeface(Face face, double px, int weight) {
     QFont f(face == Face::Display ? "Barlow Condensed" : face == Face::Mono ? "JetBrains Mono" : "Inter");
     f.setPixelSize(std::max(1, static_cast<int>(std::lround(px))));
-    f.setWeight(static_cast<QFont::Weight>(weight));
-    f.setHintingPreference(QFont::PreferNoHinting);
+    // Light text on black looks thinner than it is: the plain weight is
+    // drawn a step heavier, and lines are fitted to the pixel rows so small
+    // text stays sharp rather than soft.
+    f.setWeight(static_cast<QFont::Weight>(weight == QFont::Normal && face != Face::Display ? QFont::Medium : weight));
+    f.setHintingPreference(QFont::PreferVerticalHinting);
     return f;
 }
 

@@ -229,6 +229,32 @@ struct Writer {
             wires.push_back(wj);
         }
         j["wires"] = wires;
+        if (!c.loose.empty()) {
+            json loose = json::array();
+            for (const LooseSpec& l : c.loose) {
+                json lj;
+                if (l.from)
+                    lj["from"] = l.port.kind == Port::Kind::Input ? json(config.inputs.at(c.inputIndex)) : json(l.port.index);
+                else
+                    lj["to"] = l.port.kind == Port::Kind::Output ? json(config.outputs.at(l.port.index)) : json(l.port.index);
+                if (!l.from && l.port.key)
+                    lj["key"] = true;
+                lj["x"] = std::round(l.x * 10) / 10;
+                lj["y"] = std::round(l.y * 10) / 10;
+                if (l.gains.levelDb != 0.0f)
+                    lj["level_db"] = std::max(kWireOffDb, std::round(l.gains.levelDb * 100) / 100);
+                if (l.gains.width != 1.0f)
+                    lj["width"] = std::round(l.gains.width * 1000) / 10;
+                if (l.gains.pan != 0.0f)
+                    lj["pan"] = std::round(l.gains.pan * 1000) / 10;
+                if (l.gains.muted)
+                    lj["muted"] = true;
+                if (l.feedback)
+                    lj["feedback"] = true;
+                loose.push_back(lj);
+            }
+            j["loose"] = loose;
+        }
         return true;
     }
 
@@ -470,33 +496,31 @@ struct Reader {
                 }
                 c.blocks.push_back(std::move(ps));
             }
-        if (!j.contains("wires"))
-            return;
         const std::string input = c.input.empty() ? config.inputs.at(0) : c.input;
-        for (const json& wj : j.at("wires")) {
+        auto end = [&](const json& e, bool from) {
+            if (e.is_number_integer()) {
+                const long n = e.get<long>();
+                if (n < 0 || static_cast<size_t>(n) >= c.blocks.size())
+                    throw std::runtime_error("chain '" + c.name + "': a wire " + (from ? "comes from" : "goes to") + " block " +
+                                             std::to_string(n) + ", and it has " + std::to_string(c.blocks.size()) +
+                                             " block(s), numbered from 0");
+                return Port::block(static_cast<int>(n));
+            }
+            const std::string name = e.get<std::string>();
+            if (from) {
+                // Its own input, by name.
+                if (!same(name, input) && !same(name, "in"))
+                    throw std::runtime_error("chain '" + c.name + "' plays input " + input + "; a wire cannot come from '" + name + "'");
+                return Port::input();
+            }
+            for (size_t o = 0; o < config.outputs.size(); ++o)
+                if (same(config.outputs[o], name))
+                    return Port::output(static_cast<int>(o));
+            throw std::runtime_error("chain '" + c.name + "': a wire goes to output '" + name + "', which the performance does not have");
+        };
+        for (const json& wj : j.value("wires", json::array())) {
             WireSpec w;
             w.where = c.where;
-            auto end = [&](const json& e, bool from) {
-                if (e.is_number_integer()) {
-                    const long n = e.get<long>();
-                    if (n < 0 || static_cast<size_t>(n) >= c.blocks.size())
-                        throw std::runtime_error("chain '" + c.name + "': a wire " + (from ? "comes from" : "goes to") + " block " +
-                                                 std::to_string(n) + ", and it has " + std::to_string(c.blocks.size()) +
-                                                 " block(s), numbered from 0");
-                    return Port::block(static_cast<int>(n));
-                }
-                const std::string name = e.get<std::string>();
-                if (from) {
-                    // Its own input, by name.
-                    if (!same(name, input) && !same(name, "in"))
-                        throw std::runtime_error("chain '" + c.name + "' plays input " + input + "; a wire cannot come from '" + name + "'");
-                    return Port::input();
-                }
-                for (size_t o = 0; o < config.outputs.size(); ++o)
-                    if (same(config.outputs[o], name))
-                        return Port::output(static_cast<int>(o));
-                throw std::runtime_error("chain '" + c.name + "': a wire goes to output '" + name + "', which the performance does not have");
-            };
             w.from = end(wj.at("from"), true);
             w.to = end(wj.at("to"), false);
             if (wj.value("key", false)) {
@@ -516,6 +540,29 @@ struct Reader {
                 throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
             c.wires.push_back(w);
         }
+        // Wires attached at one end only, with where the other end lies.
+        if (j.contains("loose"))
+            for (const json& lj : j.at("loose")) {
+                LooseSpec l;
+                l.from = lj.contains("from");
+                if (l.from == lj.contains("to"))
+                    throw std::runtime_error("chain '" + c.name + "': a loose wire has one end, from or to");
+                const Port p = end(lj.at(l.from ? "from" : "to"), l.from);
+                l.port = p;
+                if (!l.from && lj.value("key", false)) {
+                    if (p.kind != Port::Kind::Block)
+                        throw std::runtime_error("chain '" + c.name + "': only a plug-in has a key (a side-chain input)");
+                    l.port.key = true;
+                }
+                l.x = lj.value("x", 0.0);
+                l.y = lj.value("y", 0.0);
+                l.gains.levelDb = lj.value("level_db", 0.0f);
+                l.gains.width = lj.value("width", 100.0f) / 100.0f;
+                l.gains.pan = lj.value("pan", 0.0f) / 100.0f;
+                l.gains.muted = lj.value("muted", false);
+                l.feedback = lj.value("feedback", false);
+                c.loose.push_back(l);
+            }
     }
 
     // Format 1: lines, and where each output is taken.

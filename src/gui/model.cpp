@@ -74,6 +74,48 @@ QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QStri
     return r;
 }
 
+QJsonObject LooseInfo::json(const QStringList& outputs) const {
+    QJsonObject r{{from ? "from" : "to", port.json(outputs)}, {"x", at.x()}, {"y", at.y()}};
+    if (!from && port.key)
+        r["key"] = true;
+    if (levelDb != 0)
+        r["level_db"] = levelDb;
+    if (width != 100)
+        r["width"] = width;
+    if (pan != 0)
+        r["pan"] = pan;
+    if (muted)
+        r["muted"] = true;
+    if (feedback)
+        r["feedback"] = true;
+    return r;
+}
+
+WireInfo LooseInfo::plugged(const PortInfo& other) const {
+    WireInfo w;
+    w.from = from ? port : other;
+    w.to = from ? other : port;
+    w.levelDb = levelDb;
+    w.width = width;
+    w.pan = pan;
+    w.muted = muted;
+    w.feedback = feedback;
+    return w;
+}
+
+LooseInfo LooseInfo::of(const WireInfo& w, bool keepFrom, QPointF at) {
+    LooseInfo l;
+    l.port = keepFrom ? w.from : w.to;
+    l.from = keepFrom;
+    l.at = at;
+    l.levelDb = w.levelDb;
+    l.width = w.width;
+    l.pan = w.pan;
+    l.muted = w.muted;
+    l.feedback = w.feedback;
+    return l;
+}
+
 const PluginInfo* ChainInfo::plugin(int slot) const { return slot >= 0 && slot < blocks.size() ? &blocks[slot] : nullptr; }
 
 int ChainInfo::wire(const PortInfo& from, const PortInfo& to) const {
@@ -236,6 +278,20 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 w.feedback = wj.value("feedback").toBool();
                 w.readJump(wj);
                 c.wires << w;
+            }
+            for (const QJsonValue& lv : cj.value("loose").toArray()) {
+                const QJsonObject lj = lv.toObject();
+                LooseInfo l;
+                l.from = lj.contains("from");
+                if (!port(lj.value(l.from ? "from" : "to"), l.from, lj.value("key").toBool(), l.port))
+                    continue;
+                l.at = QPointF(lj.value("x").toDouble(), lj.value("y").toDouble());
+                l.levelDb = lj.value("level_db").toDouble(0);
+                l.width = lj.value("width").toDouble(100);
+                l.pan = lj.value("pan").toDouble(0);
+                l.muted = lj.value("muted").toBool();
+                l.feedback = lj.value("feedback").toBool();
+                c.loose << l;
             }
             scene.chains << c.index;
             perf.chains << c;

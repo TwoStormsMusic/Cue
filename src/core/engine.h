@@ -55,10 +55,10 @@ enum class ChainState : uint8_t {
 const char* toString(ChainState s);
 
 struct EngineCommand {
-    enum class Type : uint8_t { SwitchTo, SetWarm, SetBypass, SetMute, Edit, SetWire } type;
-    int chain = -1;     // SwitchTo, SetWarm (-1 = no warm chain), SetBypass, Edit, SetWire
-    uint32_t slot = 0;  // SetBypass; SetWire: the wire's id
-    bool on = false;    // SetBypass: bypassed; SetMute: muted
+    enum class Type : uint8_t { SwitchTo, SetWarm, SetBypass, SetMute, Edit, SetWire, SetBypassMode } type;
+    int chain = -1;     // SwitchTo, SetWarm (-1 = no warm chain), SetBypass, SetBypassMode, Edit, SetWire
+    uint32_t slot = 0;  // SetBypass, SetBypassMode; SetWire: the wire's id
+    bool on = false;    // SetBypass: bypassed; SetMute: muted; SetBypassMode: mutes when bypassed
     WireGains gains;    // SetWire
     Chain::Plan* plan = nullptr; // Edit
 };
@@ -136,6 +136,11 @@ public:
     // on a playing chain with a short crossfade.
     bool setBypass(int chain, size_t slot, bool bypassed) {
         return post({EngineCommand::Type::SetBypass, chain, static_cast<uint32_t>(slot), bypassed});
+    }
+    // What a slot passes on while bypassed: its input (thru) or silence
+    // (mute). Heard, the change fades as a bypass does.
+    bool setMuteOnBypass(int chain, size_t slot, bool mute) {
+        return post({EngineCommand::Type::SetBypassMode, chain, static_cast<uint32_t>(slot), mute});
     }
     // Silences every input, with a short fade, so delays and reverbs ring
     // out. A chain that has gone quiet (tailQuietDb for tailHoldMs) then

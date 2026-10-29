@@ -83,7 +83,7 @@ QVector<QRectF> chipRects(const QStringList& texts, const QRectF& area, double u
 QFont chipFont(double u) { return typeface(Face::Text, 14 * u); }
 
 QFont labelFont(double u) {
-    QFont f = typeface(Face::Text, 11.5 * u, QFont::DemiBold);
+    QFont f = typeface(Face::Text, 12.5 * u, QFont::DemiBold);
     f.setLetterSpacing(QFont::AbsoluteSpacing, 1.3 * u);
     return f;
 }
@@ -195,7 +195,7 @@ void ChainView::sidebar(QPainter& p, const QRectF& r) {
         draw::text(p, row.adjusted(14 * u, 0, -tagW - 8 * u, 0), Qt::AlignLeft | Qt::AlignVCenter, c->name);
         if (!tag.isEmpty()) {
             p.setPen(index == playing ? color::orange : color::muted);
-            p.setFont(typeface(Face::Text, 12 * u));
+            p.setFont(typeface(Face::Text, 13 * u));
             p.drawText(row.adjusted(0, 0, -10 * u, 0), Qt::AlignRight | Qt::AlignVCenter, tag);
         }
         // A tap shows the chain; a double tap plays it too.

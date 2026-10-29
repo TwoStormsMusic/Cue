@@ -467,6 +467,17 @@ Needs REAPER with ReaLearn (Helgobox) on the rig, and Qt 6 (as for the Cue app).
 
 Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn effects, the tuner and the wah on but not off.
 
+## 21. Pull out, Thru / Mute, easier text (0.9.5)
+
+`bin/cue-app --version` should say 0.9.5.
+
+1. **Board buttons.** **+ Plug-in** is the same height and text size as **Select**, **−**, **Fit** and **+**, and **Select** is right beside it.
+2. **Text.** Everything in the app reads heavier and sharper, the greys are lighter, and the smallest text (labels on the blocks, the wire tags, the key) is a step bigger. Say if it is still tiring, and where.
+3. **Thru / Mute.** Select a plug-in: under **Open editor**, **When bypassed** shows **Thru** or **Mute**. Bypass it while playing and switch between the two: the sound goes between the plug-in's input and silence with no click. **Undo** puts it back; **Save** and open again: it stays.
+4. **Pull out.** Select a plug-in in the middle of a chain and tap **Pull out**: it moves up off its wires, the wires stay where its dots were, dashed grey with a ring at the loose end, and the chain goes silent after it. Drag it back near where it was: as its dots come near the rings it jumps onto them, and keeps there unless you drag on further away. Let go: the wires are plugged in and it plays again. **Undo**: out again.
+5. **Loose ends.** Pull a plug-in out, then drag one ring onto another plug-in's dot: it plugs in there (with the level the wire had). Tap the other loose wire, tap **Remove**: it goes. **Save** and open again with a loose wire left: it is still there.
+6. **Drop on a wire.** Add a plug-in (+ Plug-in, unwired), drag it over a wire: the wire lights orange dashed. Let go: the plug-in is on it, as with **Insert**.
+
 ## What passes
 
 | Check | Pass when |

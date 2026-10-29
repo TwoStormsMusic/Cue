@@ -426,6 +426,13 @@ void Engine::handle(const EngineCommand& cmd) {
             s.chain->setBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
         }
         break;
+    case EngineCommand::Type::SetBypassMode:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
+            Slot& s = chains_[cmd.chain];
+            const bool idle = s.state == ChainState::Idle;
+            s.chain->changeMuteOnBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
+        }
+        break;
     case EngineCommand::Type::Edit:
         if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
             Slot& s = chains_[cmd.chain];

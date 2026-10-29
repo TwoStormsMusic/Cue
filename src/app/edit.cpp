@@ -189,7 +189,7 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
     ChainSpec* cs = chainSpec(live.config, chain);
     if (!cs || slot >= cs->blocks.size())
         return fail(error, "there is no plug-in " + std::to_string(slot + 1) + " in chain number " + std::to_string(chain + 1));
-    Removed taken{chain, slot, cs->blocks[slot], cs->wires, cs->blocks.size()};
+    Removed taken{chain, slot, cs->blocks[slot], cs->wires, cs->loose, cs->blocks.size()};
     if (removed)
         if (Processor* p = live.rig.at(chain, slot))
             captureState(*p, taken.spec);
@@ -218,6 +218,16 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
             if (p->kind == Port::Kind::Block && p->index > self.index)
                 --p->index;
     next.wires = std::move(wires);
+    // Its loose wires go with it; the others' plug-ins are renumbered.
+    std::vector<LooseSpec> loose;
+    for (LooseSpec l : next.loose) {
+        if (l.port.kind == Port::Kind::Block && l.port.index == self.index)
+            continue;
+        if (l.port.kind == Port::Kind::Block && l.port.index > self.index)
+            --l.port.index;
+        loose.push_back(l);
+    }
+    next.loose = std::move(loose);
     next.blocks.erase(next.blocks.begin() + static_cast<long>(slot));
     std::vector<int> keep;
     for (size_t i = 0; i < cs->blocks.size(); ++i)
@@ -243,6 +253,7 @@ bool restorePlugin(LiveRig& live, const Removed& removed, std::string* error) {
     ChainSpec next = *cs;
     next.blocks.insert(next.blocks.begin() + static_cast<long>(removed.slot), removed.spec);
     next.wires = removed.wires;
+    next.loose = removed.loose;
     std::vector<int> keep;
     for (size_t i = 0; i < next.blocks.size(); ++i)
         keep.push_back(i < removed.slot ? static_cast<int>(i) : i == removed.slot ? -1 : static_cast<int>(i) - 1);
@@ -284,13 +295,24 @@ bool removeWire(LiveRig& live, int chain, Port from, Port to, std::string* error
     return rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error);
 }
 
-bool setWires(LiveRig& live, int chain, const std::vector<WireSpec>& wires, std::string* error) {
+bool setWires(LiveRig& live, int chain, const std::vector<WireSpec>* wires, const std::vector<LooseSpec>* loose, std::string* error) {
     ChainSpec* cs = chainSpec(live.config, chain);
     if (!cs)
         return fail(error, "there is no chain number " + std::to_string(chain + 1));
-    ChainSpec next = *cs;
-    next.wires = wires;
-    return rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error);
+    if (loose)
+        for (const LooseSpec& l : *loose)
+            if (l.port.kind == Port::Kind::Block && (l.port.index < 0 || static_cast<size_t>(l.port.index) >= cs->blocks.size()))
+                return fail(error, "a loose wire names a plug-in chain " + cs->name + " does not have");
+    if (wires) {
+        ChainSpec next = *cs;
+        next.wires = *wires;
+        if (!rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error))
+            return false;
+        cs = chainSpec(live.config, chain);
+    }
+    if (loose)
+        cs->loose = *loose;
+    return true;
 }
 
 bool placePlugin(LiveRig& live, int chain, size_t slot, double x, double y, std::string* error) {

@@ -163,6 +163,8 @@ private:
     void requestPlugin();
     void setParam(const QJsonObject& param, double value, bool done);
     void setBypass(int chain, int slot, bool bypassed);
+    // Thru or mute: what it passes on while bypassed.
+    void setBypassMode(int chain, int slot, bool mute);
     // The routing board.
     void pin(const ChainInfo& c);
     void tapBlock(int slot);
@@ -172,6 +174,28 @@ private:
     void connectPorts(PortInfo from, PortInfo to);
     void removeWire(int wire);
     void removePlugin(int slot);
+    // Pulls a plug-in off its wires: they stay, loose, where its dots were,
+    // and it moves just below. A plug-in's dot dragged onto a loose end, or
+    // a loose end onto a dot, plugs it in again.
+    void pullOut(int slot);
+    void dragLoose(int loose, QPointF pos, bool done);
+    void removeLoose(int loose);
+    void loosePanel(QPainter& p, const QRectF& r, const ChainInfo& c);
+    // A chain's wires and loose wires set at once, undoably: what pulling
+    // out and plugging in do. place, if given, moves a plug-in with them.
+    struct Place {
+        int slot = -1;
+        QPointF from, to;
+    };
+    void rewire(const ChainInfo& c, const QVector<WireInfo>& wires, const QVector<LooseInfo>& loose, const QString& what, Place place);
+    void rewire(const ChainInfo& c, const QVector<WireInfo>& wires, const QVector<LooseInfo>& loose, const QString& what) {
+        rewire(c, wires, loose, what, Place());
+    }
+    QJsonObject wiresRequest(const ChainInfo& c, const QVector<WireInfo>& wires, const QVector<LooseInfo>& loose) const;
+    // While a plug-in is dragged: the loose ends its dots would plug into
+    // where it is, and the wire it would go onto when it has none.
+    QVector<int> pluggedAt(const ChainInfo& c, int slot, QPointF at) const;
+    int wireUnder(const ChainInfo& c, int slot, QPointF at) const;
     void addPlugin(const PluginInfo& what);
     void setGains(const WireInfo& gains, bool done);
     WireInfo wireNow(const ChainInfo& c, int wire) const;
@@ -253,6 +277,14 @@ private:
     // performance comes back changed.
     bool wireOn_ = false;
     PortInfo wireFrom_, wireTo_;
+    // A loose wire selected, by its place in the chain's list; one whose
+    // end is being dragged, and where to; where each can be tapped.
+    int looseSel_ = -1, looseDrag_ = -1;
+    bool looseMoved_ = false;
+    QPointF looseStart_, looseFrom_, looseAt_;
+    QVector<QPainterPath> looseShapes_;
+    // The wire a dragged plug-in with none would go onto, or -1.
+    int insertWire_ = -1;
     // Its gains while a slider moves, and as they were before.
     int gainDrag_ = -1; // 0 level, 1 width, 2 pan
     bool gainReset_ = false;

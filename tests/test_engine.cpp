@@ -652,6 +652,40 @@ TEST(mute_on_bypass_fades_without_clicks) {
     CHECK_MSG(worst <= 1.5f * steady, "largest step %.5f, steady reaches %.5f", worst, steady);
 }
 
+TEST(bypass_mode_changes_while_playing_and_fades) {
+    // Bypassed, switched between thru and mute, and back, over and over:
+    // what it passes follows, with no step larger than the sine's own.
+    const float steady = steadyStep([] { return chain("A", slots(new GainProcessor(0.8f))); });
+    Engine e(settings());
+    e.addChain(chain("A", slots(new GainProcessor(0.8f))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    e.setBypass(0, 0, true);
+    h.runSeconds(0.1);
+    const size_t from = h.out[0].size();
+    h.run(h.blocksFor(3.0), [&](size_t b) {
+        if (b % h.blocksFor(0.3) == 0)
+            e.setMuteOnBypass(0, 0, (b / h.blocksFor(0.3)) % 2 == 0);
+        // Half way, it is switched on and off too.
+        if (b % h.blocksFor(0.3) == h.blocksFor(0.15))
+            e.setBypass(0, 0, (b / h.blocksFor(0.3)) % 3 != 0);
+    });
+    const float worst = maxStep(h.out[0], from);
+    CHECK_MSG(worst <= 1.5f * steady, "largest step %.5f, steady reaches %.5f", worst, steady);
+    // Settled: mute passes nothing, thru the input.
+    e.setBypass(0, 0, true);
+    e.setMuteOnBypass(0, 0, true);
+    h.runSeconds(0.1);
+    CHECK_MSG(h.out[0].back() == 0.0f, "mute plays %.5f", h.out[0].back());
+    e.setMuteOnBypass(0, 0, false);
+    h.runSeconds(0.1);
+    float peak = 0;
+    for (size_t i = h.out[0].size() - 2000; i < h.out[0].size(); ++i)
+        peak = std::max(peak, std::fabs(h.out[0][i]));
+    CHECK_MSG(peak > 0.45f, "thru plays a peak of %.5f", peak);
+}
+
 TEST(sidechain_feeds_a_slot_from_an_earlier_one) {
     auto c = chain("A", slots(new GainProcessor(0.5f), new GainProcessor(0.1f), new KeyProcessor));
     CHECK(!c->setSidechain(0, 2)); // a later slot cannot key an earlier one

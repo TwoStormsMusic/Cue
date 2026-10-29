@@ -402,7 +402,7 @@ void level(QPainter& p, const QRectF& bar, const TunerReading& t, double u) {
              std::min(bar.height(), bar.width() * f) / 2);
     if (t.valid && t.signal) {
         p.setPen(ts::faint);
-        p.setFont(typeface(Face::Text, 11 * u));
+        p.setFont(typeface(Face::Text, 12.5 * u));
         p.drawText(QRectF(bar.left() - 140 * u, bar.center().y() - 8 * u, 132 * u, 16 * u), Qt::AlignRight | Qt::AlignVCenter,
                    t.levelDb > -66 ? "signal" : "quiet");
     }
