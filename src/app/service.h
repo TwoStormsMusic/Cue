@@ -47,7 +47,10 @@ public:
 
     // Accepts clients, reads and answers their requests and sends what is
     // waiting, for up to timeoutMs (returning early once something happened).
-    void poll(int timeoutMs);
+    // also holds file descriptors that belong to something else (a plug-in
+    // editor's screen): the wait ends when one of them has something too, so
+    // the caller can see to it.
+    void poll(int timeoutMs, const std::vector<int>& also = {});
     // To every client subscribed to the event.
     void publish(const std::string& event, Json body);
     bool subscribed(const std::string& event) const;

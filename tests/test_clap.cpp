@@ -22,6 +22,16 @@ namespace {
 const char* kTestClap = std::getenv("CUE_TEST_CLAP") ? std::getenv("CUE_TEST_CLAP") : CUE_TEST_CLAP;
 constexpr uint32_t kBlock = 64;
 
+// As if the last gain plug-in made had its knob turned in its editor.
+void turn(double value, bool gesture) {
+    static auto fn = [] {
+        void* h = dlopen(kTestClap, RTLD_NOW | RTLD_NOLOAD);
+        return h ? reinterpret_cast<void (*)(double, int)>(dlsym(h, "cue_test_turn")) : nullptr;
+    }();
+    if (fn)
+        fn(value, gesture ? 1 : 0);
+}
+
 long stat(const char* name) {
     static auto fn = [] {
         void* h = dlopen(kTestClap, RTLD_NOW | RTLD_NOLOAD);
@@ -96,6 +106,14 @@ TEST(clap_param_change_reaches_the_plugin) {
     runConstant(e, 0.5f, 100);
     CHECK(g->setParam(0, 0.5));
     CHECK(std::fabs(runConstant(e, 0.5f, 2) - 0.25f) < 1e-6f);
+    // What the app shows beside the slider.
+    double value = 0;
+    CHECK(g->paramValue(0, value));
+    CHECK(std::fabs(value - 0.5) < 1e-9);
+    CHECK(g->paramText(0, value) == "0.500");
+    // A value typed, as the plug-in reads it.
+    CHECK(g->paramFromText(0, "0.75", value) && std::fabs(value - 0.75) < 1e-9);
+    CHECK(!g->paramValue(7, value));
 }
 
 TEST(clap_idle_plugin_gets_params_without_processing) {
@@ -117,6 +135,105 @@ TEST(clap_idle_plugin_gets_params_without_processing) {
     e.switchTo(1);
     CHECK(std::fabs(runConstant(e, 0.5f, 300) - 1.0f) < 1e-5f);
     CHECK(stat("process_while_stopped") == stoppedBefore);
+}
+
+TEST(clap_resting_plugin_gets_params_while_the_inputs_are_muted) {
+    Engine e(settings());
+    auto gain = load("cue.test.gain");
+    ClapProcessor* g = gain.get();
+    std::vector<std::unique_ptr<Processor>> chain;
+    chain.push_back(std::move(gain));
+    e.addChain(chainOf(std::move(chain)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    runConstant(e, 0.5f, 100);
+    e.setMute(true);
+    runConstant(e, 0.5f, 400); // quiet for long enough: resting
+    CHECK(e.resting(0));
+    CHECK(g->setParam(0, 1.5));
+    runConstant(e, 0.5f, 10);
+    double value = 0;
+    CHECK(g->paramValue(0, value));
+    CHECK_MSG(std::fabs(value - 1.5) < 1e-9, "value %.3f", value);
+    e.setMute(false);
+    CHECK(std::fabs(runConstant(e, 0.5f, 100) - 0.75f) < 1e-5f);
+}
+
+// A slider moved on a plug-in that is switched off: it takes the value at
+// once, so the app reads it back, and plays with it when switched on.
+TEST(clap_bypassed_plugin_gets_params_in_a_playing_chain) {
+    markClapAudioThread();
+    Engine e(settings());
+    auto gain = load("cue.test.gain");
+    ClapProcessor* g = gain.get();
+    std::vector<std::unique_ptr<Processor>> chain;
+    chain.push_back(std::move(gain));
+    e.addChain(chainOf(std::move(chain)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    runConstant(e, 0.5f, 100);
+    CHECK(e.setBypass(0, 0, true));
+    runConstant(e, 0.5f, 400);
+    CHECK(g->setParam(0, 1.5));
+    CHECK(std::fabs(runConstant(e, 0.5f, 10) - 0.5f) < 1e-6f);
+    double value = 0;
+    CHECK(g->paramValue(0, value));
+    CHECK_MSG(std::fabs(value - 1.5) < 1e-9, "value %.3f", value);
+    CHECK(e.setBypass(0, 0, false));
+    CHECK(std::fabs(runConstant(e, 0.5f, 200) - 0.75f) < 1e-5f);
+}
+
+// What the plug-in's own editor changes comes back as edits to undo: one per
+// gesture, or one per burst of changes from a plug-in that makes none;
+// switched off or not.
+TEST(clap_editor_changes_come_back_as_edits) {
+    markClapAudioThread();
+    Engine e(settings());
+    auto gain = load("cue.test.gain");
+    ClapProcessor* g = gain.get();
+    std::vector<std::unique_ptr<Processor>> chain;
+    chain.push_back(std::move(gain));
+    e.addChain(chainOf(std::move(chain)));
+    CHECK(e.activate());
+    e.switchTo(0);
+    CHECK(g->setParam(0, 1.0));
+    runConstant(e, 0.5f, 100);
+    std::vector<ParamEdit> edits;
+    g->takeEditorEdits(edits);
+    CHECK(edits.empty());
+
+    turn(1.5, true);
+    CHECK(std::fabs(runConstant(e, 0.5f, 4) - 0.75f) < 1e-5f);
+    g->takeEditorEdits(edits);
+    CHECK_MSG(edits.size() == 1, "%zu edits", edits.size());
+    if (edits.size() == 1)
+        CHECK(edits[0].id == 0 && edits[0].from == 1.0 && edits[0].to == 1.5);
+
+    // No gesture: kept once the knob has been still for a moment.
+    edits.clear();
+    turn(0.5, false);
+    runConstant(e, 0.5f, 4);
+    g->takeEditorEdits(edits);
+    CHECK(edits.empty());
+    std::this_thread::sleep_for(EditorEdits::kQuiet + std::chrono::milliseconds(50));
+    g->takeEditorEdits(edits);
+    CHECK_MSG(edits.size() == 1 && edits[0].from == 1.5 && edits[0].to == 0.5, "%zu edits", edits.size());
+
+    // Switched off: the editor still moves it, and it still comes back.
+    edits.clear();
+    CHECK(e.setBypass(0, 0, true));
+    runConstant(e, 0.5f, 400);
+    turn(2.0, true);
+    runConstant(e, 0.5f, 4);
+    g->takeEditorEdits(edits);
+    CHECK_MSG(edits.size() == 1 && edits[0].from == 0.5 && edits[0].to == 2.0, "%zu edits", edits.size());
+    // A value the host sets is not an edit.
+    edits.clear();
+    CHECK(g->setParam(0, 1.0));
+    runConstant(e, 0.5f, 4);
+    std::this_thread::sleep_for(EditorEdits::kQuiet + std::chrono::milliseconds(50));
+    g->takeEditorEdits(edits);
+    CHECK(edits.empty());
 }
 
 TEST(clap_delay_reports_tail_and_rings_out) {

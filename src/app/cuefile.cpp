@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -161,6 +162,8 @@ struct Writer {
                 params[std::to_string(id)] = v;
             j["params"] = params;
         }
+        if (p.shownSet)
+            j["shown"] = p.shown;
         std::string name;
         if (!state(p, false, stateName, name))
             return false;
@@ -187,33 +190,45 @@ struct Writer {
         j["warm"] = p.warm.empty() ? config.warm : p.warm;
         if (config.inputs.size() > 1)
             j["input"] = config.inputs.at(c.inputIndex);
-        json lines = json::array();
-        size_t slot = 0;
-        for (const LineSpec& l : c.lines) {
-            json lj;
-            if (l.parent >= 0) {
-                lj["name"] = l.name;
-                lj["from"] = c.lines[l.parent].name;
-                lj["after"] = l.after;
+        json blocks = json::array();
+        for (size_t i = 0; i < c.blocks.size(); ++i) {
+            const PluginSpec& ps = c.blocks[i];
+            json pj;
+            if (!plugin(ps, stateDir + "/" + number(i + 1) + " " + fileName(pluginStem(ps)), pj))
+                return false;
+            if (ps.placed) {
+                pj["x"] = std::round(ps.x * 10) / 10;
+                pj["y"] = std::round(ps.y * 10) / 10;
             }
-            json plugins = json::array();
-            for (const PluginSpec& ps : l.plugins) {
-                json pj;
-                if (!plugin(ps, stateDir + "/" + number(++slot) + " " + fileName(pluginStem(ps)), pj))
-                    return false;
-                plugins.push_back(pj);
-            }
-            lj["plugins"] = plugins;
-            lines.push_back(lj);
+            blocks.push_back(pj);
         }
-        j["lines"] = lines;
-        json taps = json::object();
-        for (size_t o = 0; o < config.outputs.size() && o < c.out.size(); ++o) {
-            const TapSpec& t = c.out[o];
-            const LineSpec& l = c.lines.at(t.line);
-            taps[config.outputs[o]] = {{"line", l.name}, {"after", std::min(t.after, l.plugins.size())}};
+        j["blocks"] = blocks;
+        json wires = json::array();
+        for (const WireSpec& w : c.wires) {
+            json wj;
+            wj["from"] = w.from.kind == Port::Kind::Input ? json(config.inputs.at(c.inputIndex)) : json(w.from.index);
+            wj["to"] = w.to.kind == Port::Kind::Output ? json(config.outputs.at(w.to.index)) : json(w.to.index);
+            if (w.to.key)
+                wj["key"] = true;
+            if (w.gains.levelDb != 0.0f)
+                wj["level_db"] = std::max(kWireOffDb, std::round(w.gains.levelDb * 100) / 100);
+            if (w.gains.width != 1.0f)
+                wj["width"] = std::round(w.gains.width * 1000) / 10;
+            if (w.gains.pan != 0.0f)
+                wj["pan"] = std::round(w.gains.pan * 1000) / 10;
+            if (w.gains.muted)
+                wj["muted"] = true;
+            if (w.feedback)
+                wj["feedback"] = true;
+            if (w.jump)
+                wj["jump"] = true;
+            if (w.jump && w.jumpOut.size() == 2)
+                wj["jump_out"] = w.jumpOut;
+            if (w.jump && w.jumpIn.size() == 2)
+                wj["jump_in"] = w.jumpIn;
+            wires.push_back(wj);
         }
-        j["outputs"] = taps;
+        j["wires"] = wires;
         return true;
     }
 
@@ -230,6 +245,12 @@ struct Writer {
                           {"tail_quiet_db", e.tailQuietDb},      {"bypass_fade_ms", e.bypassFadeMs},
                           {"mute_fade_ms", e.muteFadeMs},        {"reset_tails_on_warm", e.resetTailsOnWarmSwitch}};
         j["controller"] = {{"profile", c.midi.profile}, {"channel", c.midi.channel + 1}, {"forward", c.midi.forward}};
+        const TunerSettings& t = c.tuner.settings;
+        j["tuner"] = {{"input", c.inputs.at(c.tuner.inputIndex)},
+                      {"reference", t.reference},
+                      {"range", tunerRangeName(t.range)},
+                      {"tolerance", t.tolerance},
+                      {"names", t.flats ? "flats" : "sharps"}};
 
         json scenes = json::array();
         for (size_t s = 0; s < c.scenes.size(); ++s) {
@@ -391,6 +412,10 @@ struct Reader {
                     throw std::runtime_error("parameter ids are whole numbers, like \"54\": 1");
                 p.params.push_back({static_cast<uint32_t>(n), v.get<double>()});
             }
+        if (j.contains("shown")) {
+            p.shown = j.at("shown").get<std::vector<uint32_t>>();
+            p.shownSet = true;
+        }
         for (const char* key : {"state", "controller_state"}) {
             if (!j.contains(key))
                 continue;
@@ -415,6 +440,86 @@ struct Reader {
         if (c.name.empty())
             throw std::runtime_error("a chain needs a name");
         c.where = where + " chain '" + c.name + "'";
+        c.input = j.value("input", "");
+        if (!j.contains("lines")) {
+            blocksAndWires(j, config, c);
+        } else {
+            linesAndOutputs(j, config, c);
+        }
+
+        p.name = c.name;
+        p.chain = c.name;
+        p.where = c.where;
+        p.display = j.value("display", "");
+        p.pedal = j.value("pedal", 0);
+        p.program = j.value("program", -1);
+        p.actions = texts(j, "on_select", c.where);
+        p.warm = j.value("warm", "next");
+    }
+
+    // Format 2: blocks, and the wires between them.
+    void blocksAndWires(const json& j, const Config& config, ChainSpec& c) {
+        if (j.contains("blocks"))
+            for (const json& pj : j.at("blocks")) {
+                PluginSpec ps;
+                plugin(pj, c.where + " plug-in " + std::to_string(c.blocks.size() + 1), ps);
+                if (pj.contains("x") || pj.contains("y")) {
+                    ps.placed = true;
+                    ps.x = pj.value("x", 0.0);
+                    ps.y = pj.value("y", 0.0);
+                }
+                c.blocks.push_back(std::move(ps));
+            }
+        if (!j.contains("wires"))
+            return;
+        const std::string input = c.input.empty() ? config.inputs.at(0) : c.input;
+        for (const json& wj : j.at("wires")) {
+            WireSpec w;
+            w.where = c.where;
+            auto end = [&](const json& e, bool from) {
+                if (e.is_number_integer()) {
+                    const long n = e.get<long>();
+                    if (n < 0 || static_cast<size_t>(n) >= c.blocks.size())
+                        throw std::runtime_error("chain '" + c.name + "': a wire " + (from ? "comes from" : "goes to") + " block " +
+                                                 std::to_string(n) + ", and it has " + std::to_string(c.blocks.size()) +
+                                                 " block(s), numbered from 0");
+                    return Port::block(static_cast<int>(n));
+                }
+                const std::string name = e.get<std::string>();
+                if (from) {
+                    // Its own input, by name.
+                    if (!same(name, input) && !same(name, "in"))
+                        throw std::runtime_error("chain '" + c.name + "' plays input " + input + "; a wire cannot come from '" + name + "'");
+                    return Port::input();
+                }
+                for (size_t o = 0; o < config.outputs.size(); ++o)
+                    if (same(config.outputs[o], name))
+                        return Port::output(static_cast<int>(o));
+                throw std::runtime_error("chain '" + c.name + "': a wire goes to output '" + name + "', which the performance does not have");
+            };
+            w.from = end(wj.at("from"), true);
+            w.to = end(wj.at("to"), false);
+            if (wj.value("key", false)) {
+                if (w.to.kind != Port::Kind::Block)
+                    throw std::runtime_error("chain '" + c.name + "': only a plug-in has a key (a side-chain input)");
+                w.to.key = true;
+            }
+            w.gains.levelDb = wj.value("level_db", 0.0f);
+            w.gains.width = wj.value("width", 100.0f) / 100.0f;
+            w.gains.pan = wj.value("pan", 0.0f) / 100.0f;
+            w.gains.muted = wj.value("muted", false);
+            w.feedback = wj.value("feedback", false);
+            w.jump = wj.value("jump", false);
+            w.jumpOut = wj.value("jump_out", std::vector<double>());
+            w.jumpIn = wj.value("jump_in", std::vector<double>());
+            if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1)
+                throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
+            c.wires.push_back(w);
+        }
+    }
+
+    // Format 1: lines, and where each output is taken.
+    void linesAndOutputs(const json& j, const Config& config, ChainSpec& c) {
         const auto& lines = j.at("lines");
         if (lines.empty())
             throw std::runtime_error("chain '" + c.name + "' has no lines");
@@ -441,7 +546,6 @@ struct Reader {
             }
             c.lines.push_back(std::move(l));
         }
-        c.input = j.value("input", "");
         if (j.contains("outputs"))
             for (const auto& [name, tj] : j.at("outputs").items()) {
                 bool known = false;
@@ -460,15 +564,6 @@ struct Reader {
                 t.set = true;
                 c.out.push_back(t);
             }
-
-        p.name = c.name;
-        p.chain = c.name;
-        p.where = c.where;
-        p.display = j.value("display", "");
-        p.pedal = j.value("pedal", 0);
-        p.program = j.value("program", -1);
-        p.actions = texts(j, "on_select", c.where);
-        p.warm = j.value("warm", "next");
     }
 
     void performance(const json& j, Config& c) {
@@ -505,6 +600,25 @@ struct Reader {
                 throw std::runtime_error("controller channel is 1 to 16");
             c.midi.channel = static_cast<uint8_t>(channel - 1);
             c.midi.forward = m.value("forward", c.midi.forward);
+        }
+        if (j.contains("tuner")) {
+            const json& t = j.at("tuner");
+            TunerSettings& s = c.tuner.settings;
+            c.tuner.input = t.value("input", "");
+            s.reference = t.value("reference", s.reference);
+            if (s.reference < 415 || s.reference > 466)
+                throw std::runtime_error("tuner reference is 415 to 466 Hz");
+            const int range = tunerRange(lower(t.value("range", std::string(tunerRangeName(s.range)))));
+            if (range < 0)
+                throw std::runtime_error("tuner range is guitar, bass, vocals or any");
+            s.range = range;
+            s.tolerance = t.value("tolerance", s.tolerance);
+            if (s.tolerance <= 0 || s.tolerance > 10)
+                throw std::runtime_error("tuner tolerance is above 0 and at most 10 cents");
+            const std::string names = lower(t.value("names", std::string("sharps")));
+            if (names != "sharps" && names != "flats")
+                throw std::runtime_error("tuner names are sharps or flats");
+            s.flats = names == "flats";
         }
 
         for (const json& sj : j.at("scenes")) {

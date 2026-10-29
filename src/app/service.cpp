@@ -122,17 +122,30 @@ void Service::close() {
     }
 }
 
-void Service::poll(int timeoutMs) {
+void Service::poll(int timeoutMs, const std::vector<int>& also) {
     if (fd_ < 0) {
-        if (timeoutMs > 0)
-            usleep(static_cast<useconds_t>(timeoutMs) * 1000);
+        // Without a socket there is still the caller's own waiting to do.
+        std::vector<pollfd> other;
+        for (int fd : also)
+            other.push_back({fd, POLLIN, 0});
+        if (other.empty()) {
+            if (timeoutMs > 0)
+                usleep(static_cast<useconds_t>(timeoutMs) * 1000);
+        } else {
+            ::poll(other.data(), other.size(), timeoutMs);
+        }
         return;
     }
     std::vector<pollfd> fds;
     fds.push_back({fd_, POLLIN, 0});
     for (const auto& c : clients_)
         fds.push_back({c.fd, static_cast<short>(POLLIN | (c.out.empty() ? 0 : POLLOUT)), 0});
-    if (::poll(fds.data(), fds.size(), timeoutMs) <= 0)
+    const size_t ours = fds.size();
+    for (int fd : also)
+        fds.push_back({fd, POLLIN, 0});
+    const int ready = ::poll(fds.data(), fds.size(), timeoutMs);
+    fds.resize(ours); // the caller's descriptors are its own to read
+    if (ready <= 0)
         return;
 
     std::vector<bool> drop(clients_.size(), false);

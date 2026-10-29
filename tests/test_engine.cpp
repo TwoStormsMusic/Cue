@@ -527,23 +527,67 @@ TEST(bypass_on_an_idle_chain_applies_at_once) {
     CHECK_MSG(std::fabs(h.out[0].back() - 0.5f) < 1e-5f, "B plays %.5f, expected 0.5 with its second slot bypassed", h.out[0].back());
 }
 
-TEST(mute_fades_every_output_and_comes_back) {
+TEST(mute_silences_the_inputs_and_lets_tails_ring_out) {
+    CountingProcessor::Counts counts;
     Engine e(settings());
-    e.addChain(chain("A", slots(new GainProcessor(1.0f))));
+    e.addChain(chain("Delay", slots(new CountingProcessor(std::make_unique<DelayProcessor>(250.0f, 0.5f, 1.0f), counts))));
     CHECK(e.activate());
     Harness h{e, Sine{}};
     h.settleOn(0);
-    const size_t from = h.out[0].size();
+    h.runSeconds(0.5); // echoes building
+    const size_t mutedAt = h.out[0].size();
     e.setMute(true);
-    h.runSeconds(0.1);
-    CHECK(peak(h.out[0], h.out[0].size() - samples(0.05), h.out[0].size()) == 0.0f);
-    CHECK(peak(h.out[1], h.out[1].size() - samples(0.05), h.out[1].size()) == 0.0f);
+    h.runSeconds(1.0);
+    // The echoes of what was played go on, getting quieter.
+    const float echo = peak(h.out[0], mutedAt + samples(0.3), mutedAt + samples(0.5));
+    const float later = peak(h.out[0], mutedAt + samples(0.8), mutedAt + samples(1.0));
+    CHECK_MSG(echo > 0.05f && later < echo, "echoes after the mute: %.4f, then %.4f", echo, later);
+    CHECK(maxStep(h.out[0], mutedAt) < 0.05f);
+    // Once they have died away, the chain rests: still the one playing, no longer processed.
+    h.runSeconds(6.0);
+    CHECK(e.activeChain() == 0);
+    CHECK(e.resting(0));
+    const uint64_t framesResting = counts.frames;
+    h.runSeconds(1.0);
+    CHECK(counts.frames == framesResting);
+    CHECK(peak(h.out[0], h.out[0].size() - samples(1.0), h.out[0].size()) == 0.0f);
+    CHECK(counts.reset == 0);
+    // Back: processed again from where it was, fading in without a click.
+    const size_t backAt = h.out[0].size();
     e.setMute(false);
     h.runSeconds(0.1);
+    CHECK(!e.resting(0));
+    CHECK(counts.frames > framesResting);
     CHECK(peak(h.out[0], h.out[0].size() - samples(0.05), h.out[0].size()) > 0.45f);
-    // 10 ms fades on a 110 Hz sine: no step much bigger than the sine's own.
     const float sineStep = 0.5f * 2.0f * kPi * 110.0f / static_cast<float>(kRate);
-    CHECK_MSG(maxStep(h.out[0], from) <= 1.5f * sineStep, "largest step %.5f, sine %.5f", maxStep(h.out[0], from), sineStep);
+    CHECK_MSG(maxStep(h.out[0], backAt) <= 1.5f * sineStep, "largest step %.5f, sine %.5f", maxStep(h.out[0], backAt), sineStep);
+}
+
+TEST(switching_while_muted_completes_and_the_new_chain_rests) {
+    CountingProcessor::Counts a, b;
+    Engine e(settings());
+    e.addChain(chain("A", slots(new CountingProcessor(std::make_unique<GainProcessor>(1.0f), a))));
+    e.addChain(chain("B", slots(new CountingProcessor(std::make_unique<GainProcessor>(1.0f), b))));
+    CHECK(e.activate());
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    e.setMute(true);
+    h.runSeconds(1.0);
+    // Nothing comes in: a chain without tails is silent at once.
+    CHECK(peak(h.out[0], h.out[0].size() - samples(0.9), h.out[0].size()) == 0.0f);
+    CHECK(e.resting(0));
+    e.switchTo(1);
+    h.runSeconds(1.0);
+    CHECK(e.activeChain() == 1);
+    CHECK(e.state(0) == ChainState::Idle);
+    CHECK(e.resting(1));
+    const uint64_t bFrames = b.frames;
+    h.runSeconds(0.5);
+    CHECK(b.frames == bFrames);
+    e.setMute(false);
+    h.runSeconds(0.1);
+    CHECK(b.frames > bFrames);
+    CHECK(peak(h.out[0], h.out[0].size() - samples(0.05), h.out[0].size()) > 0.45f);
 }
 
 TEST(bypass_click_detector_catches_a_hard_cut) {

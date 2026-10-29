@@ -134,22 +134,20 @@ TEST(rpp_export_round_trips_through_the_import) {
         return;
     CHECK(back.scenes.size() == 1 && back.scenes[0].chains.size() == 2);
     const ChainSpec& punk = back.scenes[0].chains[0];
-    CHECK(punk.name == "Punk" && punk.lines.size() == 2);
-    if (punk.lines.size() != 2)
+    // The same blocks and wires as went out.
+    const ChainSpec& sent = c.scenes[0].chains[0];
+    CHECK_MSG(punk.name == "Punk" && wireList(punk, back.outputs) == wireList(sent, c.outputs), "%s\n%s", wireList(punk, back.outputs).c_str(),
+              wireList(sent, c.outputs).c_str());
+    if (punk.blocks.size() != 7)
         return;
-    const auto& main = punk.lines[0].plugins;
-    const auto& foh = punk.lines[1].plugins;
-    CHECK(main.size() == 5 && foh.size() == 2 && punk.lines[1].after == 4);
-    if (main.size() != 5 || foh.size() != 2)
-        return;
-    CHECK(main[0].label == "Gain Stage" && main[1].label == "Gate" && main[2].label == "Keyed Gate" && main[3].label == "Darkglass Ultra" &&
-          main[4].label == "Chorus");
-    CHECK(foh[0].label == "IR Loader" && foh[1].label == "Chorus");
-    CHECK(main[2].sidechain == "Gate");
-    CHECK(main[3].kind == "vst3" && main[3].bypassed && main[3].id == "ABCDEF019182FAEB4E44535044524B55" && main[3].path == "/vst3/Darkglass Ultra.vst3");
-    CHECK(!main[0].bypassed && main[0].path == "/plugins/com.twostorms.gainstage.clap");
-    // FOH takes the branch, the amp the end of the main line.
-    CHECK(punk.out.size() == 2 && punk.out[0].line == 1 && punk.out[1].line == 0);
+    const auto& b = punk.blocks;
+    CHECK(b[0].label == "Gain Stage" && b[1].label == "Gate" && b[2].label == "Keyed Gate" && b[3].label == "Darkglass Ultra" && b[4].label == "Chorus");
+    CHECK(b[5].label == "IR Loader" && b[6].label == "Chorus");
+    CHECK_MSG(b[2].sidechain == "Gate", "%s", b[2].sidechain.c_str());
+    CHECK(b[3].kind == "vst3" && b[3].bypassed && b[3].id == "ABCDEF019182FAEB4E44535044524B55" && b[3].path == "/vst3/Darkglass Ultra.vst3");
+    CHECK(!b[0].bypassed && b[0].path == "/plugins/com.twostorms.gainstage.clap");
+    const auto& main = b;
+    const std::vector<PluginSpec> foh{b[5]};
 
     std::vector<uint8_t> data;
     auto read = [&](const std::string& path) {
@@ -228,9 +226,9 @@ TEST(rpp_export_converts_files_both_ways) {
     CHECK_MSG(ok, "%s", err.c_str());
     if (ok && !back.scenes.empty() && back.scenes[0].chains.size() == 2) {
         const ChainSpec& punk = back.scenes[0].chains[0];
-        CHECK(punk.lines.size() == 2 && punk.lines[0].plugins.size() == 5);
-        if (!punk.lines.empty() && !punk.lines[0].plugins.empty())
-            CHECK(text(punk.lines[0].plugins[0].state) == "TWOSTORMS 0 1\np 54 1\n");
+        CHECK(punk.blocks.size() == 7);
+        if (!punk.blocks.empty())
+            CHECK(text(punk.blocks[0].state) == "TWOSTORMS 0 1\np 54 1\n");
     }
     std::filesystem::remove_all(dir);
 }
@@ -377,7 +375,8 @@ TEST(rpp_export_carries_pedals_both_ways) {
     RppExport exp;
     CHECK_MSG(exportRpp(c, exp, &err, dir), "%s", err.c_str());
     // FOH plays on channel 2 and the amp on 1: the sends say so.
-    CHECK(exp.text.find("HWOUT 1025 0 1 0 0 0 1026") != std::string::npos && exp.text.find("HWOUT 1024 0 1 0 0 0 1024") != std::string::npos);
+    CHECK_MSG(exp.text.find("HWOUT 1025 0 1 0 0 0 1026") != std::string::npos && exp.text.find("HWOUT 1024 0 1 0 0 0 1024") != std::string::npos, "%s",
+              wireList(c.scenes[0].chains[0], c.outputs).c_str());
 
     // REAPER side: ReaLearn's layout.
     const nlohmann::json rl = realearnOf(exp.text);
@@ -424,8 +423,8 @@ TEST(rpp_export_carries_pedals_both_ways) {
     if (back.scenes.size() != 2 || back.scenes[0].chains.size() != 2)
         return;
     const ChainSpec& p = back.scenes[0].chains[0];
-    CHECK(p.lines.size() == 2 && p.lines[1].name == "FOH line");
-    CHECK(p.out.size() == 2 && p.out[0].line == 1 && p.out[1].line == 0);
+    CHECK_MSG(wireList(p, back.outputs) == wireList(c.scenes[0].chains[0], c.outputs), "%s\n%s", wireList(p, back.outputs).c_str(),
+              wireList(c.scenes[0].chains[0], c.outputs).c_str());
     const PresetSpec& pp = back.scenes[0].presets[0];
     CHECK(pp.pedal == 6 && pp.display == "PU" && pp.actions.size() == 1 && pp.actions[0].text == "group Start");
     const PresetSpec& sp = back.scenes[0].presets[1];
@@ -482,5 +481,30 @@ TEST(rpp_import_turns_simple_realearn_mappings_into_triggers) {
     CHECK_MSG(imp.config.find("include = " + dir + "/pedals.ini") != std::string::npos && imp.config.find("[trigger Gate]") == std::string::npos, "%s", imp.config.c_str());
     for (const auto& n : imp.notes)
         CHECK_MSG(n.find("became triggers") == std::string::npos, "%s", n.c_str());
+    std::filesystem::remove_all(dir);
+}
+
+TEST(rpp_export_lays_board_wires_out_as_lines) {
+    // A chain as the board makes it: a sum into the last plug-in and a
+    // level on one wire, which REAPER's layout cannot carry: listed.
+    const std::string dir = tempDir();
+    Config c;
+    std::string err;
+    const bool loaded = parseConfigText(performanceText(dir), dir + "/show.ini", c, &err) && presetsToChains(c, &err);
+    CHECK_MSG(loaded, "%s", err.c_str());
+    if (!loaded)
+        return;
+    ChainSpec& punk = c.scenes[0].chains[0];
+    punk.wires.push_back({Port::block(0), Port::block(6), {}, ""});
+    punk.wires.push_back({Port::input(), Port::output(1), {-6.0f, 1.0f, 0.0f, false}, ""});
+    RppExport exp;
+    CHECK_MSG(exportRpp(c, exp, &err, dir), "%s", err.c_str());
+    CHECK(exp.plugins == 8);
+    bool sum = false, level = false;
+    for (const auto& n : exp.notes) {
+        sum = sum || n.find("sums") != std::string::npos;
+        level = level || n.find("level, width or pan") != std::string::npos;
+    }
+    CHECK(sum && level);
     std::filesystem::remove_all(dir);
 }

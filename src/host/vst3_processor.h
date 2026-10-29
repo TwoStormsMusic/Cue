@@ -45,6 +45,9 @@ public:
     // Any non-real-time thread. value is normalised 0..1, as VST3 parameters are.
     bool setParam(uint32_t id, double normalized) override;
     std::vector<ParamInfo> params() const override;
+    bool paramValue(uint32_t id, double& normalized) const override;
+    std::string paramText(uint32_t id, double normalized) const override;
+    bool paramFromText(uint32_t id, const std::string& text, double& normalized) const override;
 
     // Audio thread.
     void startProcessing() override;
@@ -54,6 +57,19 @@ public:
 
     uint32_t latencySamples() const override { return latency_.load(std::memory_order_relaxed); }
     uint32_t tailSamples() const override { return tail_.load(std::memory_order_relaxed); }
+
+    // The plug-in's own editor, in a window the host makes. Main thread.
+    // A Windows plug-in through yabridge looks like any other VST3 here.
+    bool hasEditor() const override;
+    bool openEditor(unsigned long window, EditorSize* size, std::string* error) override;
+    void closeEditor() override;
+    bool editorOpen() const override;
+    bool editorNeedsFocus() const override { return true; }
+    void takeEditorEdits(std::vector<ParamEdit>& out) override;
+    bool editorResized(uint32_t width, uint32_t height) override;
+    bool takeEditorResize(EditorSize* size) override;
+    void editorFds(std::vector<int>& out) const override;
+    void onEditorFd(int fd) override;
 
     struct Impl;
 

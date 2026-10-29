@@ -156,19 +156,19 @@ TEST(rpp_import_makes_chains_branches_and_states) {
         return;
     CHECK(c.scenes.size() == 1 && c.scenes[0].name == "Cue Template" && c.scenes[0].chains.size() == 1);
     const ChainSpec& punk = c.scenes[0].chains[0];
-    CHECK(punk.name == "Punk" && punk.lines.size() == 2);
+    CHECK(punk.name == "Punk" && punk.blocks.size() == 4);
     // Main line: gain stage, Darkglass, delay. The IR writes channels 3-4
-    // only, so it is a branch, and out 1 (FOH) takes it.
-    CHECK(punk.lines[0].plugins.size() == 3 && punk.lines[1].plugins.size() == 1);
-    CHECK(punk.lines[1].name == "Out 1" && punk.lines[1].after == 2);
-    CHECK(punk.out[0].line == 1 && punk.out[1].line == 0 && punk.out[1].after == 3);
-    const PluginSpec& gain = punk.lines[0].plugins[0];
+    // only, so it is a branch off the Darkglass, and out 1 (FOH) takes it.
+    CHECK_MSG(wireList(punk, c.outputs) == "in>0 0>1 1>2 1>3 3>" + c.outputs[0] + " 2>" + c.outputs[1], "%s", wireList(punk, c.outputs).c_str());
+    if (punk.blocks.size() != 4)
+        return;
+    const PluginSpec& gain = punk.blocks[0];
     CHECK(gain.kind == "clap" && gain.path == "/plugins/com.twostorms.gainstage.clap" && gain.label == "TwoStorms Gain Stage");
     CHECK(gain.params.size() == 1 && gain.params[0].first == 54 && gain.params[0].second == 1);
-    const PluginSpec& ultra = punk.lines[0].plugins[1];
+    const PluginSpec& ultra = punk.blocks[1];
     CHECK(ultra.kind == "vst3" && ultra.id == "ABCDEF019182FAEB4E44535044524B55" && ultra.bypassed && ultra.label == "Darkglass Ultra");
     CHECK(ultra.path == "/vst3/Darkglass Ultra.vst3");
-    const PluginSpec& delay = punk.lines[0].plugins[2];
+    const PluginSpec& delay = punk.blocks[2];
     CHECK(delay.label == "Slapback"); // REAPER's own name for it
     CHECK(delay.path.find(".clap/CLAP Plugins Linux/TwoStorms Delay.clap") != std::string::npos); // not found: where TwoStorms installs
     CHECK(imp.config.find("NOT FOUND") != std::string::npos);
@@ -269,7 +269,7 @@ TEST(rpp_import_keys_sidechains_and_embeds_ir_files) {
     CHECK_MSG(ok, "%s\n%s", err.c_str(), imp.config.c_str());
     if (!ok)
         return;
-    const auto& p = c.scenes[0].chains[0].lines[0].plugins;
+    const auto& p = c.scenes[0].chains[0].blocks;
     CHECK(p.size() == 4);
     if (p.size() < 4)
         return;

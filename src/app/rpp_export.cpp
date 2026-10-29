@@ -137,6 +137,123 @@ bool isUid(const std::string& s) {
     return s.size() == 32 && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c); });
 }
 
+// A chain as Cue's board makes it, blocks and wires, as the lines the
+// writer lays out: each block fed by one wire, from the chain's input or an
+// earlier block; where a block feeds several, the first carries its line on
+// and the others become branches. A wire that does more than that (a sum, a
+// level or pan, a loop, a block fed by nothing) has no place in REAPER's
+// layout and is listed.
+void asLines(ChainSpec& c, size_t outputs, const std::string& where, std::vector<std::string>& notes) {
+    if (!c.lines.empty() || (c.blocks.empty() && c.wires.empty()))
+        return;
+    const int n = static_cast<int>(c.blocks.size());
+    auto say = [&](const std::string& what) { notes.push_back(where + ": " + what); };
+    auto name = [&](const Port& p) { return p.kind == Port::Kind::Input ? std::string("the input") : labelOf(c.blocks[p.index]); };
+    std::vector<int> source(n, -2); // -1: the input, -2: nothing
+    std::vector<int> key(n, -1);
+    std::vector<std::vector<int>> outs; // per output: its sources
+    for (const WireSpec& w : c.wires) {
+        if (w.from.kind == Port::Kind::Output || w.to.kind == Port::Kind::Input)
+            continue;
+        const int from = w.from.kind == Port::Kind::Input ? -1 : w.from.index;
+        if (w.feedback) {
+            say("the loop wire from " + name(w.from) + " is not in the REAPER project");
+            continue;
+        }
+        if (!w.gains.neutral())
+            say("the level, width or pan on the wire from " + name(w.from) + " is not in the REAPER project");
+        if (w.to.kind == Port::Kind::Output) {
+            if (outs.size() <= static_cast<size_t>(w.to.index))
+                outs.resize(w.to.index + 1);
+            outs[w.to.index].push_back(from);
+        } else if (w.to.key) {
+            if (from >= 0)
+                key[w.to.index] = from;
+        } else if (source[w.to.index] != -2) {
+            say(labelOf(c.blocks[w.to.index]) + " sums two wires; REAPER takes only the one from " + name(source[w.to.index] < 0 ? Port::input() : Port::block(source[w.to.index])));
+        } else {
+            source[w.to.index] = from;
+        }
+    }
+    // Lines: from the input, each block's first fed block carries it on;
+    // the others branch off where it is.
+    std::vector<std::pair<int, size_t>> at(n, {-1, 0}); // block -> line, index
+    c.lines.push_back(LineSpec{});
+    std::function<void(int, int)> grow = [&](int from, int line) {
+        const int parent = from < 0 ? 0 : at[from].first;
+        const size_t after = from < 0 ? 0 : at[from].second + 1;
+        // An output taken here keeps this line's end here: what it feeds branches off.
+        bool tapped = false;
+        for (const auto& o : outs)
+            tapped = tapped || std::find(o.begin(), o.end(), from) != o.end();
+        bool first = !tapped;
+        for (int b = 0; b < n; ++b) {
+            if (source[b] != from || at[b].first >= 0)
+                continue;
+            int l = line;
+            if (!first) {
+                LineSpec branch;
+                branch.name = "Branch " + std::to_string(c.lines.size());
+                branch.parent = parent;
+                branch.after = after;
+                c.lines.push_back(std::move(branch));
+                l = static_cast<int>(c.lines.size()) - 1;
+            }
+            first = false;
+            at[b] = {l, c.lines[l].plugins.size()};
+            c.lines[l].plugins.push_back(c.blocks[b]);
+            grow(b, l);
+        }
+    };
+    grow(-1, 0);
+    for (int b = 0; b < n; ++b)
+        if (at[b].first < 0)
+            say(labelOf(c.blocks[b]) + " is fed by nothing Cue plays first; left out");
+    // Side-chains: the key's source by its label, as the nth of that label.
+    std::vector<std::pair<int, size_t>> order;
+    for (size_t l = 0; l < c.lines.size(); ++l)
+        for (size_t k = 0; k < c.lines[l].plugins.size(); ++k)
+            order.push_back({static_cast<int>(l), k});
+    for (int b = 0; b < n; ++b) {
+        if (key[b] < 0 || at[b].first < 0 || at[key[b]].first < 0)
+            continue;
+        PluginSpec& p = c.lines[at[b].first].plugins[at[b].second];
+        if (!p.sidechain.empty())
+            continue;
+        const std::string label = labelOf(c.blocks[key[b]]);
+        int nth = 0;
+        for (const auto& [l, k] : order) {
+            if (labelOf(c.lines[l].plugins[k]) == label)
+                ++nth;
+            if (std::make_pair(l, k) == at[key[b]])
+                break;
+        }
+        p.sidechain = label + ":" + std::to_string(nth);
+    }
+    // Outputs: where each is taken; one with no wire is silent in Cue.
+    c.out.clear();
+    outs.resize(std::max(outs.size(), outputs));
+    for (size_t o = 0; o < outs.size(); ++o) {
+        TapSpec t;
+        t.set = true;
+        const std::vector<int>& from = outs[o];
+        if (from.size() > 1)
+            say("output " + std::to_string(o + 1) + " sums several wires; REAPER takes only the first");
+        if (from.empty() || from[0] < 0 || at[from[0]].first < 0) {
+            t.line = 0;
+            t.after = from.empty() ? SIZE_MAX : 0;
+            if (from.empty())
+                say("output " + std::to_string(o + 1) + " gets nothing in Cue; REAPER sends it the end of the main line");
+        } else {
+            t.line = at[from[0]].first;
+            t.after = at[from[0]].second + 1;
+        }
+        c.out.push_back(t);
+    }
+    c.blocks.clear();
+    c.wires.clear();
+}
+
 struct Writer {
     const Config& config;
     RppExport& out;
@@ -280,7 +397,6 @@ struct Writer {
     bool chain(const SceneSpec& scene, const ChainSpec& c, const std::string& trackName, bool muted, int folder) {
         const std::string where = config.scenes.size() > 1 ? scene.name + " / " + c.name : c.name;
         // Channels: line i on 2i and 2i+1, then a pair for each side-chain feed.
-        const auto all = chainPlugins(c);
         std::vector<std::string> labels;
         std::vector<std::pair<size_t, size_t>> slotLine; // slot -> line, index
         for (size_t li = 0; li < c.lines.size(); ++li)
@@ -289,7 +405,11 @@ struct Writer {
                 slotLine.push_back({li, k});
             }
         std::vector<std::pair<size_t, size_t>> feeds;
-        if (!chainSidechains(c, labels, feeds, error))
+        ChainSpec flat; // the plug-ins in slot order, as chainSidechains reads them
+        flat.name = c.name;
+        for (const LineSpec& l : c.lines)
+            flat.blocks.insert(flat.blocks.end(), l.plugins.begin(), l.plugins.end());
+        if (!chainSidechains(flat, labels, feeds, error))
             return false;
         std::map<std::pair<size_t, size_t>, int> keyOut, keyIn; // (line, index) -> first channel of its key pair
         int channels = 2 * static_cast<int>(c.lines.size());
@@ -444,7 +564,12 @@ bool exportRpp(const Config& config, RppExport& out, std::string* error, const s
         *error = "the performance has no chains";
         return false;
     }
-    Writer w{config, out, error, reaperVst3Ids(reaperDir), {}, {}};
+    // The writer lays chains out as lines; Cue's board makes them as wires.
+    Config lined = config;
+    for (SceneSpec& s : lined.scenes)
+        for (ChainSpec& c : s.chains)
+            asLines(c, lined.outputs.size(), lined.scenes.size() > 1 ? s.name + " / " + c.name : c.name, out.notes);
+    Writer w{lined, out, error, reaperVst3Ids(reaperDir), {}, {}};
     if (!w.project())
         return false;
     for (const auto& [what, chains] : w.left) {

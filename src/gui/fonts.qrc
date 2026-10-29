@@ -1,0 +1,13 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/fonts">
+    <file alias="Inter-Regular.otf">../../third_party/fonts/Inter-Regular.otf</file>
+    <file alias="Inter-Medium.otf">../../third_party/fonts/Inter-Medium.otf</file>
+    <file alias="Inter-SemiBold.otf">../../third_party/fonts/Inter-SemiBold.otf</file>
+    <file alias="Inter-Bold.otf">../../third_party/fonts/Inter-Bold.otf</file>
+    <file alias="BarlowCondensed-SemiBold.ttf">../../third_party/fonts/BarlowCondensed-SemiBold.ttf</file>
+    <file alias="BarlowCondensed-Bold.ttf">../../third_party/fonts/BarlowCondensed-Bold.ttf</file>
+    <file alias="JetBrainsMono-Regular.ttf">../../third_party/fonts/JetBrainsMono-Regular.ttf</file>
+    <file alias="JetBrainsMono-Medium.ttf">../../third_party/fonts/JetBrainsMono-Medium.ttf</file>
+  </qresource>
+</RCC>

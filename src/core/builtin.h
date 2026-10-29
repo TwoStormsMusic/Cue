@@ -157,15 +157,19 @@ private:
 class CountingProcessor : public Processor {
 public:
     struct Counts {
-        std::atomic<uint64_t> process{0}, frames{0}, reset{0}, start{0}, stop{0};
+        std::atomic<uint64_t> process{0}, frames{0}, reset{0}, start{0}, stop{0}, deactivate{0}, destroyed{0};
         std::atomic<bool> processingStarted{false};
         std::atomic<uint64_t> processWhileStopped{0};
     };
 
     CountingProcessor(std::unique_ptr<Processor> inner, Counts& counts) : inner_(std::move(inner)), counts_(counts) {}
+    ~CountingProcessor() override { counts_.destroyed++; }
     const std::string& name() const override { return inner_->name(); }
     bool activate(double sr, uint32_t maxFrames) override { return inner_->activate(sr, maxFrames); }
-    void deactivate() override { inner_->deactivate(); }
+    void deactivate() override {
+        counts_.deactivate++;
+        inner_->deactivate();
+    }
     void startProcessing() override {
         counts_.start++;
         counts_.processingStarted = true;

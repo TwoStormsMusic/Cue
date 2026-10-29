@@ -73,6 +73,16 @@ releases.
 ReaLearn listens to and lights REAPER's MIDI device 1. If your controller is
 another device, pick it in ReaLearn's input and output once.
 
+### Chains from the board
+
+REAPER's layout is lines: each plug-in fed by the one before it, branches
+leaving a line. A chain drawn on Cue's routing board is written that way when
+it can be: where a plug-in feeds several, the first carries its line on and
+the others branch off (all of them, when an output is taken there too). What
+lines cannot carry is listed and left out: two wires summed into one input
+or output (REAPER takes the first), a level, width or pan on a wire, and loop
+wires.
+
 ### Back again
 
 The project's notes carry the performance's pedals, names and settings, and
