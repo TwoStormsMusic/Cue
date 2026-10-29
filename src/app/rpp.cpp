@@ -1,6 +1,7 @@
 #include "rpp.h"
 
 #include "config.h"
+#include "realearn.h"
 #include "host/clap_processor.h"
 
 #include <algorithm>
@@ -557,7 +558,23 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
         return false;
     const RppNode& project = root.children[0];
     out = Import{};
-    std::ostringstream chainsText;
+    // Scenes: a REAPER folder is a scene, tracks outside folders play in one
+    // named after the project.
+    struct Scene {
+        std::string name;
+        std::ostringstream text;
+        std::vector<std::string> chains;
+    };
+    std::vector<Scene> scenes;
+    int depth = 0;
+    auto sceneNamed = [&](const std::string& n) -> Scene& {
+        for (auto& sc : scenes)
+            if (sc.name == n)
+                return sc;
+        scenes.emplace_back();
+        scenes.back().name = n;
+        return scenes.back();
+    };
     std::vector<std::string> chainNames;
     std::set<int> inputs;
     // What was left out or not found, with the chains it was in, in order.
@@ -574,6 +591,46 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
     double rate = 0;
     if (auto sr = project.value("SAMPLERATE"); !sr.empty())
         rate = std::atof(sr[0].c_str());
+    // A project the converter wrote carries the performance's own mappings
+    // in its notes. A mapping file given here wins over them.
+    CueMappings cue;
+    if (const RppNode* notes = project.child("NOTES"); notes && mapping.empty()) {
+        std::vector<std::string> lines;
+        for (const auto& it : notes->items)
+            if (it.child < 0)
+                lines.push_back(it.line);
+        cue = readCueMappings(lines);
+    }
+    // Outputs: the performance's, by the hardware channel each was sent to;
+    // else one per hardware output the project uses.
+    int outputs = 2;
+    if (cue.found && !cue.outputs.empty()) {
+        outputs = static_cast<int>(cue.outputs.size());
+    } else {
+        for (const RppNode& track : project.children)
+            if (!track.head.empty() && track.head[0] == "TRACK")
+                for (const auto& h : track.values("HWOUT"))
+                    if (!h.empty())
+                        outputs = std::max(outputs, std::min(64, (std::atoi(h[0].c_str()) & 1023) + 1));
+    }
+    auto outputOf = [&](int dest) {
+        if (!cue.found || cue.outputs.empty())
+            return dest < outputs ? dest : -1;
+        for (size_t o = 0; o < cue.outputs.size(); ++o)
+            if (cue.outputs[o].channel == dest)
+                return static_cast<int>(o);
+        return -1;
+    };
+    // Tracks outside folders: the performance's one scene, or one named after the project.
+    const std::string defaultScene = cue.found && cue.scenes.size() == 1 ? cue.scenes[0].name : projectName;
+    // ReaLearn instances, and what their GUIDs name in Cue.
+    std::vector<std::string> realearns;
+    std::map<std::string, std::string> trackChain, fxPlugin;
+    auto bare = [](std::string g) {
+        g.erase(std::remove_if(g.begin(), g.end(), [](char c) { return c == '{' || c == '}'; }), g.end());
+        std::transform(g.begin(), g.end(), g.begin(), [](unsigned char c) { return std::toupper(c); });
+        return g;
+    };
 
     for (const RppNode& track : project.children) {
         if (track.head.empty() || track.head[0] != "TRACK")
@@ -584,15 +641,48 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
             name = "Track " + std::to_string(out.chains + 1);
         const auto hwouts = track.values("HWOUT");
         const RppNode* fxchain = track.child("FXCHAIN");
+        bool pedals = false;
+        if (fxchain)
+            for (const RppNode& fx : fxchain->children)
+                if (fx.head.size() > 1 && fx.head[0] == "VST" && fx.head[1].find("ReaLearn") != std::string::npos) {
+                    std::vector<std::string> b64;
+                    for (const auto& it : fx.items)
+                        if (it.child < 0)
+                            b64.push_back(it.line);
+                    std::vector<uint8_t> body;
+                    std::string text;
+                    if (decodeBase64(b64, body) && realearnJson(body, text))
+                        realearns.push_back(text);
+                    else
+                        out.notes.push_back("track " + name + ": its ReaLearn settings could not be read");
+                    pedals = true;
+                }
+        int folder = 0, change = 0;
+        if (auto bus = track.value("ISBUS"); bus.size() > 1) {
+            folder = std::atoi(bus[0].c_str());
+            change = std::atoi(bus[1].c_str());
+        }
+        if (folder == 1 && depth == 0)
+            sceneNamed(name);
+        Scene& scene = depth > 0 || folder == 1 ? scenes.back() : sceneNamed(defaultScene);
+        if (folder == 1)
+            depth += std::max(1, change);
+        else if (folder == 2)
+            depth = std::max(0, depth + change);
         if (hwouts.empty()) {
-            out.notes.push_back("track " + name + ": no hardware output, not imported");
+            if (folder != 1 && !pedals)
+                out.notes.push_back("track " + name + ": no hardware output, not imported");
             continue;
         }
+        std::ostringstream& chainsText = scene.text;
         // Unique chain names.
         std::string chainName = name;
         for (int n = 2; std::find(chainNames.begin(), chainNames.end(), chainName) != chainNames.end(); ++n)
             chainName = name + " " + std::to_string(n);
         chainNames.push_back(chainName);
+        scene.chains.push_back(chainName);
+        if (track.head.size() > 1)
+            trackChain[bare(track.head[1])] = chainName;
         ++out.chains;
         if (auto rec = track.value("REC"); rec.size() > 1) {
             const int in = std::atoi(rec[1].c_str());
@@ -612,6 +702,8 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
         int branches = 0;
         int index = 0;
         bool bypassNext = false, offlineNext = false;
+        std::pair<int, size_t> lastFx{-1, 0};                       // the plug-in an FXID line names
+        std::vector<std::pair<std::string, std::pair<int, size_t>>> fxIds; // GUID, line and index
         if (fxchain) {
             for (const auto& item : fxchain->items) {
                 if (item.child < 0) {
@@ -619,10 +711,14 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                     if (!t.empty() && t[0] == "BYPASS") {
                         bypassNext = t.size() > 1 && t[1] == "1";
                         offlineNext = t.size() > 2 && t[2] == "1";
+                    } else if (t.size() > 1 && t[0] == "FXID" && lastFx.first >= 0) {
+                        fxIds.push_back({bare(t[1]), lastFx});
+                        lastFx = {-1, 0};
                     }
                     continue;
                 }
                 const RppNode& fx = fxchain->children[item.child];
+                lastFx = {-1, 0};
                 if (fx.head.empty())
                     continue;
                 const std::string type = fx.head[0];
@@ -785,19 +881,21 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                     owner[c] = target;
                     writer[c] = {target, lines[target].plugins.size()};
                 }
+                lastFx = {target, lines[target].plugins.size()};
                 lines[target].plugins.push_back(p);
             }
         }
 
         // Outputs: which line each hardware output takes its signal from.
-        int tapLine[2] = {-1, -1};
+        std::vector<int> tapLine(static_cast<size_t>(outputs), -1);
         for (const auto& h : hwouts) {
             if (h.size() < 7)
                 continue;
-            const int dest = std::atoi(h[0].c_str()) & 1023;
+            const int hw = std::atoi(h[0].c_str()) & 1023;
             const int srcCh = std::atoi(h[6].c_str()) & 1023;
-            if (dest > 1) {
-                out.notes.push_back(chainName + ": hardware output " + std::to_string(dest + 1) + " left out (Cue has outputs 1 and 2)");
+            const int dest = outputOf(hw);
+            if (dest < 0) {
+                out.notes.push_back(chainName + ": hardware output " + std::to_string(hw + 1) + " left out (no output of the performance plays there)");
                 continue;
             }
             if (tapLine[dest] >= 0) {
@@ -812,15 +910,20 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                 tapLine[dest] = owner[srcCh];
             }
         }
-        for (int o = 0; o < 2; ++o)
+        for (int o = 0; o < outputs; ++o)
             if (tapLine[o] < 0) {
                 out.notes.push_back(chainName + ": nothing goes to output " + std::to_string(o + 1) + " in REAPER; Cue sends the end of the chain there");
                 tapLine[o] = 0;
             }
-        // Branches named after the output they feed.
-        for (int o = 0; o < 2; ++o)
+        // Branches named after the output they feed, or as the performance named them.
+        for (int o = 0; o < outputs; ++o)
             if (tapLine[o] > 0 && startsWith(lines[tapLine[o]].name, "Branch "))
                 lines[tapLine[o]].name = "Out " + std::to_string(o + 1);
+        for (const auto& sc : cue.scenes)
+            for (const auto& ch : sc.chains)
+                if (ch.name == chainName && ch.branches.size() + 1 == lines.size())
+                    for (size_t b = 1; b < lines.size(); ++b)
+                        lines[b].name = ch.branches[b - 1];
 
         // Slots as the config will number them: the main line, then the
         // branches in the order their branch lines appear.
@@ -837,6 +940,17 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                 slotOf[{li, k}] = labels.size();
                 labels.push_back(lines[li].plugins[k].label);
             }
+        for (const auto& [id, at] : fxIds) {
+            const size_t slot = slotOf[at];
+            int count = 0, nth = 0;
+            for (size_t i = 0; i < labels.size(); ++i)
+                if (labels[i] == labels[slot]) {
+                    ++count;
+                    if (i == slot)
+                        nth = count;
+                }
+            fxPlugin[id] = chainName + "/" + labels[slot] + (count > 1 ? ":" + std::to_string(nth) : "");
+        }
         // `sidechain = Label`, numbered as Label:N when the chain has more than one.
         auto keyRef = [&](const RppPlugin& p, int li, size_t k) -> std::string {
             if (p.keyLine < 0)
@@ -886,7 +1000,7 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
                 if (k < l.plugins.size())
                     writePlugin(l.plugins[k], li, k);
             }
-            for (int o = 0; o < 2; ++o)
+            for (int o = 0; o < outputs; ++o)
                 if (tapLine[o] == li && li > 0)
                     chainsText << "tap = out" << o + 1 << "\n";
         };
@@ -922,14 +1036,39 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
             cfg << ";   " << n << "\n";
     }
     const int input = inputs.size() == 1 ? *inputs.begin() + 1 : 1;
+    if (cue.found) {
+        auto names = [](const std::vector<CueMappings::Port>& ports) {
+            std::string s;
+            for (const auto& p : ports)
+                s += (s.empty() ? "" : ", ") + p.name;
+            return s;
+        };
+        cfg << "\n[performance]\n";
+        if (!cue.inputs.empty())
+            cfg << "inputs = " << cue.inputs.front().name << "\n";
+        if (!cue.outputs.empty())
+            cfg << "outputs = " << names(cue.outputs) << "\n";
+        if (cue.inputs.size() > 1)
+            out.notes.push_back("the performance had " + std::to_string(cue.inputs.size()) + " inputs; the import plays every chain from the first");
+    } else if (outputs > 2) {
+        cfg << "\n[performance]\noutputs = ";
+        for (int o = 0; o < outputs; ++o)
+            cfg << (o ? ", " : "") << "Out " << o + 1;
+        cfg << "\n";
+    }
     cfg << "\n[audio]\n"
         << "device = hw:M2\n"
         << "rate = " << (rate > 0 ? static_cast<int>(rate) : 48000) << "\n"
         << "period = 64\n"
         << "periods = 3         ; as REAPER on the M2: a block may run a period late without an xrun\n"
         << "input = " << input << "\n"
-        << "out1 = 1\n"
-        << "out2 = 2\n"
+        << [&] {
+               std::string s;
+               for (int o = 0; o < outputs; ++o)
+                   s += "out" + std::to_string(o + 1) + " = " +
+                        std::to_string(cue.found && !cue.outputs.empty() ? cue.outputs[o].channel + 1 : o + 1) + "\n";
+               return s;
+           }()
         << "mix = left          ; as REAPER's mono hardware sends: the chain's left channel\n"
         << "\n[switching]\n"
         << "preroll_ms = 50\n"
@@ -938,17 +1077,59 @@ bool convertRpp(const std::string& rppText, const std::string& projectName, Plug
         << "\n[midi]\n"
         << "in = M2             ; the FCB1010 on the M2's MIDI ports\n"
         << "profile = eurekaprom\n"
-        << "channel = 1\n"
-        << "\n[scene " << projectName << "]\n"
-        << chainsText.str();
-    if (!mapping.empty()) {
-        cfg << "\n; Presets, controls and pedals.\ninclude = " << mapping << "\n";
-    } else {
-        cfg << "\n; One preset per chain. Keys 1-" << std::min<size_t>(9, chainNames.size())
-            << " select them in cue run; add pedal = N to select one from the FCB.\n";
-        for (const auto& c : chainNames)
-            cfg << "\n[preset " << c << "]\nchain = " << c << "\n";
+        << "channel = 1\n";
+    for (const Scene& sc : scenes) {
+        if (sc.chains.empty())
+            continue;
+        cfg << "\n[scene " << sc.name << "]\n";
+        const CueMappings::Scene* saved = nullptr;
+        for (const auto& s : cue.scenes)
+            if (s.name == sc.name)
+                saved = &s;
+        if (saved) {
+            if (!saved->display.empty())
+                cfg << "display = " << saved->display << "\n";
+            if (saved->pedal)
+                cfg << "pedal = " << saved->pedal << "\n";
+            if (saved->program >= 0)
+                cfg << "program = " << saved->program << "\n";
+        }
+        cfg << sc.text.str();
+        if (mapping.empty() && saved) {
+            for (const auto& c : sc.chains) {
+                cfg << "\n[preset " << c << "]\nchain = " << c << "\n";
+                for (const auto& ch : saved->chains)
+                    if (ch.name == c) {
+                        if (!ch.display.empty())
+                            cfg << "display = " << ch.display << "\n";
+                        if (ch.pedal)
+                            cfg << "pedal = " << ch.pedal << "\n";
+                        if (ch.program >= 0)
+                            cfg << "program = " << ch.program << "\n";
+                        if (!ch.warm.empty())
+                            cfg << "warm = " << ch.warm << "\n";
+                        for (const auto& a : ch.onSelect)
+                            cfg << "do = " << a << "\n";
+                    }
+            }
+        } else if (mapping.empty()) {
+            cfg << "\n; One preset per chain. Keys 1-" << std::min<size_t>(9, chainNames.size())
+                << " select them in cue run; add pedal = N to select one from the FCB.\n";
+            for (const auto& c : sc.chains)
+                cfg << "\n[preset " << c << "]\nchain = " << c << "\n";
+        }
     }
+    if (!mapping.empty())
+        cfg << "\n; Presets, controls and pedals.\ninclude = " << mapping << "\n";
+    if (cue.found)
+        cfg << "\n; The performance's controls and pedals, as Cue Converter saved them in the project.\n" << cue.ini;
+    std::string triggers;
+    for (const auto& text : mapping.empty() ? realearns : std::vector<std::string>{}) // a pedal file replaces ReaLearn
+        triggers += realearnTriggers(text, trackChain, fxPlugin, cue.found, out.notes);
+    if (!triggers.empty())
+        cfg << "\n; From ReaLearn.\n" << triggers;
+    if (cue.found)
+        out.notes.push_back("pedals: read from the Cue performance saved in the project; changes made in ReaLearn are not read back");
     out.config = cfg.str();
     return true;
 }

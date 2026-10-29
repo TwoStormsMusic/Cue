@@ -23,6 +23,9 @@ cp "$root"/configs/*.ini "$stage/configs/"
 cp "$root/scripts/run-tests.sh" "$root/scripts/rig-info.sh" "$stage/"
 cp "$root/README.md" "$root/TESTING.md" "$stage/"
 cp "$root"/docs/*.md "$stage/docs/"
+if [ -f "$build/cue-convert" ]; then
+  cp "$build/cue-convert" "$stage/bin/"
+fi
 strip "$stage"/bin/*
 mkdir -p "$stage/licenses"
 cp "$root"/third_party/fonts/OFL-*.txt "$stage/licenses/"

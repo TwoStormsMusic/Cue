@@ -449,6 +449,24 @@ Play while you do all of this, then check the status line: still `xruns 0`. **Se
 4. **Jump Cut.** Select a wire, tap **Jump Cut** (it lights up while on; tap again to make it a plain wire). Make two jump cuts from one plug-in: their letters start one above the other. Drag a letter somewhere else: it stays there after **Save** and opening again; **Undo** puts it back. The letters run A, B, C with none missing.
 5. **Moving several.** Shift-click two or three plug-ins (they all turn orange), drag one: they all move; **Undo** moves them all back. Shift-drag across open space: what the box touches is selected. On the touchscreen, turn on **Select** (beside the zoom), tap plug-ins or drag a box, then turn it off. Tap a plug-in on its own, or open space, to let go.
 
+## 20. Cue Converter
+
+Needs REAPER with ReaLearn (Helgobox) on the rig, and Qt 6 (as for the Cue app).
+
+1. `bin/cue-convert` opens a black window with an orange "Cue". Under the drop area, **Pedals for .RPP**: click **Choose…** and pick `configs/cue-template-mapping.ini` (your template's ReaLearn uses formulas the converter cannot read, so its pedals come from this file). It is remembered.
+2. Drop `Cue Template 2S.RPP` on it: it writes `Cue Template 2S.cue` beside it and lists what it left out. The first line says the pedals came from `cue-template-mapping.ini`.
+3. Drop that `Cue Template 2S.cue`: it writes `Cue Template 2S (2).RPP` (it never replaces a project).
+4. Open that project in REAPER. Check:
+   - every chain is a track; only the first is unmuted; Darkglass Ultra and Parallax load with their settings (if REAPER says it cannot find one, tell me its name);
+   - FOH and the amp get what they get in Cue (IR and Saturator only on FOH);
+   - the **Cue pedals** track holds ReaLearn. If your FCB is not REAPER's MIDI device 1, pick it as ReaLearn's input and output.
+5. Press pedals 6-10: each unmutes its track and mutes the others, its LED lights, the display shows PU, SL, OO, MO, DJ.
+6. Pedal 4 steps the wah (off, auto, pedal) and switches the two TwoStorms Wahs; pedals 1-3 light and put out their LEDs; the Value 1 / Value 2 LEDs follow the wah.
+7. Drop the `.RPP` back on the converter: the `.cue` it writes plays as the original (same pedals, same chains).
+8. Play the converted `.cue` in Cue: `bin/cue-app --start "/path/to/Cue Template 2S.cue"`.
+
+Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn effects, the tuner and the wah on but not off.
+
 ## What passes
 
 | Check | Pass when |

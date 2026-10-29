@@ -90,6 +90,9 @@ add_executable(cue
   src/app/cuefile.cpp
   src/app/service.cpp
   src/app/rpp.cpp
+  src/app/rpp_export.cpp
+  src/app/realearn.cpp
+  src/app/convert.cpp
   src/app/scan.cpp
   src/control/show.cpp
   src/app/cpu.cpp
@@ -161,7 +164,7 @@ endif()
 
 if(CUE_BUILD_TESTS)
   enable_testing()
-  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp tests/test_scan.cpp tests/test_arrange.cpp tests/test_device.cpp src/audio/take_device.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/scan.cpp src/app/build.cpp src/app/edit.cpp src/app/arrange.cpp src/control/show.cpp)
+  add_executable(cue_tests tests/main.cpp tests/test_engine.cpp tests/test_graph.cpp tests/test_clap.cpp tests/test_editor.cpp tests/test_vst3.cpp tests/test_config.cpp tests/test_show.cpp tests/test_rpp.cpp tests/test_rpp_export.cpp tests/test_cuefile.cpp tests/test_service.cpp tests/test_tuner.cpp tests/test_scan.cpp tests/test_arrange.cpp tests/test_device.cpp src/audio/take_device.cpp src/app/config.cpp src/app/cuefile.cpp src/app/service.cpp src/app/rpp.cpp src/app/rpp_export.cpp src/app/realearn.cpp src/app/convert.cpp src/app/scan.cpp src/app/build.cpp src/app/edit.cpp src/app/arrange.cpp src/control/show.cpp)
   target_link_libraries(cue_tests PRIVATE cue_host miniz nlohmann_json PkgConfig::ALSA)
   target_compile_definitions(cue_tests PRIVATE
     CUE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -189,5 +192,29 @@ if(CUE_BUILD_TESTS)
     add_dependencies(cue_app_tests cue cue_test_plugins)
     add_test(NAME cue_app_tests COMMAND cue_app_tests)
     set_tests_properties(cue_app_tests PROPERTIES ENVIRONMENT QT_QPA_PLATFORM=offscreen)
+  endif()
+endif()
+
+# The converter: REAPER projects to .cue performances and back, in a small
+# Qt 6 window (cue-convert), sharing Cue's own reading and writing code.
+option(CUE_BUILD_CONVERTER "Build cue-convert (needs Qt 6 Widgets)" ON)
+if(CUE_BUILD_CONVERTER)
+  find_package(Qt6 6.2 COMPONENTS Widgets QUIET)
+  if(Qt6_FOUND)
+    add_executable(cue-convert
+      src/converter/main.cpp
+      src/converter/window.cpp
+      src/app/convert.cpp
+      src/app/rpp.cpp
+      src/app/rpp_export.cpp
+      src/app/realearn.cpp
+      src/app/config.cpp
+      src/app/cuefile.cpp
+    )
+    set_target_properties(cue-convert PROPERTIES AUTOMOC ON)
+    target_include_directories(cue-convert PRIVATE src)
+    target_link_libraries(cue-convert PRIVATE cue_host miniz nlohmann_json Qt6::Widgets Threads::Threads)
+  else()
+    message(STATUS "Qt 6 not found: cue-convert is not built (install qt6-base-dev)")
   endif()
 endif()

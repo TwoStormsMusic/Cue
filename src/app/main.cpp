@@ -12,12 +12,14 @@
 //   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
 //   cue params <file>[#id]       list a plug-in's parameters and their ids
 //   cue import-rpp <file.rpp>    make a config from a REAPER project
+//   cue export-rpp <file.cue>    write a performance (or config) as a REAPER project
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
 #include "app/arrange.h"
 #include "app/build.h"
 #include "app/config.h"
+#include "app/convert.h"
 #include "app/cpu.h"
 #include "app/cuefile.h"
 #include "app/service.h"
@@ -1600,6 +1602,21 @@ int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vect
     return result.missing ? 3 : 0;
 }
 
+int cmdExportRpp(const std::string& in, const std::string& out) {
+    ConvertOptions options;
+    options.rig = rigPath;
+    ConvertResult result;
+    std::string err;
+    if (!convertFile(in, out, options, result, &err)) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    std::printf("wrote %s\n  %d chain(s), %d plug-in(s); %d left out\n", result.out.c_str(), result.chains, result.plugins, result.skipped);
+    for (const auto& n : result.notes)
+        std::printf("  - %s\n", n.c_str());
+    return 0;
+}
+
 int cmdConvert(const std::string& in, std::string out, std::string rigOut) {
     namespace fs = std::filesystem;
     Config config;
@@ -2009,6 +2026,7 @@ int usage() {
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
+                 "  cue export-rpp <file.cue|config.ini> [out.rpp] [--rig rig.json]\n"
                  "  cue midi-monitor [port-match]\n"
                  "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -2066,6 +2084,8 @@ int main(int argc, char** argv) {
             scan = scan && std::strcmp(argv[i], "--no-scan") != 0;
         return cmdImportRpp(argv[2], opt("--out", ""), search, opt("--mapping", ""), scan);
     }
+    if (cmd == "export-rpp" && argc >= 3 && !isRppFile(argv[2]))
+        return cmdExportRpp(argv[2], argc >= 4 && argv[3][0] != '-' ? argv[3] : "");
     if (cmd == "check" && argc >= 3) {
         bool loadPlugins = true;
         for (int i = 3; i < argc; ++i)
