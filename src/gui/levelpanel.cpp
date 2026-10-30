@@ -6,6 +6,7 @@
 // fader, Auto as the Gain Stage plug-in has it and, on an output, mute and
 // a limiter. Every change goes to the engine and is kept for undo.
 
+#include "gui/board.h"
 #include "gui/chainview.h"
 #include "gui/levels.h"
 
@@ -55,6 +56,12 @@ void ChainView::followMeters() {
         follow(AppState::autoKey(true, i), s.status.inputs[i].peakDb, 0);
     for (int o = 0; o < s.status.outputs.size(); ++o)
         follow(AppState::autoKey(false, o), s.status.outputs[o].peakDb, s.status.outputs[o].limitDb);
+    // The wires of the chain shown, after their gains (none while it is idle).
+    if (const ChainInfo* c = s.chain(chain_)) {
+        const QVector<double> peaks = chain_ < s.status.chains.size() ? s.status.chains[chain_].wirePeaks : QVector<double>();
+        for (int i = 0; i < c->wires.size(); ++i)
+            follow(QString("w %1 %2").arg(chain_).arg(i), peaks.value(i, -120), 0);
+    }
 }
 
 // Green to -6 dB, orange above, a peak line held for a moment, red at the
@@ -98,92 +105,357 @@ void ChainView::ioPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
     const int own = in ? static_cast<int>(s.perf.inputs.indexOf(c.input)) : port.index;
     if (own < 0 || own >= (in ? s.perf.inputs.size() : s.perf.outputs.size()))
         return;
-    const double pad = 18 * u, w = r.width() - 2 * pad;
-    double y = r.top() + 20 * u;
+    const double pad = 18 * u, w = r.width() - 2 * pad, th = 36 * u;
+    const double top = r.top() + 20 * u, bodyTop = in ? top + 30 * u + th + 14 * u : top + 30 * u;
+    const QRectF body(r.left() + pad, bodyTop, w, r.bottom() - bodyTop - 8 * u);
+
+    // The cards, scrolled. A drag where no card takes it scrolls them; it
+    // comes first, so theirs come before it.
+    listRect_ = body;
+    hit("io scroll", body, {}, [this](QPointF pos, bool done) {
+        if (scrollStartY_ < 0 || done) {
+            scrollStartY_ = done ? -1 : pos.y();
+            scrollFrom_ = scroll_;
+            return;
+        }
+        scroll_ = std::clamp(scrollFrom_ - (pos.y() - scrollStartY_), 0.0, scrollMax_);
+        update();
+    });
+    p.save();
+    p.setClipRect(QRectF(r.left(), body.top(), r.width(), r.bottom() - body.top()));
+    const double h = ioBody(p, body, c, own);
+    p.restore();
+    scrollMax_ = std::max(0.0, h - body.height());
+    scroll_ = std::clamp(scroll_, 0.0, scrollMax_);
+
+    // Over them: what is scrolled out of sight above cannot be tapped.
+    hit("io head", QRectF(r.left(), r.top(), r.width(), body.top() - r.top()), [] {});
     p.setFont(smallLabel(u));
     p.setPen(color::muted);
-    p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, in ? "GAIN STAGE" : QString("OUTPUT %1").arg(own + 1));
-    y += 30 * u;
-
-    if (!in) {
-        y += levelCard(p, QRectF(r.left() + pad, y, w, r.bottom() - y), false, own, true) + 14 * u;
-        p.setPen(color::dim);
-        p.setFont(typeface(Face::Text, 13 * u));
-        p.drawText(QRectF(r.left() + pad, y, w, r.bottom() - y), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                   "This output's level, mute and limiter are the performance's: the same whichever chain plays, and on every input "
-                   "box's Outputs tab. The name too. Drag the box to move it.");
+    p.drawText(QRectF(r.left() + pad, top, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, in ? "GAIN STAGE" : QString("OUTPUT %1").arg(own + 1));
+    if (!in)
         return;
-    }
-
-    // The tabs.
-    const double gap = 6 * u, tw = (w - 2 * gap) / 3, th = 36 * u;
+    const double gap = 6 * u, tw = (w - 2 * gap) / 3;
     const QPair<IoTab, QString> tabs[] = {{IoTab::Chain, "Chain"}, {IoTab::Inputs, "Inputs"}, {IoTab::Outputs, "Outputs"}};
     for (int t = 0; t < 3; ++t) {
         const bool on = ioTab_ == tabs[t].first;
-        button(p, "io tab " + tabs[t].second.toLower(), QRectF(r.left() + pad + t * (tw + gap), y, tw, th), tabs[t].second,
+        button(p, "io tab " + tabs[t].second.toLower(), QRectF(r.left() + pad + t * (tw + gap), top + 30 * u, tw, th), tabs[t].second,
                [this, tab = tabs[t].first] {
                    if (!entryFor_.isEmpty())
                        commitEntry();
                    ioTab_ = tab;
+                   scroll_ = 0;
                    update();
                },
                on ? color::onOrange : color::text, on ? color::orange : color::border2, on ? color::orange : color::panel2, 14 * u);
     }
-    y += th + 18 * u;
-    const QRectF body(r.left() + pad, y, w, r.bottom() - y);
+}
 
-    if (ioTab_ == IoTab::Chain) {
-        // This chain: the input it plays, and its wires into the outputs.
+double ChainView::ioBody(QPainter& p, const QRectF& body, const ChainInfo& c, int own) {
+    const bool in = ioSel_->kind == PortInfo::Kind::Input;
+    const double w = body.width(), y0 = body.top() - scroll_;
+    double y = y0;
+    auto label = [&](const QString& text) {
         p.setFont(smallLabel(u));
         p.setPen(color::muted);
-        p.drawText(QRectF(body.left(), y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "PLAYS");
-        y += 24 * u;
-        y += levelCard(p, QRectF(body.left(), y, w, body.bottom() - y), true, own, true) + 18 * u;
-        p.setFont(smallLabel(u));
-        p.setPen(color::muted);
-        p.drawText(QRectF(body.left(), y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "INTO THE OUTPUTS");
+        p.drawText(QRectF(body.left(), y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, text);
         y += 26 * u;
-        int shown = 0;
-        for (int i = 0; i < c.wires.size(); ++i) {
-            const WireInfo& wire = c.wires[i];
-            if (wire.to.kind != PortInfo::Kind::Output)
-                continue;
-            const QRectF row(body.left(), y, w, 40 * u);
-            if (row.bottom() > body.bottom())
-                break;
-            const QString id = QString("io wire %1").arg(i);
-            draw::card(p, row, 8 * u, isPressed(id) ? color::raised : color::panel2, color::border2);
-            p.setPen(wire.muted ? color::dim : color::text);
-            p.setFont(typeface(Face::Text, 14 * u));
-            draw::text(p, row.adjusted(12 * u, 0, -90 * u, 0), Qt::AlignLeft | Qt::AlignVCenter, portName(c, wire.from) + " → " + portName(c, wire.to));
-            p.setPen(wire.muted ? color::orangeLight : color::muted);
-            p.setFont(typeface(Face::Mono, 13 * u));
-            p.drawText(row.adjusted(0, 0, -12 * u, 0), Qt::AlignRight | Qt::AlignVCenter, wire.muted ? "muted" : levelText(wire.levelDb));
-            hit(id, row, [this, i] { selectWire(i); });
-            y += 46 * u;
-            ++shown;
-        }
+    };
+    auto help = [&](const QString& text) {
         p.setPen(color::dim);
         p.setFont(typeface(Face::Text, 13 * u));
-        p.drawText(QRectF(body.left(), y + 4 * u, w, body.bottom() - y), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                   QString(shown ? "Tap a wire to set its level, width and pan for this chain alone. " : "No wire of this chain reaches an output yet. ") +
-                       "The Inputs and Outputs tabs set the levels of the whole performance.");
-        return;
+        const QRectF hr(body.left(), y + 4 * u, w, 400 * u);
+        const QRectF used = p.boundingRect(hr, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
+        p.drawText(hr, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
+        y += used.height() + 12 * u;
+    };
+
+    if (!in) {
+        y += levelCard(p, QRectF(body.left(), y, w, 0), false, own, true) + 14 * u;
+        help("This output's level, mute and limiter are the performance's: the same whichever chain plays, and on every input box's "
+             "Outputs tab. The name too. Drag the box to move it.");
+        return y - y0;
+    }
+
+    if (ioTab_ == IoTab::Chain) {
+        // This chain: the input it plays, then every output in it. A
+        // block's outputs are the wires that leave it, the input's too.
+        label("PLAYS");
+        y += levelCard(p, QRectF(body.left(), y, w, 0), true, own, true) + 18 * u;
+        label("OUTPUTS IN THIS CHAIN");
+        y += wireAutoRow(p, QRectF(body.left(), y, w, 0)) + 14 * u;
+        QVector<int> order;
+        for (int b = 0; b < c.numPlugins(); ++b)
+            order << b;
+        const Board B(c, s.perf.outputs.size());
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            const QPointF pa = B.block.value(a), pb = B.block.value(b);
+            return std::fabs(pa.y() - pb.y()) > 1 ? pa.y() < pb.y() : pa.x() < pb.x();
+        });
+        order.prepend(-1);
+        int cards = 0;
+        for (int b : order) {
+            const PortInfo from = b < 0 ? PortInfo::input() : PortInfo::block(b);
+            QVector<int> wires;
+            for (int i = 0; i < c.wires.size(); ++i)
+                if (c.wires[i].from == from)
+                    wires << i;
+            if (wires.isEmpty())
+                continue;
+            const PluginInfo* pi = b < 0 ? nullptr : c.plugin(b);
+            const QString name = b < 0 ? c.input : pi ? pi->label : QString("Block %1").arg(b + 1);
+            p.setPen(color::text2);
+            p.setFont(typeface(Face::Text, 15 * u, QFont::DemiBold));
+            draw::text(p, QRectF(body.left(), y, w * 0.7, 24 * u), Qt::AlignLeft | Qt::AlignVCenter, name);
+            p.setPen(color::dim);
+            p.setFont(typeface(Face::Text, 12 * u));
+            p.drawText(QRectF(body.left(), y, w, 24 * u), Qt::AlignRight | Qt::AlignVCenter,
+                       b < 0 ? "input" : bypassed(c.index, b) ? "bypassed" : QString("%1 output%2").arg(wires.size()).arg(wires.size() > 1 ? "s" : ""));
+            y += 30 * u;
+            for (int i : wires)
+                y += outputCard(p, QRectF(body.left(), y, w, 0), c, i) + 8 * u;
+            y += 10 * u;
+            ++cards;
+        }
+        help(QString(cards ? "" : "Nothing leaves a plug-in yet. ") +
+             "Each wire leaving a plug-in is one of its outputs: draw another from its dot for another output. Its level, mute and mono "
+             "are this chain's; the Inputs and Outputs tabs set the whole performance's. Auto listens while the chain plays: Match sets "
+             "the level so the plug-in plays as loud as it is fed, Target so it reaches the target (from the input, always the target).");
+        return y - y0;
     }
 
     const bool inputs = ioTab_ == IoTab::Inputs;
     const int n = inputs ? s.perf.inputs.size() : s.perf.outputs.size();
-    for (int k = 0; k < n && y < body.bottom() - 60 * u; ++k)
-        y += levelCard(p, QRectF(body.left(), y, w, body.bottom() - y), inputs, k, inputs && k == own) + 12 * u;
-    if (y < body.bottom() - 60 * u) {
+    for (int k = 0; k < n; ++k)
+        y += levelCard(p, QRectF(body.left(), y, w, 0), inputs, k, inputs && k == own) + 12 * u;
+    help(inputs ? "Each input's gain comes before every chain that plays it: its calibration. Every chain's Gain Stage shows "
+                  "and sets the same gains. Auto listens once you play, then sets the gain so the input reaches the target."
+                : "Each output's level comes after every chain, then its limiter, which turns down any peak over its ceiling at "
+                  "once, with no added latency. Every chain's Gain Stage shows and sets the same levels.");
+    return y - y0;
+}
+
+// One output of a plug-in (a wire leaving it): where it goes, its level
+// (a tap types one), its meter after the level, a fader, mute and mono.
+double ChainView::outputCard(QPainter& p, const QRectF& r, const ChainInfo& c, int i) {
+    const WireInfo wire = wireNow(c, i);
+    const double pad = 12 * u, w = r.width() - 2 * pad, h = 136 * u;
+    const QRectF card(r.left(), r.top(), r.width(), h);
+    draw::card(p, card, 10 * u, color::panel2, color::border2);
+    double y = card.top() + 10 * u;
+    const QString key = QString("w %1 %2").arg(c.index).arg(i), id = QString("io wire %1").arg(i);
+    const double valueW = 92 * u;
+    const QString to = "→ " + portName(c, wire.to) + (wire.to.key ? " (key)" : "");
+    p.setPen(wire.muted ? color::dim : color::text);
+    p.setFont(draw::fitted(Face::Text, QFont::Medium, to, 15 * u, 11 * u, w - valueW - 8 * u));
+    draw::text(p, QRectF(card.left() + pad, y, w - valueW - 8 * u, 30 * u), Qt::AlignLeft | Qt::AlignVCenter, to);
+    const QRectF valueR(card.right() - pad - valueW, y, valueW, 30 * u);
+    const QString valueId = id + " value";
+    if (entryFor_ == valueId) {
+        placeEntry(valueId, valueR);
+    } else {
+        draw::card(p, valueR, 6 * u, isPressed(valueId) ? color::raised : color::panel, color::border);
+        p.setPen(wire.muted ? color::orangeLight : color::text);
+        p.setFont(typeface(Face::Mono, 13 * u));
+        p.drawText(valueR, Qt::AlignCenter, wire.muted ? "muted" : levelText(wire.levelDb));
+        hit(valueId, valueR, [this, valueId, i, db = wire.levelDb] {
+            startEntry(valueId, db <= kOffDb ? "off" : QString::number(std::round(db * 10) / 10), "dB", 12, [this, i](const QString& typed) {
+                const ChainInfo* c = s.chain(chain_);
+                double to = 0;
+                if (!c || i >= c->wires.size())
+                    return;
+                if (!typedLevel(typed, to)) {
+                    emit s.message("A level is a number of dB, or off", true);
+                    return;
+                }
+                WireInfo w = wireNow(*c, i);
+                gainsFrom_ = w;
+                w.levelDb = to <= kOffDb ? kOffDb : std::min(to, 12.0);
+                setGains(w, true);
+            });
+        });
+    }
+    y += 38 * u;
+    meterBar(p, QRectF(card.left() + pad, y, w, 8 * u), key, false);
+    y += 16 * u;
+    const QRectF track(card.left() + pad + 10 * u, y + 14 * u - 3 * u, w - 20 * u, 6 * u);
+    const double f = levelToFader(wire.levelDb);
+    p.setPen(Qt::NoPen);
+    p.setBrush(color::line);
+    p.drawRoundedRect(track, 3 * u, 3 * u);
+    p.setBrush(wire.muted ? color::dim : color::orange);
+    p.drawRoundedRect(QRectF(track.left(), track.top(), std::max(track.height(), track.width() * f), track.height()), 3 * u, 3 * u);
+    p.setPen(QPen(color::dim, 1));
+    const double tx = track.left() + track.width() * 0.75;
+    p.drawLine(QPointF(tx, track.top() - 7 * u), QPointF(tx, track.bottom() + 7 * u));
+    p.setPen(QPen(wire.muted ? color::dim : color::orange, 2 * u));
+    p.setBrush(color::text);
+    p.drawEllipse(QPointF(track.left() + track.width() * f, track.center().y()), 9 * u, 9 * u);
+    const QString faderId = id + " fader";
+    hit(faderId, QRectF(track.left() - 12 * u, y - 6 * u, track.width() + 24 * u, 40 * u), {}, [this, i, track, faderId](QPointF pos, bool done) {
+        const ChainInfo* c = s.chain(chain_);
+        if (!c || i >= c->wires.size())
+            return;
+        WireInfo w = wireNow(*c, i);
+        if (gainDrag_ != 0) {
+            // Pressed: where this change starts, and whether it is the second tap of two.
+            gainDrag_ = 0;
+            gainsFrom_ = w;
+            gainReset_ = doubleTap(faderId);
+        }
+        if (done)
+            gainDrag_ = -1;
+        if (gainReset_) {
+            w.levelDb = 0;
+        } else {
+            const double db = faderToLevel(std::clamp((pos.x() - track.left()) / track.width(), 0.0, 1.0));
+            w.levelDb = std::fabs(db) < 0.25 ? 0 : db <= kOffDb ? kOffDb : std::round(db * 10) / 10;
+        }
+        setGains(w, done);
+    });
+    y += 38 * u;
+    const double gap = 6 * u, bw = (w - 2 * gap) / 3, bh = 32 * u;
+    const bool mono = wire.width == 0;
+    button(p, id + " mute", QRectF(card.left() + pad, y, bw, bh), wire.muted ? "Unmute" : "Mute",
+           [this, i] {
+               const ChainInfo* c = s.chain(chain_);
+               if (!c || i >= c->wires.size())
+                   return;
+               WireInfo w = wireNow(*c, i);
+               gainsFrom_ = w;
+               w.muted = !w.muted;
+               setGains(w, true);
+           },
+           wire.muted ? color::onOrange : color::text, wire.muted ? color::orange : color::border2, wire.muted ? color::orange : color::panel, 13 * u);
+    button(p, id + " mono", QRectF(card.left() + pad + bw + gap, y, bw, bh), "Mono",
+           [this, i] {
+               const ChainInfo* c = s.chain(chain_);
+               if (!c || i >= c->wires.size())
+                   return;
+               WireInfo w = wireNow(*c, i);
+               gainsFrom_ = w;
+               w.width = w.width == 0 ? 100 : 0;
+               setGains(w, true);
+           },
+           mono ? color::green : color::text, mono ? color::greenDark : color::border2, mono ? color::greenBg : color::panel, 13 * u);
+    // Auto, which stops it while it runs.
+    const auto running = s.autoNow.constFind(s.autoKey(c.index, wire));
+    const bool busy = running != s.autoNow.constEnd();
+    QString autoText = "Auto";
+    if (busy)
+        autoText = running->listening ? QString("%1 / %2 s").arg(running->seconds, 0, 'f', 1).arg(running->of, 0, 'g', 3) : "Play…";
+    button(p, id + " auto", QRectF(card.left() + pad + 2 * (bw + gap), y, bw, bh), autoText,
+           [this, i, busy] {
+               const ChainInfo* c = s.chain(chain_);
+               if (c && i < c->wires.size())
+                   s.runAuto(c->index, wireNow(*c, i), busy);
+           },
+           busy ? color::onOrange : color::text, busy ? color::orange : color::border2, busy ? color::orange : color::panel, 13 * u);
+    return h;
+}
+
+// Auto's settings for every block's outputs, the same in every chain: Match
+// or Target, what it measures, its target and its time, each a tap.
+double ChainView::wireAutoRow(QPainter& p, const QRectF& r) {
+    const AutoInfo was = s.perf.levels.wireAuto;
+    const bool match = s.perf.levels.wireMatch;
+    const double gap = 6 * u, bh = 36 * u, mw = r.width() * 0.3, cw = (r.width() - mw - 3 * gap) / 3;
+    auto setAuto = [this, was, match](AutoInfo to, bool toMatch) {
+        s.setWireAuto(to, toMatch, [this, was, match, to, toMatch](const QJsonObject& r) {
+            auto req = [](const AutoInfo& a, bool m) {
+                QJsonObject j = a.json();
+                j["match"] = m;
+                return QJsonObject{{"cmd", "level"}, {"wires", true}, {"auto", j}};
+            };
+            if (s.check(r, "Auto"))
+                s.edited({"Auto settings of the outputs", -1, -1, req(was, match), req(to, toMatch)});
+        });
+    };
+    double x = r.left();
+    button(p, "io wires mode", QRectF(x, r.top(), mw, bh), match ? "Match" : "Target", [setAuto, was, match] { setAuto(was, !match); },
+           color::text, color::border2, color::panel, 14 * u);
+    x += mw + gap;
+    button(p, "io wires measure", QRectF(x, r.top(), cw, bh), measureText(was.measure),
+           [setAuto, was, match] {
+               AutoInfo to = was;
+               to.measure = was.measure == "peak" ? "rms" : was.measure == "rms" ? "lufs" : "peak";
+               setAuto(to, match);
+           },
+           color::text2, color::border2, color::panel, 13 * u);
+    x += cw + gap;
+    const QString targetId = "io wires target";
+    if (entryFor_ == targetId) {
+        placeEntry(targetId, QRectF(x, r.top(), cw, bh));
+    } else {
+        button(p, targetId, QRectF(x, r.top(), cw, bh), QString::number(was.targetDb, 'g', 3).replace("-", "−"),
+               [this, targetId, setAuto, was, match] {
+                   startEntry(targetId, QString::number(was.targetDb, 'g', 3), "Target dB", 6, [this, setAuto, was, match](const QString& typed) {
+                       double to = 0;
+                       if (!typedLevel(typed, to) || to < -60 || to > 0) {
+                           emit s.message("Auto's target is -60 to 0 dB", true);
+                           return;
+                       }
+                       AutoInfo a = was;
+                       a.targetDb = std::round(to * 10) / 10;
+                       setAuto(a, match);
+                   });
+               },
+               match ? color::dim : color::text2, color::border2, color::panel, 13 * u);
+    }
+    x += cw + gap;
+    button(p, "io wires time", QRectF(x, r.top(), cw, bh), secondsText(was.seconds),
+           [setAuto, was, match] {
+               AutoInfo to = was;
+               to.seconds = kTimes[0];
+               for (double t : kTimes)
+                   if (t > was.seconds + 0.01) {
+                       to.seconds = t;
+                       break;
+                   }
+               setAuto(to, match);
+           },
+           color::text2, color::border2, color::panel, 13 * u);
+    return bh;
+}
+
+// A plug-in's outputs in its own panel: a row for each wire leaving it,
+// with its meter and level; a tap selects the wire.
+double ChainView::outputRows(QPainter& p, const QRectF& r, const ChainInfo& c, const PortInfo& from) {
+    double y = r.top();
+    p.setFont(smallLabel(u));
+    p.setPen(color::muted);
+    p.drawText(QRectF(r.left(), y, r.width(), 18 * u), Qt::AlignLeft | Qt::AlignVCenter, "OUTPUTS");
+    y += 26 * u;
+    int shown = 0;
+    for (int i = 0; i < c.wires.size(); ++i) {
+        if (c.wires[i].from != from)
+            continue;
+        const WireInfo wire = wireNow(c, i);
+        const QRectF row(r.left(), y, r.width(), 36 * u);
+        const QString id = QString("output %1").arg(i);
+        draw::card(p, row, 8 * u, isPressed(id) ? color::raised : color::panel2, color::border2);
+        const double valueW = 70 * u, meterW = std::min(70 * u, row.width() * 0.25);
+        p.setPen(wire.muted ? color::dim : color::text);
+        p.setFont(typeface(Face::Text, 14 * u));
+        draw::text(p, QRectF(row.left() + 10 * u, y, row.width() - valueW - meterW - 28 * u, row.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                   "→ " + portName(c, wire.to) + (wire.to.key ? " (key)" : "") + (wire.width == 0 ? " · mono" : ""));
+        meterBar(p, QRectF(row.right() - valueW - meterW - 8 * u, row.center().y() - 3 * u, meterW, 6 * u), QString("w %1 %2").arg(c.index).arg(i),
+                 false);
+        p.setPen(wire.muted ? color::orangeLight : color::muted);
+        p.setFont(typeface(Face::Mono, 12 * u));
+        p.drawText(QRectF(row.right() - valueW - 4 * u, y, valueW - 6 * u, row.height()), Qt::AlignRight | Qt::AlignVCenter,
+                   wire.muted ? "muted" : levelText(wire.levelDb));
+        hit(id, row, [this, i] { selectWire(i); });
+        y += row.height() + 6 * u;
+        ++shown;
+    }
+    if (!shown) {
         p.setPen(color::dim);
         p.setFont(typeface(Face::Text, 13 * u));
-        p.drawText(QRectF(body.left(), y + 4 * u, w, body.bottom() - y), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                   inputs ? "Each input's gain comes before every chain that plays it: its calibration. Every chain's Gain Stage shows "
-                            "and sets the same gains. Auto listens once you play, then sets the gain so the input reaches the target."
-                          : "Each output's level comes after every chain, then its limiter, which turns down any peak over its ceiling at "
-                            "once, with no added latency. Every chain's Gain Stage shows and sets the same levels.");
+        p.drawText(QRectF(r.left(), y, r.width(), 22 * u), Qt::AlignLeft | Qt::AlignVCenter, "None: drag from its right-hand dot to add one.");
+        y += 26 * u;
     }
+    return y - r.top();
 }
 
 double ChainView::levelCard(QPainter& p, const QRectF& r, bool input, int index, bool own) {

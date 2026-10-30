@@ -183,6 +183,16 @@ private:
     void dragLevel(bool input, int index, const QRectF& track, const QString& id, QPointF pos, bool done);
     void sendLevel(bool input, int index, double db, bool done, double fromDb);
     void meterBar(QPainter& p, const QRectF& r, const QString& key, bool output);
+    // The wires leaving a block are its outputs. Its panel lists
+    // them, each with a meter and its level (a tap selects the wire); the
+    // Gain Stage's Chain tab shows each as a card: level, meter, fader,
+    // mute, mono and Auto, under a row of Auto's settings for them all.
+    // Each returns its height.
+    double outputRows(QPainter& p, const QRectF& r, const ChainInfo& c, const PortInfo& from);
+    double outputCard(QPainter& p, const QRectF& r, const ChainInfo& c, int wire);
+    double wireAutoRow(QPainter& p, const QRectF& r);
+    // A Gain Stage tab's cards, scrolled; returns their height.
+    double ioBody(QPainter& p, const QRectF& body, const ChainInfo& c, int own);
     void followMeters();
     void tapBlock(int slot);
     void dragBlock(int slot, QPointF pos, bool done);

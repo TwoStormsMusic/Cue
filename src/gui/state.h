@@ -95,6 +95,12 @@ public:
     // (the fields of a level request); Auto started or stopped.
     void setLevel(bool input, int index, const QJsonObject& fields, std::function<void(const QJsonObject&)> then = {});
     void runAuto(bool input, int index, bool cancel);
+    // ...and on a block's output, the wire from it: its key, and Auto
+    // started or stopped. Its settings are the same for every wire.
+    static QString autoKey(int chain, const QJsonValue& from, const QJsonValue& to, bool key);
+    QString autoKey(int chain, const WireInfo& w) const;
+    void runAuto(int chain, const WireInfo& w, bool cancel);
+    void setWireAuto(const AutoInfo& to, bool match, std::function<void(const QJsonObject&)> then = {});
 
     // Asks the engine for a change to the routing (add, remove, restore,
     // wire, unwire, place). The performance follows its answer, which then

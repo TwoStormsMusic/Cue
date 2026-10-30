@@ -108,6 +108,43 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
     } else if (name == "io") {
         setLevels(m);
+    } else if (name == "auto" && m.contains("chain")) {
+        // Auto on a block's output.
+        const int chain = m.value("chain").toInt(-1);
+        const QString key = autoKey(chain, m.value("from"), m.value("to"), m.value("key").toBool()), state = m.value("state").toString();
+        if (state == "waiting" || state == "listening") {
+            autoNow[key] = {state == "listening", m.value("seconds").toDouble(), m.value("of").toDouble()};
+        } else {
+            autoNow.remove(key);
+            const ChainInfo* c = perf.chain(chain);
+            auto end = [&](const QJsonValue& v, bool from) {
+                if (v.isDouble()) {
+                    const PluginInfo* pi = c ? c->plugin(v.toInt()) : nullptr;
+                    return pi ? pi->label : QString("Block %1").arg(v.toInt() + 1);
+                }
+                const int o = perf.output(v.toString());
+                return from ? (c ? c->input : QString("the input")) : perf.outputs.value(o, v.toString());
+            };
+            const QString what = end(m.value("from"), true) + " → " + end(m.value("to"), false);
+            if (state == "done") {
+                // Undone like a fader moved by hand.
+                auto set = [&](double db) {
+                    QJsonObject r{{"cmd", "wire"}, {"chain", chain}, {"from", m.value("from")}, {"to", m.value("to")}, {"level_db", db}};
+                    if (m.value("key").toBool())
+                        r["key"] = true;
+                    return r;
+                };
+                edited({"Auto on " + what, chain, -1, set(m.value("from_db").toDouble()), set(m.value("to_db").toDouble())});
+                const double to = m.value("to_db").toDouble();
+                QString heard = QString("it heard %1 dB").arg(m.value("level_db").toDouble(), 0, 'f', 1);
+                if (m.contains("fed_db"))
+                    heard += QString(", fed %1 dB").arg(m.value("fed_db").toDouble(), 0, 'f', 1);
+                emit message(QString("Auto set %1 to %2%3 dB (%4)").arg(what, to > 0 ? "+" : "").arg(to, 0, 'f', 1).arg(heard), false);
+            } else if (state == "failed") {
+                emit message("Auto on " + what + ": " + m.value("error").toString(), true);
+            }
+        }
+        emit statusChanged();
     } else if (name == "auto") {
         const bool input = m.contains("input");
         const int index = m.value(input ? "input" : "output").toInt(-1);
@@ -277,6 +314,37 @@ void AppState::runAuto(bool input, int index, bool cancel) {
             autoNow[autoKey(input, index)] = {false, 0, r.value("auto").toObject().value("of").toDouble()};
         emit statusChanged();
     });
+}
+
+QString AppState::autoKey(int chain, const QJsonValue& from, const QJsonValue& to, bool key) {
+    auto end = [](const QJsonValue& v) { return v.isDouble() ? QString::number(v.toInt()) : v.toString().toLower(); };
+    return QString("wire %1 %2 %3%4").arg(chain).arg(end(from), end(to), key ? " key" : "");
+}
+
+QString AppState::autoKey(int chain, const WireInfo& w) const {
+    return autoKey(chain, w.from.json(perf.outputs), w.to.json(perf.outputs), w.to.key);
+}
+
+void AppState::runAuto(int chain, const WireInfo& w, bool cancel) {
+    QJsonObject req = w.request(chain, perf.outputs, "auto");
+    if (cancel)
+        req["cancel"] = true;
+    const QString key = autoKey(chain, w);
+    link.request(req, [this, key, cancel](const QJsonObject& r) {
+        if (!check(r, "Auto"))
+            return;
+        if (cancel)
+            autoNow.remove(key);
+        else
+            autoNow[key] = {false, 0, r.value("auto").toObject().value("of").toDouble()};
+        emit statusChanged();
+    });
+}
+
+void AppState::setWireAuto(const AutoInfo& to, bool match, std::function<void(const QJsonObject&)> then) {
+    QJsonObject a = to.json();
+    a["match"] = match;
+    change({{"cmd", "level"}, {"wires", true}, {"auto", a}}, std::move(then));
 }
 
 // A wire's gains, as the engine has them now.

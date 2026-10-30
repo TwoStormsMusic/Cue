@@ -247,6 +247,13 @@ bool Chain::activate(double sampleRate, uint32_t maxFrames) {
     gainScratch_.assign(maxFrames, 0.0f);
     wetScratch_.assign(maxFrames, 0.0f);
     rampScratch_.assign(maxFrames, 0.0f);
+    kWeighting_ = KWeighting(sampleRate);
+    probeLength_ = std::max<uint32_t>(1, static_cast<uint32_t>(sampleRate / 100));
+    if (!wirePeaks_) {
+        wirePeaks_.reset(new std::atomic<float>[kWireMeters]);
+        for (uint32_t i = 0; i < kWireMeters; ++i)
+            wirePeaks_[i].store(0.0f, std::memory_order_relaxed);
+    }
     for (size_t i = 0; i < blocks_.size(); ++i) {
         Block& b = *blocks_[i];
         if (!b.processor->activate(sampleRate, maxFrames)) {
@@ -635,14 +642,26 @@ const float* const* Chain::gather(Plan& plan, uint32_t first, uint32_t count, fl
     if (count == 0)
         return nullptr;
     Plan::LiveWire* w = plan.wires.data() + first;
-    if (count == 1 && w->plain && !into)
+    // Each wire's peak as it passes, for its meter.
+    auto plainPeak = [frames](const Plan::LiveWire& x) {
+        float peak = 0.0f;
+        for (int c = 0; c < kChainChannels; ++c)
+            for (uint32_t n = 0; n < frames; ++n)
+                peak = std::max(peak, std::fabs(x.src[c][n]));
+        return peak;
+    };
+    if (count == 1 && w->plain && !into) {
+        meter(w->id, plainPeak(*w));
         return w->src;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         Plan::LiveWire& x = w[i];
         const float* l = x.src[0];
         const float* r = x.src[1];
         const bool sum = i > 0;
+        float peak = 0.0f;
         if (x.plain) {
+            peak = plainPeak(x);
             for (int c = 0; c < kChainChannels; ++c) {
                 if (!sum) {
                     std::memcpy(dst[c], x.src[c], frames * sizeof(float));
@@ -655,6 +674,7 @@ const float* const* Chain::gather(Plan& plan, uint32_t first, uint32_t count, fl
             const float a = x.to[0], b = x.to[1], c = x.to[2], d = x.to[3];
             for (uint32_t n = 0; n < frames; ++n) {
                 const float L = a * l[n] + b * r[n], R = c * l[n] + d * r[n];
+                peak = std::max(peak, std::max(std::fabs(L), std::fabs(R)));
                 dst[0][n] = sum ? dst[0][n] + L : L;
                 dst[1][n] = sum ? dst[1][n] + R : R;
             }
@@ -666,6 +686,7 @@ const float* const* Chain::gather(Plan& plan, uint32_t first, uint32_t count, fl
                 for (int j = 0; j < 4; ++j)
                     k[j] = x.from[j] + t * (x.to[j] - x.from[j]);
                 const float L = k[0] * l[n] + k[1] * r[n], R = k[2] * l[n] + k[3] * r[n];
+                peak = std::max(peak, std::max(std::fabs(L), std::fabs(R)));
                 dst[0][n] = sum ? dst[0][n] + L : L;
                 dst[1][n] = sum ? dst[1][n] + R : R;
             }
@@ -674,6 +695,7 @@ const float* const* Chain::gather(Plan& plan, uint32_t first, uint32_t count, fl
                 x.plain = identity(x.to);
             }
         }
+        meter(x.id, peak);
     }
     return dst;
 }
@@ -772,6 +794,14 @@ void Chain::process(const float* in, float* const* outs, uint32_t frames) {
     Plan& plan = *plan_;
     for (int c = 0; c < kChainChannels; ++c)
         std::memcpy(inBuf_[c], in, frames * sizeof(float));
+    const int probe = probeSlot_.load(std::memory_order_acquire);
+    if (probe != probing_) {
+        probing_ = probe;
+        probeBin_ = ProbeBin{probe};
+        std::memset(probeK_, 0, sizeof(probeK_));
+    }
+    if (probing_ == kProbeInput)
+        measureProbe(inBuf_, inBuf_, frames);
     for (const Plan::Step& st : plan.order) {
         Block& b = *st.block;
         const float* const* input = gather(plan, st.wires, st.numWires, b.in, frames);
@@ -782,6 +812,8 @@ void Chain::process(const float* in, float* const* outs, uint32_t frames) {
         processBlock(b, input ? input : silence_, frames);
         const auto ns = static_cast<uint32_t>(std::min<int64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), UINT32_MAX));
+        if (probing_ >= 0 && static_cast<int>(st.slot) == probing_)
+            measureProbe(input ? input : silence_, b.res, frames);
         if (ns > slowNs_.load(std::memory_order_relaxed)) {
             slowNs_.store(ns, std::memory_order_relaxed);
             slowSlot_.store(static_cast<int>(st.slot), std::memory_order_relaxed);
@@ -800,6 +832,44 @@ void Chain::process(const float* in, float* const* outs, uint32_t frames) {
         for (int c = 0; c < kChainChannels; ++c)
             for (uint32_t n = 0; n < frames; ++n)
                 d.buf[c][n] = std::isfinite(d.src[c][n]) ? std::clamp(d.src[c][n], -kFeedbackLimit, kFeedbackLimit) : 0.0f;
+}
+
+void Chain::measureProbe(const float* const* fed, const float* const* out, uint32_t frames) {
+    for (int c = 0; c < kChainChannels; ++c) {
+        probeBin_.out.add(kWeighting_, out[c], frames, probeK_[kChainChannels + c], 1.0 / kChainChannels);
+        if (fed != out)
+            probeBin_.fed.add(kWeighting_, fed[c], frames, probeK_[c], 1.0 / kChainChannels);
+    }
+    if (fed == out)
+        probeBin_.fed = probeBin_.out;
+    probeBin_.frames += frames;
+    if (probeBin_.frames >= probeLength_) {
+        probeBins_->push(probeBin_); // dropped if nobody reads
+        probeBin_ = ProbeBin{probing_};
+    }
+}
+
+void Chain::probe(int slot) {
+    if (!probeBins_)
+        probeBins_ = std::make_unique<RingQueue<ProbeBin, 1024>>();
+    ProbeBin stale;
+    while (nextProbeBin(stale)) {
+    }
+    probeSlot_.store(slot, std::memory_order_release);
+}
+
+bool Chain::nextProbeBin(ProbeBin& bin) {
+    if (!probeBins_)
+        return false;
+    auto b = probeBins_->pop();
+    if (!b)
+        return false;
+    bin = *b;
+    return true;
+}
+
+float Chain::takeWirePeak(uint32_t wire) {
+    return wirePeaks_ ? wirePeaks_[wire & (kWireMeters - 1)].exchange(0.0f, std::memory_order_relaxed) : 0.0f;
 }
 
 bool Chain::takeSlowest(size_t& slot, uint32_t& ns) {

@@ -323,6 +323,14 @@ struct Writer {
             levels["inputs"] = ins;
         if (!outs.empty())
             levels["outputs"] = outs;
+        if (!(c.wireAuto == WireAuto{})) {
+            json wj = json::object();
+            autoJson(c.wireAuto.spec, wj);
+            if (!wj.contains("auto"))
+                wj["auto"] = json::object();
+            wj["auto"]["match"] = c.wireAuto.match;
+            levels["wires"] = wj;
+        }
         if (!levels.empty())
             j["levels"] = levels;
 
@@ -731,6 +739,7 @@ struct Reader {
         }
         c.inputLevels.assign(c.inputs.size(), InputLevel{});
         c.outputLevels.assign(c.outputs.size(), OutputLevel{});
+        c.wireAuto = WireAuto{};
         if (j.contains("levels")) {
             const json& l = j.at("levels");
             auto db = [](const json& lj, const char* key, float now, float lowest, float highest) {
@@ -784,6 +793,12 @@ struct Reader {
                     }
                     readAuto(lj, out.autoSpec);
                 }
+            if (l.contains("wires")) {
+                const json& wj = l.at("wires");
+                readAuto(wj, c.wireAuto.spec);
+                if (wj.contains("auto"))
+                    c.wireAuto.match = wj.at("auto").value("match", c.wireAuto.match);
+            }
         }
 
         for (const json& sj : j.at("scenes")) {

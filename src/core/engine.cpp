@@ -52,39 +52,14 @@ namespace {
 
 float dbToGain(float db) { return db <= -100.0f ? 0.0f : std::pow(10.0f, db / 20.0f); }
 
-// BS.1770's K-weighting at any sample rate: a high shelf, then a high pass.
-void kWeights(double rate, double shelf[5], double highPass[5]) {
-    const double pi = 3.14159265358979323846;
-    double k = std::tan(pi * 1681.974450955533 / rate);
-    const double q = 0.7071752369554196, vh = std::pow(10.0, 3.999843853973347 / 20.0), vb = std::pow(vh, 0.4996667741545416);
-    double a0 = 1.0 + k / q + k * k;
-    shelf[0] = (vh + vb * k / q + k * k) / a0;
-    shelf[1] = 2.0 * (k * k - vh) / a0;
-    shelf[2] = (vh - vb * k / q + k * k) / a0;
-    shelf[3] = 2.0 * (k * k - 1.0) / a0;
-    shelf[4] = (1.0 - k / q + k * k) / a0;
-    k = std::tan(pi * 38.13547087602444 / rate);
-    const double q2 = 0.5003270373238773;
-    a0 = 1.0 + k / q2 + k * k;
-    highPass[0] = 1.0;
-    highPass[1] = -2.0;
-    highPass[2] = 1.0;
-    highPass[3] = 2.0 * (k * k - 1.0) / a0;
-    highPass[4] = (1.0 - k / q2 + k * k) / a0;
-}
-
 } // namespace
 
 Engine::Engine(EngineSettings settings)
     : settings_(settings), inLevel_(std::max<size_t>(settings.numInputs, 1), Ramp(1.0f)), outLevel_(settings.numOutputs, Ramp(1.0f)),
       limiters_(settings.numOutputs), limiterLow_(new std::atomic<float>[std::max<size_t>(settings.numOutputs, 1)]),
-      kState_(4 * (std::max<size_t>(settings.numInputs, 1) + settings.numOutputs), 0.0) {
+      kWeighting_(settings.sampleRate), kState_(4 * (std::max<size_t>(settings.numInputs, 1) + settings.numOutputs), 0.0) {
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         limiterLow_[o].store(1.0f, std::memory_order_relaxed);
-    double shelf[5], highPass[5];
-    kWeights(settings_.sampleRate, shelf, highPass);
-    kShelf_ = {{shelf[0], shelf[1], shelf[2]}, {shelf[3], shelf[4]}};
-    kHighPass_ = {{highPass[0], highPass[1], highPass[2]}, {highPass[3], highPass[4]}};
     binLength_ = std::max<uint32_t>(1, static_cast<uint32_t>(settings_.sampleRate * 0.01 + 0.5));
 }
 
@@ -1034,32 +1009,10 @@ void Engine::measureBin(const float* const* ins, const float* const* outs, uint3
     const size_t numIn = std::min(settings_.numInputs, LevelBin::kMax);
     const size_t numOut = std::min(settings_.numOutputs, LevelBin::kMax);
     const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
-    auto add = [&](const float* x, LevelBin::Channel& ch, double* st) {
-        float peak = ch.peak;
-        double e = 0.0, ke = 0.0;
-        const KWeight& f1 = kShelf_;
-        const KWeight& f2 = kHighPass_;
-        for (uint32_t n = 0; n < frames; ++n) {
-            const double v = x[n];
-            peak = std::max(peak, static_cast<float>(std::fabs(v)));
-            e += v * v;
-            // Transposed direct form II, twice.
-            const double y1 = f1.b[0] * v + st[0];
-            st[0] = f1.b[1] * v - f1.a[0] * y1 + st[1];
-            st[1] = f1.b[2] * v - f1.a[1] * y1;
-            const double y2 = f2.b[0] * y1 + st[2];
-            st[2] = f2.b[1] * y1 - f2.a[0] * y2 + st[3];
-            st[3] = f2.b[2] * y1 - f2.a[1] * y2;
-            ke += y2 * y2;
-        }
-        ch.peak = peak;
-        ch.energy += static_cast<float>(e);
-        ch.kEnergy += static_cast<float>(ke);
-    };
     for (size_t i = 0; i < numIn; ++i)
-        add(ins[i], bin_.in[i], &kState_[4 * i]);
+        bin_.in[i].add(kWeighting_, ins[i], frames, &kState_[4 * i]);
     for (size_t o = 0; o < numOut; ++o)
-        add(outs[o], bin_.out[o], &kState_[4 * (inputs + o)]);
+        bin_.out[o].add(kWeighting_, outs[o], frames, &kState_[4 * (inputs + o)]);
     bin_.frames += frames;
     if (bin_.frames >= binLength_) {
         bins_.push(bin_); // dropped if nobody reads

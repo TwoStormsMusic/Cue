@@ -43,7 +43,8 @@ A `.cue` file is a zip:
   "tuner": {"input": "Bass", "reference": 440, "range": "bass", "tolerance": 2, "names": "sharps"},
   "levels": {"inputs": {"Bass": {"gain_db": 4.5, "auto": {"measure": "rms", "target_db": -18, "seconds": 5}}},
              "outputs": {"FOH": {"level_db": -3, "limiter": {"on": true, "ceiling_db": -1, "release_ms": 100}},
-                         "Amp": {"muted": true}}},
+                         "Amp": {"muted": true}},
+             "wires": {"auto": {"measure": "lufs", "target_db": -18, "seconds": 5, "match": true}}},
   "scenes": [{
     "name": "Covers", "display": "CV", "pedal": 2,
     "chains": [{
@@ -118,10 +119,12 @@ A `.cue` file is a zip:
   app's Gain Stage sets them): each input's `gain_db` before every chain
   (its calibration), each output's `level_db`, `muted` and `limiter` after
   every chain is mixed, by name, and the settings Auto uses on each
-  (`measure`: peak, rms or lufs; `target_db`; `seconds`). Only what is not as
-  it starts is written: 0 dB, not muted, the limiter off with a -1 dB
-  ceiling and 100 ms release, Auto on peak to -12 dB over 5 s. -100 dB is
-  silence. Levels for an input or output the performance does not have are
+  (`measure`: peak, rms or lufs; `target_db`; `seconds`). `wires` holds the
+  settings of Auto on the plug-ins' outputs (the wires leaving them), the
+  same in every chain, with `match` (true: as loud as the plug-in is fed;
+  false: to the target). Only what is not as it starts is written: 0 dB, not
+  muted, the limiter off with a -1 dB ceiling and 100 ms release, Auto on
+  peak to -12 dB over 5 s, matching on the wires. -100 dB is silence. Levels for an input or output the performance does not have are
   left out, with a warning.
 - **tuner** is the built-in tuner: the input it listens to and its settings,
   as `[tuner]` in [config.md](config.md).

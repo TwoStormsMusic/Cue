@@ -71,3 +71,26 @@ TEST(auto_that_heard_almost_nothing_says_so) {
     CHECK(run.levelDb() == AutoRun::kNothingDb);
     CHECK(run.gainDb() == 0);
 }
+
+TEST(auto_on_a_block_matches_what_it_was_fed) {
+    // An amp that plays 9 dB louder (RMS) than it is fed, with its peaks
+    // 3 dB louder: matching takes the 9 dB back.
+    AutoRun run({AutoSpec::Measure::Rms, -12.0f, 1.0f}, kRate, true);
+    const float fedMs = 0.01f, outMs = fedMs * static_cast<float>(std::pow(10.0, 0.9));
+    Measured quiet{0.0001f, 1e-9f * 480, 1e-9f * 480};
+    // It waits for the block to be fed, however quiet what it plays is.
+    CHECK(!run.add(480, Measured{0.9f, 0.5f * 480, 0.5f * 480}, quiet));
+    CHECK(run.state() == AutoRun::State::Waiting);
+    while (!run.add(480, Measured{0.4f, outMs * 480, outMs * 480}, Measured{0.28f, fedMs * 480, fedMs * 480})) {
+    }
+    CHECK_MSG(std::fabs(run.levelDb() - (-11)) < 0.01, "%.2f", run.levelDb());
+    CHECK(std::fabs(run.fedDb() - (-20)) < 0.01);
+    CHECK_MSG(std::fabs(run.gainDb() - (-9)) < 0.01, "%.2f", run.gainDb());
+    // To a target instead, and a wire's level goes no higher than +24 dB.
+    AutoRun target({AutoSpec::Measure::Peak, -6.0f, 1.0f}, kRate, false);
+    CHECK(!target.add(480, Measured{0.001f, 1e-7f * 480, 1e-7f * 480}));
+    CHECK(target.state() == AutoRun::State::Waiting); // -60 dB is not heard yet
+    while (!target.add(480, Measured{0.005f, 2e-5f * 480, 2e-5f * 480})) {
+    }
+    CHECK(std::fabs(target.gainDb() - 24) < 1e-9);
+}

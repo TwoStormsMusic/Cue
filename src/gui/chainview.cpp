@@ -1276,8 +1276,10 @@ void ChainView::dragIo(const PortInfo& port, QPointF pos, bool done) {
             selectSlot(-1);
             wireOn_ = false;
             picker_ = Picker::None;
-            if (!was)
+            if (!was) {
                 ioSel_ = port;
+                scroll_ = 0;
+            }
         }
         update();
         return;
@@ -2220,6 +2222,9 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
         }
         y += segH + 18 * u;
     }
+    // Its outputs: the wires leaving it, each with its meter and level.
+    if (!showAll_)
+        y += outputRows(p, QRectF(r.left() + pad, y, w, r.bottom() - y), c, PortInfo::block(slot_)) + 10 * u;
 
     p.setFont(label);
     p.setPen(color::muted);

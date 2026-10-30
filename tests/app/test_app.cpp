@@ -2177,6 +2177,14 @@ private slots:
             const QString cmd = r.value("cmd").toString();
             if (cmd != "level" && cmd != "auto")
                 return {{"ok", true}};
+            if (r.contains("wires")) {
+                io["wires"] = QJsonObject{{"auto", r.value("auto")}};
+                return {{"ok", true}, {"io", io}};
+            }
+            if (r.contains("chain")) {
+                QJsonObject a{{"chain", r.value("chain")}, {"from", r.value("from")}, {"to", r.value("to")}, {"state", "waiting"}, {"of", 5}};
+                return r.value("cancel").toBool() ? QJsonObject{{"ok", true}} : QJsonObject{{"ok", true}, {"auto", a}};
+            }
             const bool in = r.contains("input");
             QJsonArray list = io[in ? "inputs" : "outputs"].toArray();
             const int k = r.value(in ? "input" : "output").toInt();
@@ -2276,9 +2284,63 @@ private slots:
         QVERIFY(!v->hitRect("io in 0 fader").isEmpty());
         int wiresShown = 0;
         for (int i = 0; i < s.chain(1)->wires.size(); ++i)
-            wiresShown += !v->hitRect(QString("io wire %1").arg(i)).isEmpty();
+            wiresShown += !v->hitRect(QString("io wire %1 fader").arg(i)).isEmpty();
         QVERIFY(wiresShown >= 2);
         shot(v, "gain-stage-chain");
+        // Every wire leaving a plug-in is one of its outputs: its card sets
+        // the wire's level, mute and mono.
+        const int first = s.chain(1)->wire(PortInfo::input(), PortInfo::block(0));
+        QVERIFY(first >= 0);
+        click(v, v->hitRect(QString("io wire %1 mono").arg(first)));
+        QJsonObject wired = link.last("wire");
+        QCOMPARE(wired.value("width").toDouble(-1), 0.0);
+        QCOMPARE(wired.value("from").toString(), QString("in"));
+        v->grab();
+        click(v, v->hitRect(QString("io wire %1 mute").arg(first)));
+        QVERIFY(link.last("wire").value("muted").toBool());
+        // Auto on a plug-in's output: Match by default, here the target.
+        QVERIFY(s.perf.levels.wireMatch);
+        v->grab();
+        click(v, v->hitRect("io wires mode"));
+        QCOMPARE(link.last("level").value("auto").toObject().value("match").toBool(true), false);
+        QVERIFY(!s.perf.levels.wireMatch);
+        s.undo();
+        QCOMPARE(link.last("level").value("auto").toObject().value("match").toBool(false), true);
+        v->grab();
+        const int amp = s.chain(1)->wire(PortInfo::block(0), PortInfo::block(1));
+        QVERIFY(amp >= 0);
+        click(v, v->hitRect(QString("io wire %1 auto").arg(amp)));
+        const QJsonObject asked = link.last("auto");
+        QCOMPARE(asked.value("chain").toInt(-1), 1);
+        QCOMPARE(asked.value("from").toInt(-1), 0);
+        QCOMPARE(asked.value("to").toInt(-1), 1);
+        const QString key = s.autoKey(1, s.chain(1)->wires[amp]);
+        QVERIFY(s.autoNow.contains(key));
+        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"to", 1}, {"state", "listening"}, {"seconds", 1.5}, {"of", 5}});
+        QVERIFY(s.autoNow.value(key).listening);
+        v->grab();
+        shot(v, "gain-stage-chain-auto");
+        // Done: the engine set the wire (its wire event) and it is undone
+        // like a fader.
+        emit link.event("wire", QJsonObject{{"chain", 1}, {"wire", QJsonObject{{"from", 0}, {"to", 1}, {"level_db", -7.5}}}});
+        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"to", 1}, {"state", "done"}, {"match", true}, {"level_db", -4.5},
+                                            {"fed_db", -12}, {"from_db", 0}, {"to_db", -7.5}});
+        QVERIFY(!s.autoNow.contains(key));
+        QCOMPARE(s.chain(1)->wires[amp].levelDb, -7.5);
+        s.undo();
+        const QJsonObject back = link.last("wire");
+        QCOMPARE(back.value("level_db").toDouble(-1), 0.0);
+        QCOMPARE(back.value("from").toInt(-1), 0);
+        QCOMPARE(back.value("to").toInt(-1), 1);
+        // A plug-in's own panel lists its outputs; one tapped selects its wire.
+        v->grab();
+        click(v, v->hitRect("block 0"));
+        v->grab();
+        const int out = s.chain(1)->wire(PortInfo::block(0), PortInfo::block(1));
+        QVERIFY(!v->hitRect(QString("output %1").arg(out)).isEmpty());
+        click(v, v->hitRect(QString("output %1").arg(out)));
+        v->grab();
+        QVERIFY(!v->hitRect("wire level").isEmpty());
 
         // An output box is that output's card.
         v->grab();
@@ -2592,6 +2654,82 @@ private slots:
         QCOMPARE(s.perf.chains.size(), 5);
         link.request({{"cmd", "quit"}});
         QTRY_COMPARE_WITH_TIMEOUT(again.state(), QProcess::NotRunning, 5000);
+    }
+
+    void auto_sets_a_plug_ins_output_with_the_engine() {
+        // The engine without a sound card, hearing a tone at -20 dB.
+        QTemporaryDir dir;
+        QFile demo(fromEnv("CUE_CONFIGS", CUE_SOURCE_DIR "/configs") + "/app-demo.ini");
+        QVERIFY(demo.open(QIODevice::ReadOnly));
+        QByteArray text = demo.readAll();
+        text.replace("../plugins/Cue Test Plugins.clap", fromEnv("CUE_TEST_CLAP", CUE_TEST_CLAP).toLocal8Bit());
+        QFile ini(dir.filePath("demo.ini"));
+        QVERIFY(ini.open(QIODevice::WriteOnly));
+        ini.write(text);
+        ini.close();
+        const QString socket = dir.filePath("engine.sock");
+        QProcess engine;
+        engine.setProcessChannelMode(QProcess::MergedChannels);
+        engine.start(fromEnv("CUE_BIN", CUE_BIN), {"run", ini.fileName(), "--audio", "none", "--tone", "-20", "--socket", socket});
+        QVERIFY(engine.waitForStarted());
+        EngineLink link(socket);
+        AppState s(link);
+        link.start();
+        QTRY_VERIFY_WITH_TIMEOUT(s.perf.valid && s.status.valid, 10000);
+        QVERIFY(s.hello.value("audio_settings").toObject().value("device").toString() == "none");
+        auto ask = [&](const QJsonObject& request) {
+            QJsonObject reply;
+            s.change(request, [&reply](const QJsonObject& r) { reply = r; });
+            [&] { QTRY_VERIFY_WITH_TIMEOUT(!reply.isEmpty(), 5000); }();
+            return reply;
+        };
+        QJsonObject done;
+        connect(&link, &EngineLink::event, this, [&done](const QString& name, const QJsonObject& m) {
+            if (name == "auto" && m.value("chain").toInt(-1) == 0 && m.value("state").toString() != "waiting" &&
+                m.value("state").toString() != "listening")
+                done = m;
+        });
+        s.select(0);
+        QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, 0, 3000);
+        const ChainInfo& punk = s.perf.chains[0];
+        QCOMPARE(punk.plugin(2)->label, QString("Darkglass Ultra"));
+
+        // From the input, to the target: the tone's peak is -20 dB, so +8.
+        QJsonObject r = ask({{"cmd", "level"}, {"wires", true}, {"auto", QJsonObject{{"measure", "peak"}, {"target_db", -12}, {"seconds", 1}}}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.levels.wireAuto.seconds, 1.0);
+        QVERIFY(s.perf.levels.wireMatch);
+        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", "in"}, {"to", 0}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(r.value("auto").toObject().value("match").toBool(true), false);
+        QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty(), 5000);
+        QVERIFY2(done.value("state").toString() == "done", qPrintable(done.value("error").toString()));
+        QVERIFY2(std::fabs(done.value("to_db").toDouble() - 8) < 0.2, qPrintable(QString::number(done.value("to_db").toDouble())));
+        const int fromIn = punk.wire(PortInfo::input(), PortInfo::block(0));
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[fromIn].levelDb, done.value("to_db").toDouble(), 3000);
+
+        // The drive's output, matched to what it is fed (RMS).
+        done = {};
+        QVERIFY(ask({{"cmd", "level"}, {"wires", true}, {"auto", QJsonObject{{"measure", "rms"}}}}).value("ok").toBool());
+        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", 2}, {"to", 3}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QVERIFY(r.value("auto").toObject().value("match").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty(), 5000);
+        QVERIFY2(done.value("state").toString() == "done", qPrintable(done.value("error").toString()));
+        const double heard = done.value("level_db").toDouble(), fed = done.value("fed_db").toDouble(), to = done.value("to_db").toDouble();
+        QVERIFY2(std::fabs(fed - (-15)) < 0.5, qPrintable(QString::number(fed))); // -20 dB peak, +8: -15 dB RMS
+        QVERIFY2(heard > fed + 1 && std::fabs(to - (fed - heard)) < 0.15, qPrintable(QString("%1 %2 %3").arg(heard).arg(fed).arg(to)));
+        const int drive = punk.wire(PortInfo::block(2), PortInfo::block(3));
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[drive].levelDb, to, 3000);
+        // Undone like a fader.
+        s.undo();
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[drive].levelDb, 0.0, 3000);
+
+        // A chain that is not playing cannot be listened to; nor a wire that is not there.
+        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 4}, {"from", "in"}, {"to", 0}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 0}, {"from", 0}, {"to", 3}}).value("ok").toBool());
+        link.request({{"cmd", "quit"}});
+        QTRY_COMPARE_WITH_TIMEOUT(engine.state(), QProcess::NotRunning, 5000);
     }
 };
 

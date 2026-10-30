@@ -236,6 +236,9 @@ IoLevels IoLevels::fromJson(const QJsonObject& io) {
         out.autoSet = AutoInfo::fromJson(j.value("auto").toObject());
         l.outputs << out;
     }
+    const QJsonObject wa = io.value("wires").toObject().value("auto").toObject();
+    l.wireAuto = AutoInfo::fromJson(wa);
+    l.wireMatch = wa.value("match").toBool(true);
     return l;
 }
 
@@ -418,6 +421,8 @@ Status Status::fromJson(const QJsonObject& j) {
         ChainStatus cs{c.value("name").toString(), c.value("state").toString(), c.value("avg_us").toDouble(), c.value("max_us").toDouble(), {}};
         for (const QJsonValue& b : c.value("bypassed").toArray())
             cs.bypassed << b.toInt();
+        for (const QJsonValue& v : c.value("wire_peaks").toArray())
+            cs.wirePeaks << v.toDouble(-120);
         s.chains << cs;
     }
     const QJsonObject levels = j.value("levels").toObject();

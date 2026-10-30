@@ -402,6 +402,9 @@ bool NullBackend::start(Callback callback, std::string* error) {
         enableFlushToZero();
         std::vector<float> silence(config_.period, 0.0f);
         std::vector<const float*> ins(config_.inputChannels.size(), silence.data());
+        const bool tone = toneDb_ > -200;
+        const double amplitude = std::pow(10.0, toneDb_ / 20), step = 2 * 3.14159265358979323846 * 110 / config_.rate;
+        double phase = 0;
         std::vector<std::vector<float>> outs(config_.outputChannels.size(), std::vector<float>(config_.period, 0.0f));
         std::vector<float*> ptrs;
         for (auto& o : outs)
@@ -410,6 +413,11 @@ bool NullBackend::start(Callback callback, std::string* error) {
         auto next = std::chrono::steady_clock::now();
         while (running_) {
             next += period;
+            if (tone)
+                for (uint32_t n = 0; n < config_.period; ++n) {
+                    silence[n] = static_cast<float>(amplitude * std::sin(phase));
+                    phase = std::fmod(phase + step, 2 * 3.14159265358979323846);
+                }
             const auto t0 = std::chrono::steady_clock::now();
             callback_(ins.data(), ptrs.data(), config_.period);
             const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
@@ -434,8 +442,11 @@ void NullBackend::stop() {
 }
 
 std::string NullBackend::describe() const {
-    char buf[160];
-    std::snprintf(buf, sizeof buf, "no sound card: the engine runs on a timer, hearing silence (%u Hz, %u frames, %zu inputs, %zu outputs)",
+    char buf[200];
+    char heard[48] = "silence";
+    if (toneDb_ > -200)
+        std::snprintf(heard, sizeof heard, "a 110 Hz tone at %.1f dB", toneDb_);
+    std::snprintf(buf, sizeof buf, "no sound card: the engine runs on a timer, hearing %s (%u Hz, %u frames, %zu inputs, %zu outputs)", heard,
                   config_.rate, config_.period, config_.inputChannels.size(), config_.outputChannels.size());
     return buf;
 }

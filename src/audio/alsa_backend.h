@@ -105,6 +105,9 @@ private:
 // the tests). Nothing is played.
 class NullBackend : public AudioBackend {
 public:
+    // toneDb: every input hears a 110 Hz sine at that level, so meters and
+    // Auto can be tried without a sound card; below -200, silence.
+    explicit NullBackend(double toneDb = -1000) : toneDb_(toneDb) {}
     ~NullBackend() override;
     bool open(const AlsaConfig& config, std::string* error) override;
     bool start(Callback callback, std::string* error) override;
@@ -114,6 +117,7 @@ public:
 
 private:
     AlsaConfig config_;
+    double toneDb_;
     Callback callback_;
     std::thread thread_;
     std::atomic<bool> running_{false};

@@ -230,6 +230,14 @@ struct OutputLevel {
     AutoSpec autoSpec;
 };
 constexpr float kLevelFloorDb = -100.0f, kLevelMaxDb = 60.0f;
+// Auto on a block's outputs (the wires leaving it), the same in every
+// chain: to the target, or matching what the block is fed, so it plays as
+// loud as it was given. From a chain's input it always goes to the target.
+struct WireAuto {
+    AutoSpec spec;
+    bool match = true;
+    bool operator==(const WireAuto&) const = default;
+};
 
 struct MidiSettings {
     bool enabled = true;
@@ -258,6 +266,7 @@ struct Config {
     // One for each input and output, in their order (finishConfig sees to it).
     std::vector<InputLevel> inputLevels;
     std::vector<OutputLevel> outputLevels;
+    WireAuto wireAuto;
     std::vector<SceneSpec> scenes;
     std::vector<ControlSpec> controls;
     std::vector<TriggerSpec> triggers;

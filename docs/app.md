@@ -107,8 +107,7 @@ anything on a chain's board changes they stay where they are, so an output
 that loses its wires (a plug-in ejected or removed) does not jump.
 
 Tap the input box for the **Gain Stage**. Its tabs are **Chain** (the input
-this chain plays, and its wires into the outputs with their levels: tap one
-to set it), **Inputs** and **Outputs**. Inputs and Outputs are a card for
+this chain plays, then every plug-in's outputs), **Inputs** and **Outputs**. Inputs and Outputs are a card for
 each input and output of the performance, the same in every chain's Gain
 Stage: change one anywhere and every chain hears it. A card has the name (tap
 to rename it), the level (tap to type one, or `off`), a meter, a fader
@@ -123,6 +122,20 @@ it listens, tap **Auto** and play. It waits for sound, listens, then sets the
 gain so what it heard reaches the target; tap it again to stop. The box on
 the board shows the gain or level under the name, and **muted**. Tap an
 output box for that output's card.
+
+A plug-in's **outputs** are the wires that leave it: draw another wire from
+its right-hand dot for another output. The Chain tab shows each plug-in (and
+the chain's input) in board order with a card for each of its outputs: where
+it goes, its level (tap to type one), a meter after the level, a fader,
+**Mute**, **Mono** (the wire's width at 0 %) and **Auto**. They are the
+wire's own settings, the same as tapping the wire, so a Neural DSP plug-in's
+output is set like any other, after the plug-in. A plug-in's own panel
+lists its outputs too, each with its meter and level; tap one to select
+its wire. Auto's row above the cards sets it for every output: **Match**
+sets the level so the plug-in plays as loud as it is fed (Act's Match),
+**Target** brings it to the target; then what it measures and how long it
+listens. Tap a card's **Auto** while the chain plays (from the chain's
+input, Auto always goes to the target). Each Auto can be undone.
 
 Names and levels are this performance's, saved with it, not settings:
 every chain's wires and the tuner follow a new name, and it plays on the

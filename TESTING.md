@@ -507,6 +507,19 @@ Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn e
 7. **Output box.** Tap an output box: its panel is that output's card.
 8. **Kept.** **Save**, quit, open again: gains, levels, mutes, the limiter and Auto's settings are as you left them.
 
+## 25. Every plug-in's outputs, and Auto on them (0.9.9)
+
+`bin/cue-app --version` should say 0.9.9. Steps 23 and 24 still apply; step 24's 6 is now this.
+
+1. **Output cards.** Tap the input box, **Chain**: under **OUTPUTS IN THIS CHAIN**, each plug-in in board order with a card for each wire leaving it: where it goes, its level, a meter, a fader, **Mute**, **Mono** and **Auto**. Play: each meter moves with what that wire carries, after its level. A muted wire's meter stays still.
+2. **Same wire.** Move a card's fader: the wire on the board shows the same level (tap the wire to check). **Mono**: the wire's width goes to 0 %. **Undo** works for each.
+3. **Another output.** Draw a second wire from a plug-in's right-hand dot: a second card appears under it. Tap a plug-in: its panel lists **OUTPUTS**, each with a meter; tap one to select that wire.
+4. **Match.** With **Match** in Auto's row (the default) and **RMS**, play and tap **Auto** on the card after your drive or amp (Neural DSP too): it says **Play…**, counts, then sets the level, and a message says what it heard and what the plug-in was fed. Bypass the plug-in and back while playing: about the same loudness either way. **Undo** puts the level back.
+5. **Target.** Tap **Match** to switch to **Target**, set `−18`: **Auto** on a card brings that output to −18 dB as measured. On the card from the chain's input, Auto always goes to the target.
+6. **Not playing.** On a chain that is not playing, tap **Auto**: a message says to play the chain first.
+7. **Without the M2.** `bin/cue run configs/app-demo.ini --audio none --tone -20`, then the app: meters move and Auto works on a tone.
+8. **Kept.** **Save**, quit, open again: Auto's row is as you left it.
+
 ## What passes
 
 | Check | Pass when |

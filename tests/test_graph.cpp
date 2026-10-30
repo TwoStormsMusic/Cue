@@ -187,6 +187,78 @@ TEST(wire_gains_move_without_clicks) {
     CHECK_MSG(maxStep(r.out[0], from) < 0.0025f, "step %.5f", maxStep(r.out[0], from));
 }
 
+TEST(each_wire_has_a_meter_after_its_gains) {
+    Engine e(settings());
+    auto c = std::make_unique<Chain>("A", 2);
+    c->addBlock(gain(0.5f));
+    c->connect(Port::input(), Port::block(0));
+    c->connect(Port::block(0), Port::output(0), {-6.0206f, 1.0f, 0.0f});
+    c->connect(Port::block(0), Port::output(1), {0.0f, 1.0f, 0.0f, true});
+    e.addChain(std::move(c));
+    CHECK(e.activate());
+    Run r{e};
+    e.switchTo(0);
+    r.seconds(0.2);
+    Chain& chain = e.chain(0);
+    uint32_t in = 0, foh = 0, amp = 0;
+    for (const Wire& w : chain.wires())
+        (w.from.kind == Port::Kind::Input ? in : w.to.index == 0 ? foh : amp) = w.id;
+    CHECK(std::fabs(chain.takeWirePeak(in) - 1.0f) < 1e-4f);
+    CHECK(std::fabs(chain.takeWirePeak(foh) - 0.25f) < 1e-3f);
+    CHECK(chain.takeWirePeak(amp) == 0.0f); // muted
+    // Taken: nothing until it plays again.
+    CHECK(chain.takeWirePeak(foh) == 0.0f);
+    r.seconds(0.01);
+    CHECK(chain.takeWirePeak(foh) > 0.2f);
+}
+
+TEST(the_probe_measures_what_a_block_is_fed_and_passes_on) {
+    Engine e(settings());
+    auto c = std::make_unique<Chain>("A", 2);
+    c->addBlock(gain(0.5f));
+    c->connect(Port::input(), Port::block(0), {-6.0206f, 1.0f, 0.0f});
+    c->connect(Port::block(0), Port::output(0));
+    e.addChain(std::move(c));
+    CHECK(e.activate());
+    Run r{e};
+    e.switchTo(0);
+    r.seconds(0.05);
+    Chain& chain = e.chain(0);
+    Chain::ProbeBin bin;
+    CHECK(!chain.nextProbeBin(bin)); // nothing until asked
+    auto measure = [&](int slot, float& fed, float& out, float& fedPeak, float& outPeak) {
+        chain.probe(slot);
+        r.seconds(0.2);
+        uint32_t frames = 0;
+        int bins = 0;
+        double fe = 0, oe = 0;
+        fedPeak = outPeak = 0;
+        while (chain.nextProbeBin(bin)) {
+            CHECK(bin.slot == slot);
+            frames += bin.frames;
+            fe += bin.fed.energy;
+            oe += bin.out.energy;
+            fedPeak = std::max(fedPeak, bin.fed.peak);
+            outPeak = std::max(outPeak, bin.out.peak);
+            CHECK(bin.frames >= 480 && bin.frames < 480 + 64);
+            ++bins;
+        }
+        CHECK(bins >= 15);
+        fed = static_cast<float>(fe / frames);
+        out = static_cast<float>(oe / frames);
+    };
+    float fed = 0, out = 0, fedPeak = 0, outPeak = 0;
+    measure(0, fed, out, fedPeak, outPeak);
+    CHECK(std::fabs(fedPeak - 0.5f) < 1e-3f && std::fabs(outPeak - 0.25f) < 1e-3f);
+    CHECK(std::fabs(fed - 0.25f) < 1e-3f && std::fabs(out - 0.0625f) < 1e-3f);
+    // The chain's input: what it is fed is what it passes on.
+    measure(Chain::kProbeInput, fed, out, fedPeak, outPeak);
+    CHECK(std::fabs(fedPeak - 1.0f) < 1e-4f && fed == out && fedPeak == outPeak);
+    chain.probe(Chain::kProbeNone);
+    r.seconds(0.05);
+    CHECK(!chain.nextProbeBin(bin));
+}
+
 TEST(blocks_nothing_reaches_or_nobody_hears_are_not_processed) {
     CountingProcessor::Counts a, loose, deadEnd;
     auto c = std::make_unique<Chain>("A", 2);

@@ -266,7 +266,24 @@ Json ioJson(const Config& config) {
                                 {"limiter", {{"on", l.limiter}, {"ceiling_db", l.ceilingDb}, {"release_ms", l.releaseMs}}},
                                 {"auto", autoJson(l.autoSpec)}});
     }
+    Json wa = autoJson(config.wireAuto.spec);
+    wa["match"] = config.wireAuto.match;
+    j["wires"] = {{"auto", wa}};
     return j;
+}
+
+// A wire's gains, as the app is told them: the wire, not the whole
+// performance. from and to as the request named them.
+Json wireJson(const Json& from, const Json& to, const WireSpec& w) {
+    Json wj = {{"from", from}, {"to", to}, {"level_db", w.gains.levelDb}, {"width", std::round(w.gains.width * 1000) / 10},
+               {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted}, {"jump", w.jump}};
+    if (w.jumpOut.size() == 2)
+        wj["jump_out"] = w.jumpOut;
+    if (w.jumpIn.size() == 2)
+        wj["jump_in"] = w.jumpIn;
+    if (w.to.key)
+        wj["key"] = true;
+    return wj;
 }
 
 // Auto's settings from a request, onto a; false with why if one is out of range.
@@ -317,6 +334,25 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
     for (size_t k = 0; k < rig.plugins.size(); ++k)
         if (rig.bypassedNow[k].load(std::memory_order_relaxed))
             chains[rig.plugins[k].chain]["bypassed"].push_back(rig.plugins[k].slot);
+    // A playing chain's wires: each one's peak after its gains, in the
+    // order the performance lists them.
+    for (const SceneSpec& scene : config.scenes)
+        for (const ChainSpec& cs : scene.chains) {
+            if (cs.id < 0 || static_cast<size_t>(cs.id) >= engine.numChains() ||
+                static_cast<ChainState>(engine.stats(cs.id).state.load()) == ChainState::Idle)
+                continue;
+            Chain& chain = engine.chain(cs.id);
+            Json peaks = Json::array();
+            for (const WireSpec& ws : cs.wires) {
+                float peak = 0.0f;
+                for (const Wire& w : chain.wires())
+                    if (w.from == ws.from && w.to == ws.to)
+                        peak = chain.takeWirePeak(w.id);
+                const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
+                peaks.push_back(std::round(db * 10) / 10);
+            }
+            chains[cs.id]["wire_peaks"] = peaks;
+        }
     j["chains"] = chains;
     return j;
 }
@@ -600,6 +636,7 @@ std::string tidy(std::string why) {
 
 struct RunOptions {
     bool noAudio = false;   // --audio none: no sound card, the engine on a timer
+    double toneDb = -1000;  // ...hearing a tone at this level (--tone DB) instead of silence
     std::string socket;     // --socket PATH; empty: the default
     bool noSocket = false;  // --socket none
     bool takeDevice = true; // the sound card is taken from what else has it; --leave-device: not
@@ -627,7 +664,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
 
     std::unique_ptr<AudioBackend> audio;
     if (opts.noAudio)
-        audio = std::make_unique<NullBackend>();
+        audio = std::make_unique<NullBackend>(opts.toneDb);
     else
         audio = std::make_unique<AlsaBackend>();
     // Kept for as long as Cue plays, so a sound server does not take the card back.
@@ -721,6 +758,27 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                   {"of", run.spec().seconds}};
         return j;
     };
+    // ...and on a block's outputs, the wires leaving it: at most one in each
+    // chain, which measures the block (or the chain's input) as it plays.
+    struct WireRun {
+        int chain;
+        Json from, to; // as the request named them
+        WireSpec wire; // its ends
+        int probe;
+        AutoRun run;
+    };
+    std::vector<WireRun> wireRuns;
+    auto wireEvent = [](const WireRun& w, const char* state) {
+        Json j = {{"chain", w.chain}, {"from", w.from}, {"to", w.to}, {"state", state}, {"seconds", std::round(w.run.seconds() * 10) / 10},
+                  {"of", w.run.spec().seconds}, {"match", w.run.match()}};
+        if (w.wire.to.key)
+            j["key"] = true;
+        return j;
+    };
+    auto stopProbe = [&](int chain) {
+        if (chain >= 0 && static_cast<size_t>(chain) < engine.numChains())
+            engine.chain(chain).probe(Chain::kProbeNone);
+    };
     // The performance as the app sees it: the file's, each chain's number
     // (its index, which stays while it plays), and which plug-ins have a
     // side-chain input to wire into.
@@ -783,6 +841,47 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             if (!livePerformance(now, &err))
                 return refuse(err);
             reply["performance"] = now;
+        } else if (cmd == "level" && req.contains("wires")) {
+            // Auto's settings for every block's outputs.
+            WireAuto wa = config.wireAuto;
+            std::string why;
+            if (req.contains("auto")) {
+                if (!readAuto(req.at("auto"), wa.spec, &why))
+                    return refuse(why);
+                wa.match = req.at("auto").value("match", wa.match);
+            }
+            config.wireAuto = wa;
+            reply["io"] = ioJson(config);
+            service.publish("io", reply["io"]);
+        } else if (cmd == "auto" && req.contains("chain")) {
+            // Auto on one output of a block: the wire from it to there.
+            const int chain = req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs || chain < 0 || static_cast<size_t>(chain) >= engine.numChains())
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            WireSpec w;
+            std::string why;
+            if (!wireOf(req, config, *cs, w, &why))
+                return refuse(why);
+            if (!req.value("cancel", false) &&
+                std::none_of(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == w.from && o.to == w.to; }))
+                return refuse("no wire joins those two");
+            for (const WireRun& r : wireRuns)
+                if (r.chain == chain && service.subscribed("auto"))
+                    service.publish("auto", wireEvent(r, "cancelled"));
+            wireRuns.erase(std::remove_if(wireRuns.begin(), wireRuns.end(), [&](const WireRun& r) { return r.chain == chain; }), wireRuns.end());
+            stopProbe(chain);
+            if (!req.value("cancel", false)) {
+                if (static_cast<ChainState>(engine.stats(chain).state.load()) == ChainState::Idle)
+                    return refuse("Auto listens to the chain as it plays: play it first");
+                // From the chain's input there is nothing to match: to the target.
+                const bool fromInput = w.from.kind == Port::Kind::Input;
+                const int probe = fromInput ? Chain::kProbeInput : w.from.index;
+                engine.chain(chain).probe(probe);
+                wireRuns.push_back({chain, req.at("from"), req.at("to"), w, probe,
+                                    AutoRun(config.wireAuto.spec, config.audio.rate, config.wireAuto.match && !fromInput)});
+                reply["auto"] = wireEvent(wireRuns.back(), "waiting");
+            }
         } else if (cmd == "level" || cmd == "auto") {
             // An input's gain or an output's level, mute and limiter, the
             // same whichever scene plays; or Auto, on one of them.
@@ -1076,15 +1175,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     return refuse(why);
                 if (cmd == "wire" && had) {
                     // Only its gains: the wire, not the whole performance.
-                    Json wj = {{"from", req.at("from")}, {"to", req.at("to")}, {"level_db", w.gains.levelDb},
-                               {"width", std::round(w.gains.width * 1000) / 10}, {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted},
-                               {"jump", w.jump}};
-                    if (w.jumpOut.size() == 2)
-                        wj["jump_out"] = w.jumpOut;
-                    if (w.jumpIn.size() == 2)
-                        wj["jump_in"] = w.jumpIn;
-                    if (w.to.key)
-                        wj["key"] = true;
+                    const Json wj = wireJson(req.at("from"), req.at("to"), w);
                     reply["wire"] = wj;
                     service.publish("wire", {{"chain", chain}, {"wire", wj}});
                     return;
@@ -1285,7 +1376,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     };
     Sampler sampler;
     Window window(engine.numChains());
-    auto nextSample = Clock::now(), nextStatus = Clock::now(), nextAutoNote = Clock::now();
+    auto nextSample = Clock::now(), nextStatus = Clock::now(), nextAutoNote = Clock::now(), nextWireNote = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
     uint64_t reportedXruns = 0, reportedStartup = 0;
@@ -1369,6 +1460,61 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             if (autoRuns.empty())
                 engine.measure(false);
         }
+        // Auto on a block's outputs: what its chain measured; one that has
+        // heard enough sets the wire's level.
+        for (size_t k = 0; k < wireRuns.size();) {
+            WireRun& wr = wireRuns[k];
+            if (static_cast<size_t>(wr.chain) >= engine.numChains()) {
+                wireRuns.erase(wireRuns.begin() + static_cast<long>(k));
+                continue;
+            }
+            Chain& chain = engine.chain(wr.chain);
+            Chain::ProbeBin bin;
+            while (chain.nextProbeBin(bin))
+                if (bin.slot == wr.probe)
+                    wr.run.add(bin.frames, bin.out, bin.fed);
+            const bool note = Clock::now() >= nextWireNote;
+            if (wr.run.state() != AutoRun::State::Done) {
+                if (note && service.subscribed("auto"))
+                    service.publish("auto", wireEvent(wr, wr.run.state() == AutoRun::State::Waiting ? "waiting" : "listening"));
+                ++k;
+                continue;
+            }
+            Json ev = wireEvent(wr, "done");
+            const double heard = wr.run.levelDb(), fed = wr.run.fedDb();
+            ChainSpec* cs = chainSpec(config, wr.chain);
+            const auto had = cs ? std::find_if(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == wr.wire.from && o.to == wr.wire.to; })
+                                : std::vector<WireSpec>::iterator{};
+            std::string why;
+            if (heard <= AutoRun::kNothingDb || (wr.run.match() && fed <= AutoRun::kNothingDb)) {
+                ev["state"] = "failed";
+                ev["error"] = heard <= AutoRun::kNothingDb ? "it heard nothing louder than -70 dB" : "the block was fed nothing louder than -70 dB";
+            } else if (!cs || had == cs->wires.end()) {
+                ev["state"] = "failed";
+                ev["error"] = "the wire is gone";
+            } else {
+                WireSpec w = *had;
+                ev["level_db"] = std::round(heard * 10) / 10;
+                if (wr.run.match())
+                    ev["fed_db"] = std::round(fed * 10) / 10;
+                ev["from_db"] = w.gains.levelDb;
+                w.gains.levelDb = static_cast<float>(std::round(wr.run.gainDb() * 10) / 10);
+                ev["to_db"] = w.gains.levelDb;
+                w.where = "the app";
+                if (setWire(live, wr.chain, w, &why)) {
+                    service.publish("wire", {{"chain", wr.chain}, {"wire", wireJson(wr.from, wr.to, w)}});
+                } else {
+                    ev["state"] = "failed";
+                    ev["error"] = why;
+                }
+            }
+            if (service.subscribed("auto"))
+                service.publish("auto", ev);
+            stopProbe(wr.chain);
+            wireRuns.erase(wireRuns.begin() + static_cast<long>(k));
+        }
+        if (Clock::now() >= nextWireNote)
+            nextWireNote = Clock::now() + std::chrono::milliseconds(200);
         // A plug-in scan: how far it is, and what it found once it ends.
         if (scanner->takeProgressed() && service.subscribed("scan"))
             service.publish("scan", scanProgressJson(*scanner));
@@ -2276,7 +2422,7 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none] [--leave-device]\n"
+                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none [--tone DB]] [--socket PATH|none] [--leave-device]\n"
                  "  cue ctl [--socket PATH] [--json] status|watch|tuner|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
                  "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
                  "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
@@ -2314,6 +2460,7 @@ int main(int argc, char** argv) {
     if (cmd == "run" && argc >= 3) {
         RunOptions o;
         o.noAudio = opt("--audio", "") == "none";
+        o.toneDb = std::atof(opt("--tone", "-1000").c_str());
         o.socket = opt("--socket", "");
         o.noSocket = o.socket == "none";
         for (int i = 3; i < argc; ++i)

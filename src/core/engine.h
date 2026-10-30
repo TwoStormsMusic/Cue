@@ -1,5 +1,6 @@
 #pragma once
 
+#include "loudness.h"
 #include "ramp.h"
 #include "chain.h"
 #include "spsc_queue.h"
@@ -69,11 +70,7 @@ struct EngineCommand {
 // level, for Auto: sums, so a longer stretch is their sum.
 struct LevelBin {
     static constexpr size_t kMax = 16; // inputs or outputs measured
-    struct Channel {
-        float peak = 0.0f;
-        float energy = 0.0f;  // the sum of its samples squared
-        float kEnergy = 0.0f; // ...K-weighted (BS.1770), for loudness
-    };
+    using Channel = Measured;
     uint32_t frames = 0;
     Channel in[kMax], out[kMax];
 };
@@ -363,9 +360,7 @@ private:
     bool measuring_ = false;
     LevelBin bin_;
     uint32_t binLength_ = 480;
-    struct KWeight {
-        double b[3], a[2];
-    } kShelf_{}, kHighPass_{};
+    KWeighting kWeighting_;
     std::vector<double> kState_; // per input then output: 2 states for each of the 2 filters
     RingQueue<LevelBin, 1024> bins_;
 };

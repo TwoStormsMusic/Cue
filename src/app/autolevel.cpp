@@ -10,42 +10,62 @@ AutoRun::AutoRun(bool input, size_t index, AutoSpec spec, double sampleRate)
     spec_.seconds = std::clamp<float>(spec_.seconds, 0.1f, static_cast<float>(kMostSeconds));
 }
 
+AutoRun::AutoRun(AutoSpec spec, double sampleRate, bool match) : spec_(spec), rate_(sampleRate), block_(true), match_(match) {
+    spec_.seconds = std::clamp<float>(spec_.seconds, 0.1f, static_cast<float>(kMostSeconds));
+}
+
 bool AutoRun::add(const LevelBin& bin) {
-    if (state_ == State::Done || index_ >= LevelBin::kMax || bin.frames == 0)
+    if (block_ || index_ >= LevelBin::kMax)
         return state_ == State::Done;
-    const LevelBin::Channel& ch = input_ ? bin.in[index_] : bin.out[index_];
+    return add(bin.frames, input_ ? bin.in[index_] : bin.out[index_]);
+}
+
+bool AutoRun::add(uint32_t frames, const Measured& heard, const Measured& fed) {
+    if (state_ == State::Done || frames == 0)
+        return state_ == State::Done;
     if (state_ == State::Waiting) {
-        if (ch.peak < kSignal)
+        // Matching, it starts once the block is fed: what it plays may be quiet.
+        if ((match_ ? fed.peak : heard.peak) < kSignal)
             return false;
         state_ = State::Listening;
     }
-    peak_ = std::max(peak_, ch.peak);
-    const float e = spec_.measure == AutoSpec::Measure::Lufs ? ch.kEnergy : ch.energy;
-    bins_.push_back(static_cast<double>(e) / bin.frames);
-    frames_ += bin.frames;
+    const bool lufs = spec_.measure == AutoSpec::Measure::Lufs;
+    heard_.add(heard, frames, lufs);
+    if (match_)
+        fed_.add(fed, frames, lufs);
+    frames_ += frames;
     if (seconds() >= spec_.seconds)
         state_ = State::Done;
     return state_ == State::Done;
 }
 
-double AutoRun::levelDb() const {
+void AutoRun::Heard::add(const Measured& m, uint32_t frames, bool lufs) {
+    peak = std::max(peak, m.peak);
+    bins.push_back(static_cast<double>(lufs ? m.kEnergy : m.energy) / frames);
+}
+
+double AutoRun::levelDb() const { return heard_.levelDb(spec_.measure); }
+
+double AutoRun::fedDb() const { return match_ ? fed_.levelDb(spec_.measure) : kNothingDb; }
+
+double AutoRun::Heard::levelDb(AutoSpec::Measure measure) const {
     double lv = kNothingDb;
-    const size_t nb = bins_.size();
-    switch (spec_.measure) {
+    const size_t nb = bins.size();
+    switch (measure) {
     case AutoSpec::Measure::Peak:
-        if (peak_ > 0)
-            lv = 20 * std::log10(static_cast<double>(peak_));
+        if (peak > 0)
+            lv = 20 * std::log10(static_cast<double>(peak));
         break;
     case AutoSpec::Measure::Rms: {
         // Leaving out the 10 ms bins more than 20 dB below the loudest: the
         // gaps between notes.
         double most = 0;
-        for (double e : bins_)
+        for (double e : bins)
             most = std::max(most, e);
         const double threshold = std::max(most * 0.01, 1e-7);
         double sum = 0;
         size_t n = 0;
-        for (double e : bins_)
+        for (double e : bins)
             if (e >= threshold) {
                 sum += e;
                 ++n;
@@ -62,13 +82,13 @@ double AutoRun::levelDb() const {
         for (size_t j = 0; j < zones; ++j) {
             double sum = 0;
             for (size_t i = j * 10; i < j * 10 + 10; ++i)
-                sum += bins_[i];
+                sum += bins[i];
             z[j] = sum / 10;
         }
         auto lufs = [](double w) { return -0.691 + 10 * std::log10(w); };
         if (zones < 4) {
             double sum = 0;
-            for (double e : bins_)
+            for (double e : bins)
                 sum += e;
             if (nb > 0 && sum > 0)
                 lv = lufs(sum / nb);
@@ -97,10 +117,13 @@ double AutoRun::levelDb() const {
 }
 
 double AutoRun::gainDb() const {
-    const double lv = levelDb();
-    if (lv <= kNothingDb)
+    const double lv = levelDb(), to = match_ ? fedDb() : spec_.targetDb;
+    if (lv <= kNothingDb || to <= kNothingDb)
         return 0;
-    return std::clamp<double>(spec_.targetDb - lv, kLevelFloorDb + 1, kLevelMaxDb);
+    // A wire's level goes from silence to +24 dB; it is not a calibration.
+    if (block_)
+        return std::clamp<double>(to - lv, -60, 24);
+    return std::clamp<double>(to - lv, kLevelFloorDb + 1, kLevelMaxDb);
 }
 
 } // namespace cue

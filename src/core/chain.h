@@ -1,7 +1,9 @@
 #pragma once
 
+#include "loudness.h"
 #include "processor.h"
 #include "ramp.h"
+#include "spsc_queue.h"
 
 #include <atomic>
 #include <cstdint>
@@ -217,6 +219,24 @@ public:
     // Any thread: the slot that took longest in one block since the last
     // call, and how long. False if nothing was processed.
     bool takeSlowest(size_t& slot, uint32_t& ns);
+    // Any thread, once active: the highest peak a wire carried, after its
+    // gains, since last asked (0 if it was not played). One reader.
+    float takeWirePeak(uint32_t wire);
+
+    // What Auto measures in one block: what it was fed and what it passed
+    // on, about every 10 ms while it plays. A signal's two channels count
+    // half each, so a mono signal on both measures as it is.
+    static constexpr int kProbeInput = -1, kProbeNone = -2;
+    struct ProbeBin {
+        int slot = kProbeNone; // what was measured
+        uint32_t frames = 0;
+        Measured fed, out;
+    };
+    // Main thread: measures a slot from now on (as the plan numbers it),
+    // the chain's input (kProbeInput, fed and out the same) or nothing.
+    void probe(int slot);
+    // Main thread: the next bin measured, false if there is none yet.
+    bool nextProbeBin(ProbeBin& bin);
 
     // Edits. receive() takes a plan the engine was given; it is played once
     // swapped in. It returns a plan it replaces that was never played, to
@@ -266,6 +286,7 @@ private:
     void drain(Block& b, uint32_t frames);
     void fadeIn(Block& b, uint32_t fadeFrames);
     void writeTap(OutputMix mix, const float* const* signal, float* out, uint32_t frames) const;
+    void measureProbe(const float* const* fed, const float* const* out, uint32_t frames);
     Plan* latest() const { return pending_ ? pending_ : plan_; }
 
     std::string name_;
@@ -295,7 +316,25 @@ private:
     bool holdTails_ = false;
     std::atomic<int> slowSlot_{-1};
     std::atomic<uint32_t> slowNs_{0};
+    // Each wire's peak, by its id (wrapping: a chain's live wires are never
+    // that many ids apart).
+    static constexpr uint32_t kWireMeters = 1024;
+    std::unique_ptr<std::atomic<float>[]> wirePeaks_;
+    void meter(uint32_t wire, float peak) {
+        std::atomic<float>& m = wirePeaks_[wire & (kWireMeters - 1)];
+        if (peak > m.load(std::memory_order_relaxed))
+            m.store(peak, std::memory_order_relaxed);
+    }
     uint32_t tailMin_ = 0;
+    // Auto's probe: made when first asked for, before the audio thread
+    // can see a slot to measure.
+    std::atomic<int> probeSlot_{kProbeNone};
+    std::unique_ptr<RingQueue<ProbeBin, 1024>> probeBins_;
+    int probing_ = kProbeNone; // audio thread: what it measures
+    ProbeBin probeBin_;
+    KWeighting kWeighting_;
+    double probeK_[2 * kChainChannels][4] = {}; // K-weighting states: fed, then out
+    uint32_t probeLength_ = 480;
 };
 
 } // namespace cue

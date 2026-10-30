@@ -422,6 +422,7 @@ plugin = builtin:gain 1
     ini.outputLevels[0].limiter = true;
     ini.outputLevels[0].ceilingDb = -2.0f;
     ini.outputLevels[1].levelDb = kLevelFloorDb;
+    ini.wireAuto = {{AutoSpec::Measure::Lufs, -20.0f, 3.0f}, false};
     std::string text;
     CHECK_MSG(performanceText(ini, text, &err), "%s", err.c_str());
     // Only what is not as it starts, by name.
@@ -442,6 +443,8 @@ plugin = builtin:gain 1
     const OutputLevel& foh = c.outputLevels[0];
     CHECK(foh.levelDb == -3.0f && foh.muted && foh.limiter && foh.ceilingDb == -2.0f && foh.releaseMs == 100.0f);
     CHECK(c.outputLevels[1].levelDb == kLevelFloorDb && !c.outputLevels[1].muted && !c.outputLevels[1].limiter);
+    // Auto on the plug-ins' outputs: to a target here, not matching.
+    CHECK(c.wireAuto == ini.wireAuto);
     CHECK(c.warnings.empty());
 
     // Levels for an output the performance does not have: left out, with a warning.

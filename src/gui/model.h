@@ -164,6 +164,10 @@ struct OutputLevel {
 struct IoLevels {
     QVector<InputLevel> inputs;
     QVector<OutputLevel> outputs;
+    // Auto on a block's outputs, in every chain: matching what the block is
+    // fed, or to the target.
+    AutoInfo wireAuto;
+    bool wireMatch = true;
     static IoLevels fromJson(const QJsonObject& io);
 };
 
@@ -191,6 +195,7 @@ struct ChainStatus {
     QString name, state; // idle, pre-roll, warm, active, tail, stopping
     double avgUs = 0, maxUs = 0;
     QVector<int> bypassed; // slots
+    QVector<double> wirePeaks; // a playing chain's wires, in order: each one's peak after its gains
 };
 
 struct ControlStatus {

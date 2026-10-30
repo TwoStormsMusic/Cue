@@ -25,7 +25,9 @@ a Cue started with `cue run ... --socket PATH`.
 
 `cue run ... --audio none` runs everything without a sound card: the engine
 plays on a timer and hears silence. It is for a machine without the
-interface, to load a performance, change it and save it.
+interface, to load a performance, change it and save it. With `--tone DB`
+every input hears a 110 Hz sine at that level instead (`--tone -20`), so
+the meters and Auto can be tried too.
 
 `cue run` takes the sound card from whatever else has it. It reserves the
 card on the desktop's session bus (`org.freedesktop.ReserveDevice1`, as
@@ -76,8 +78,9 @@ reply repeats:
 | `wires` | `chain`, `wires` (each as for `wire`) and or `loose` (each a wire with one end: `from` or `to` as for `wire`, `key`, `x` and `y` where its loose end lies on the board, and its `level_db`, `width`, `pan`, `muted`, `feedback`) | `performance`: the chain wired so, all at once. Loose wires carry nothing: they are what is left where a plug-in was pulled out. Without `wires`, only the loose ones change, and nothing heard does |
 | `place` | `chain`, `slot` or `port` (`in`, or an output by name or `out1`, `out2`...), `x`, `y` | nothing: where the block, the input or the output is drawn on that chain's board, kept when saved |
 | `rename` | `input` or `output` (its number, from 0), `name` | `performance`: the performance's input or output under its new name, which its chains, wires and tuner follow. Refused if it is empty, another input (or output) has it, or it is `in` or another's `in2`/`out2`. The sound card channel stays |
-| `level` | `input` (its number, from 0) with any of `gain_db` and `auto`; or `output` with any of `level_db`, `muted`, `limiter` (any of `on`, `ceiling_db` -60 to 0, `release_ms` 1 to 5000) and `auto`. `auto` is Auto's settings: `measure` (`peak`, `rms`, `lufs`), `target_db` (-60 to 0), `seconds` (1 to 60) | `io`: every input's and output's levels, as the `io` event. The performance's, the same whichever chain plays: an input's gain comes before every chain (-100 dB or less is silence, up to +60), an output's level and mute after every chain is mixed, then its limiter. Each moves over 20 ms; kept when saved |
+| `level` | `input` (its number, from 0) with any of `gain_db` and `auto`; or `output` with any of `level_db`, `muted`, `limiter` (any of `on`, `ceiling_db` -60 to 0, `release_ms` 1 to 5000) and `auto`; or `wires` (true) with `auto`, the settings of Auto on the plug-ins' outputs, which also take `match`. `auto` is Auto's settings: `measure` (`peak`, `rms`, `lufs`), `target_db` (-60 to 0), `seconds` (1 to 60) | `io`: every input's and output's levels, as the `io` event. The performance's, the same whichever chain plays: an input's gain comes before every chain (-100 dB or less is silence, up to +60), an output's level and mute after every chain is mixed, then its limiter. Each moves over 20 ms; kept when saved |
 | `auto` | `input` or `output`, optional `auto` (settings, as for `level`, kept), optional `cancel` | `auto` (the run, as the `auto` event, `waiting`), `io`. Auto as the Gain Stage plug-in does it: it waits until it hears more than -50 dB, listens for its `seconds`, then sets the gain or level that brings what it heard to the target: an input as it arrives, an output before its level. Peak is the highest peak; RMS leaves out 10 ms stretches more than 20 dB below the loudest; LUFS is BS.1770 integrated loudness (400 ms blocks, gated). Below -70 dB it fails and nothing changes. One at a time on each input or output; the first 16 of each |
+| `auto` (a plug-in's output) | `chain`, `from` and `to` (and `key`) as for `wire`: the wire leaving a plug-in, or the chain's input; optional `cancel` | `auto` (the run, as the `auto` event, `waiting`). The chain must be playing (active, warm or pre-roll). Auto on the wire, with the wires' settings (`level` with `wires`): it listens to the plug-in's output before the wire's gains and, matching (`match`, the default), sets the wire's level so the plug-in plays as loud as it was fed, measured the same way; else to the target. From the chain's input it always goes to the target. The level goes from -60 to +24 dB and is set as by `wire` (a `wire` event); below -70 dB it fails and nothing changes. One at a time in each chain; a new one stops the one before |
 | `add-chain` | `scene` (from 0), optional `at` (its place in the scene; the end if left out), `name`, `copy` (a chain's number: its plug-ins with their states as they are now, its wires and its settings), `input` (an empty chain's, by name) | `chain` (its number), `warnings`, `performance`. An empty chain has its input wired to every output, named `Chain N`; a copy in the same scene is named `Slap 2`. A copy keeps its pedal only in another scene where that pedal is free, and never a program change. Up to 64 chains can be added while it runs; saved and started again, there is room for 64 more |
 | `remove-chain` | `chain`, optional `token` | `performance`. Refused for the chain playing and the last chain of a scene. With a `token`, it is kept (with its plug-ins' states) for `restore-chain` |
 | `restore-chain` | `token` | `chain` (its number again, unless a chain added since has taken it), `performance` |
@@ -101,7 +104,9 @@ Events have an `event` field instead of an `id`:
   `display`, `leds` (pedals 1-10), `controls` (`name`, `value`, `text`),
   `chains`, by number (`name`, empty for a number no chain has; `state`: idle, pre-roll, warm, active, tail (ringing out) or
   stopping; `avg_us`, `max_us` per block since the last event; `bypassed`: the
-  slots bypassed now), and `levels`: `inputs` and `outputs`, each `name` and
+  slots bypassed now; `wire_peaks`, for a chain that is not idle: each
+  wire's highest peak after its gains, in dB, in the order the performance
+  lists its wires), and `levels`: `inputs` and `outputs`, each `name` and
   `peak_db`, the highest peak since the event before (-120 for silence): an
   input after its gain, an output as it goes out. Outputs have `limit_db`
   too: how far the limiter turned it down (0 when it did not).
@@ -125,13 +130,16 @@ Events have an `event` field instead of an `id`:
   them) and the `text` of where it went. Only while the editor is open.
 - `io`: every input (`name`, `gain_db`, `auto`) and output (`name`,
   `level_db`, `muted`, `limiter` with `on`, `ceiling_db`, `release_ms`,
-  `auto`), in order, when one changes. The `performance` command's answer
+  `auto`), in order, and `wires` (`auto`: the settings of Auto on the
+  plug-ins' outputs, with `match`), when one changes. The `performance` command's answer
   carries the same as `io`.
-- `auto`: a run on an `input` or `output` (its number): `state` (`waiting`,
-  `listening`, `done`, `failed`, `cancelled`), `seconds` listened and `of`
-  how many, five times a second while it runs. Once `done`, `level_db` (what
-  it heard) and the gain or level it went `from_db` and `to_db`; `failed`
-  has `error`.
+- `auto`: a run on an `input` or `output` (its number), or on a plug-in's
+  output (`chain`, `from`, `to`, `key` as the request named them, and
+  `match`): `state` (`waiting`, `listening`, `done`, `failed`, `cancelled`),
+  `seconds` listened and `of` how many, five times a second while it runs.
+  Once `done`, `level_db` (what it heard), matching `fed_db` (what the
+  plug-in was fed), and the gain or level it went `from_db` and `to_db`;
+  `failed` has `error`.
 - `scan`: how far a plug-in scan is (`scanning`, `done`, `total`, `current`),
   as each file is opened.
 - `plugins`: as the `plugins` command answers it, when a scan ends.
