@@ -41,7 +41,8 @@ struct PortInfo {
     static PortInfo output(int o) { return {Kind::Output, o, false}; }
     bool operator==(const PortInfo& o) const { return kind == o.kind && index == o.index && key == o.key; }
     bool operator!=(const PortInfo& o) const { return !(*this == o); }
-    // As a request names it: a slot, "in", or the output's name.
+    // As a request names it: a slot, "in", or the output by number (out1,
+    // out2...), which stays when outputs are renamed, so undo still finds it.
     QJsonValue json(const QStringList& outputs) const;
 };
 
@@ -91,6 +92,10 @@ struct ChainInfo {
     QVector<PluginInfo> blocks;
     QVector<WireInfo> wires;
     QVector<LooseInfo> loose;
+    // Where the board draws its input and each output (by number), once
+    // they are put somewhere.
+    std::optional<QPointF> inputAt;
+    QVector<std::optional<QPointF>> outputsAt;
     int numPlugins() const { return blocks.size(); }
     const PluginInfo* plugin(int slot) const;
     // The wire between two ports, by its place in wires, or -1.
@@ -145,6 +150,8 @@ struct Performance {
     QString tunerInput;
 
     static Performance fromJson(const QJsonObject& performance);
+    // An output by its name or as out1, out2...; -1 if there is none.
+    int output(const QString& name) const;
     const ControlInfo* control(const QString& name) const;
     // A chain by its number, or nullptr.
     const ChainInfo* chain(int index) const;

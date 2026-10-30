@@ -981,9 +981,21 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (!setWires(live, chain, req.contains("wires") ? &wires : nullptr, req.contains("loose") ? &loose : nullptr, &why))
                     return refuse(why);
             } else {
-                // Only where it is drawn: the app that asked knows.
-                if (!placePlugin(live, chain, req.at("slot").get<size_t>(), req.at("x").get<double>(), req.at("y").get<double>(), &why))
+                // Only where it is drawn: the app that asked knows. A
+                // plug-in by slot, or the input ("in") or an output by name.
+                const double x = req.at("x").get<double>(), y = req.at("y").get<double>();
+                if (req.contains("port")) {
+                    const Json& pj = req.at("port");
+                    const std::string name = pj.is_string() ? lower(pj.get<std::string>()) : "";
+                    const bool in = name == "in" || name == lower(config.inputs.at(cs->inputIndex));
+                    Port port;
+                    if (!portOf(pj, in, false, config, *cs, port, &why))
+                        return refuse(why);
+                    if (!placePort(live, chain, port, x, y, &why))
+                        return refuse(why);
+                } else if (!placePlugin(live, chain, req.at("slot").get<size_t>(), x, y, &why)) {
                     return refuse(why);
+                }
                 return;
             }
             // Everyone watching sees the chain as it is now.
@@ -1087,6 +1099,20 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 reply["performance"] = now;
                 service.publish("performance", now);
             }
+        } else if (cmd == "rename") {
+            // One of the performance's inputs or outputs, by number.
+            const bool in = req.contains("input");
+            if (in == req.contains("output"))
+                return refuse("rename needs input or output (its number, from 0) and name");
+            const long index = req.at(in ? "input" : "output").get<long>();
+            std::string why;
+            if (index < 0 || !renamePort(live, in, static_cast<size_t>(index), req.at("name").get<std::string>(), &why))
+                return refuse(why.empty() ? std::string("there is no such ") + (in ? "input" : "output") : why);
+            Json now;
+            if (livePerformance(now, &why)) {
+                reply["performance"] = now;
+                service.publish("performance", now);
+            }
         } else if (cmd == "plugins") {
             // The user's folders first, then a scan if asked for.
             std::string why;
@@ -1106,7 +1132,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         } else {
             refuse("unknown command '" + cmd +
                    "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
-                   "place, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
+                   "place, rename, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
                    "plugins, quit, subscribe, unsubscribe)");
         }
     };

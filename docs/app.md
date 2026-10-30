@@ -102,6 +102,13 @@ plug-in do not sit on each other; tap one to select its wire. A jump cut
 is only how the board draws the wire: the sound, the .cue and anything
 made from it (an .RPP) are as for any wire.
 
+The input and output boxes move like plug-ins: drag one anywhere. Once
+anything on a chain's board changes they stay where they are, so an output
+that loses its wires (a plug-in ejected or removed) does not jump. Tap one
+to select it: its panel shows its **Name**, to change. The name is this
+performance's, saved with it, not a setting: every chain's wires and the
+tuner follow it, and it plays on the same sound card channel.
+
 To move several plug-ins at once, Shift-click them (or turn on **Select**,
 beside **+ Plug-in**, and tap them), or Shift-drag (with **Select** on, drag)
 across open space: what the box touches joins the selection. Drag any of

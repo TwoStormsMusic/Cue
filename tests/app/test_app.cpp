@@ -206,10 +206,14 @@ private slots:
         QVERIFY(!slap.wires[amp].neutral());
         QVERIFY(slap.wires[0].neutral());
         QCOMPARE(slap.outputsUsed(), (QVector<int>{0, 1}));
-        // A request names the ends as the engine does.
+        // A request names the ends as the engine does: an output by number,
+        // which stays if it is renamed.
         const QJsonObject r = slap.wires[amp].request(1, p.outputs);
         QCOMPARE(r.value("from").toInt(), 2);
-        QCOMPARE(r.value("to").toString(), QString("Amp"));
+        QCOMPARE(r.value("to").toString(), QString("out2"));
+        QCOMPARE(p.output("out2"), 1);
+        QCOMPARE(p.output("foh"), 0);
+        QCOMPARE(p.output("out3"), -1);
         QCOMPARE(r.value("pan").toDouble(), -30.0);
         // A chain with no plug-ins: its input wired straight to the outputs.
         QCOMPARE(p.chains[2].wires.size(), 2);
@@ -1150,8 +1154,9 @@ private slots:
 
         // Its + puts a plug-in on it: the built-in Gain, after the two this
         // performance has. The first change to the routing keeps every
-        // plug-in where it is drawn; the new one goes where the Wah was, and
-        // the rest of that row moves along.
+        // plug-in, the input and the outputs where they are drawn; the new
+        // one goes where the Wah was, and the rest of that row moves along,
+        // the output at its end too.
         QCOMPARE(count("place"), 0);
         v->grab();
         click(v, v->hitRect("insert"));
@@ -1167,7 +1172,10 @@ private slots:
         QCOMPARE(add.value("on").toObject().value("from").toInt(), 0);
         QCOMPARE(add.value("on").toObject().value("to").toInt(), 1);
         QCOMPARE(QPointF(add.value("x").toDouble(), add.value("y").toDouble()), b.block[1]);
-        QCOMPARE(count("place"), 5 + 2);
+        QCOMPARE(count("place"), 5 + 3 + 2 + 1);
+        QCOMPARE(s.chain(1)->inputAt.value_or(QPointF()), b.input);
+        QCOMPARE(s.chain(1)->outputsAt.value(0).value_or(QPointF()), b.output[0]);
+        QCOMPARE(s.chain(1)->outputsAt.value(1).value_or(QPointF()), b.output[1] + QPointF(Board::colPitch, 0));
         QVERIFY(s.chain(1)->blocks[0].placed);
         QCOMPARE(s.chain(1)->blocks[0].at, b.block[0]);
         QCOMPARE(s.chain(1)->blocks[1].at, b.block[1] + QPointF(Board::colPitch, 0));
@@ -1183,6 +1191,7 @@ private slots:
         QVERIFY(!token.isEmpty());
         QCOMPARE(s.chain(1)->blocks[1].at, b.block[1]);
         QCOMPARE(s.chain(1)->blocks[2].at, b.block[2]);
+        QCOMPARE(*s.chain(1)->outputsAt.value(1), b.output[1]);
         QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
         QCOMPARE(link.last("restore").value("token").toString(), token);
         QCOMPARE(s.chain(1)->blocks[2].at, b.block[2] + QPointF(Board::colPitch, 0));
@@ -1192,10 +1201,10 @@ private slots:
         drag(v->hitRect("port out 0").center(), v->hitRect("port output 1").center());
         wire = link.last("wire");
         QCOMPARE(wire.value("from").toInt(), 0);
-        QCOMPARE(wire.value("to").toString(), QString("Amp"));
+        QCOMPARE(wire.value("to").toString(), QString("out2"));
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
         QCOMPARE(link.last("unwire").value("from").toInt(), 0);
-        QCOMPARE(link.last("unwire").value("to").toString(), QString("Amp"));
+        QCOMPARE(link.last("unwire").value("to").toString(), QString("out2"));
         // Drawn backwards, from an input dot to where sound comes out, it is the same wire.
         v->grab();
         drag(v->hitRect("port key 4").center(), v->hitRect("port input").center());
@@ -1256,7 +1265,7 @@ private slots:
         shot(v, "routing-thick-wire");
         QTest::keyClick(&w, Qt::Key_Delete);
         QCOMPARE(link.last("unwire").value("from").toInt(), 2);
-        QCOMPARE(link.last("unwire").value("to").toString(), QString("Amp"));
+        QCOMPARE(link.last("unwire").value("to").toString(), QString("out2"));
         QCOMPARE(v->selectedWire(), -1);
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
         wire = link.last("wire");
@@ -1908,7 +1917,7 @@ private slots:
             p["scenes"] = scenes;
         };
         link.answer = [&](const QJsonObject& r) -> QJsonObject {
-            if (r.value("cmd") == "place")
+            if (r.value("cmd") == "place" && !r.contains("port"))
                 slapOf(perf, [&](QJsonObject& c) {
                     QJsonArray blocks = c["blocks"].toArray();
                     QJsonObject b = blocks[r.value("slot").toInt()].toObject();
@@ -2006,6 +2015,157 @@ private slots:
         drag(v->hitRect("block 1").center(), v->toScreen(nb.path(now.wires[ir]).pointAtPercent(0.5)) + QPointF(3, 4));
         const QJsonObject onto = link.last("wires");
         QVERIFY(wired(onto, 3, 1) && wired(onto, 1, 4) && !wired(onto, 3, 4));
+    }
+
+    void the_input_and_outputs_stay_put_move_and_are_renamed() {
+        // The engine, as far as the board needs it: places, wires and names
+        // kept, and the performance sent back with them.
+        FakeLink link;
+        QJsonObject perf = parse(kPerformance);
+        auto slapOf = [](QJsonObject& p, const std::function<void(QJsonObject&)>& change) {
+            QJsonArray scenes = p["scenes"].toArray();
+            QJsonObject scene = scenes[0].toObject();
+            QJsonArray chains = scene["chains"].toArray();
+            QJsonObject slap = chains[1].toObject();
+            change(slap);
+            chains[1] = slap;
+            scene["chains"] = chains;
+            scenes[0] = scene;
+            p["scenes"] = scenes;
+        };
+        link.answer = [&](const QJsonObject& r) -> QJsonObject {
+            const QString cmd = r.value("cmd").toString();
+            if (cmd == "place")
+                slapOf(perf, [&](QJsonObject& c) {
+                    const QJsonObject at{{"x", r.value("x")}, {"y", r.value("y")}};
+                    if (r.contains("port")) {
+                        QJsonObject board = c["board"].toObject();
+                        if (r.value("port") == "in") {
+                            board["input"] = at;
+                        } else {
+                            QJsonObject outs = board["outputs"].toObject();
+                            outs[r.value("port").toString()] = at;
+                            board["outputs"] = outs;
+                        }
+                        c["board"] = board;
+                        return;
+                    }
+                    QJsonArray blocks = c["blocks"].toArray();
+                    QJsonObject b = blocks[r.value("slot").toInt()].toObject();
+                    b["x"] = r.value("x");
+                    b["y"] = r.value("y");
+                    blocks[r.value("slot").toInt()] = b;
+                    c["blocks"] = blocks;
+                });
+            if (cmd == "wires") {
+                slapOf(perf, [&](QJsonObject& c) {
+                    c["wires"] = r.value("wires");
+                    c["loose"] = r.value("loose");
+                });
+                return {{"ok", true}, {"performance", perf}};
+            }
+            if (cmd == "rename") {
+                // Everything that names it, as the engine writes the performance.
+                const bool in = r.contains("input");
+                const QJsonArray names = perf[in ? "inputs" : "outputs"].toArray();
+                const QString was = names[r.value(in ? "input" : "output").toInt()].toString();
+                QByteArray text = QJsonDocument(perf).toJson(QJsonDocument::Compact);
+                text.replace("\"" + was.toUtf8() + "\"", "\"" + r.value("name").toString().toUtf8() + "\"");
+                perf = QJsonDocument::fromJson(text).object();
+                return {{"ok", true}, {"performance", perf}};
+            }
+            return {{"ok", true}};
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        QCOMPARE(v->shownChain(), 1);
+        auto drag = [v](QPointF from, QPointF to) {
+            QTest::mousePress(v, Qt::LeftButton, {}, from.toPoint());
+            for (int i = 1; i <= 4; ++i)
+                QTest::mouseMove(v, (from + (to - from) * i / 4).toPoint());
+            QTest::mouseRelease(v, Qt::LeftButton, {}, to.toPoint());
+        };
+
+        // Amp, fed by Act, is drawn above FOH. Act ejected leaves Amp with
+        // no wire, and it stays where it was: so do FOH and the input.
+        const Board was(*s.chain(1), 2);
+        QVERIFY(was.output[1].y() < was.output[0].y());
+        v->grab();
+        click(v, v->hitRect("block 2"));
+        v->grab();
+        click(v, v->hitRect("eject"));
+        QVERIFY(s.chain(1)->wire(PortInfo::block(2), PortInfo::output(1)) < 0);
+        const Board ejected(*s.chain(1), 2);
+        QCOMPARE(ejected.output[0], was.output[0]);
+        QCOMPARE(ejected.output[1], was.output[1]);
+        QCOMPARE(ejected.input, was.input);
+        s.undo();
+        QCOMPARE(Board(*s.chain(1), 2).output[1], was.output[1]);
+
+        // An output box dragged moves, as a plug-in does; undone, it goes back.
+        v->grab();
+        const QRectF amp = v->hitRect("io out 1");
+        QVERIFY(!amp.isEmpty());
+        drag(amp.center(), amp.center() + QPointF(-40, 70));
+        const QJsonObject moved = link.last("place");
+        QCOMPARE(moved.value("port").toString(), QString("out2"));
+        QVERIFY(s.chain(1)->outputsAt.value(1));
+        QVERIFY(s.chain(1)->outputsAt.value(1)->y() > was.output[1].y() + 20);
+        QVERIFY(s.chain(1)->outputsAt.value(1)->x() < was.output[1].x() - 10);
+        s.undo();
+        QCOMPARE(*s.chain(1)->outputsAt.value(1), was.output[1]);
+        // ...and so does the input.
+        v->grab();
+        const QRectF bass = v->hitRect("io in");
+        drag(bass.center(), bass.center() + QPointF(0, 90));
+        QCOMPARE(link.last("place").value("port").toString(), QString("in"));
+        QVERIFY(s.chain(1)->inputAt->y() > was.input.y() + 20);
+        s.undo();
+        QCOMPARE(*s.chain(1)->inputAt, was.input);
+
+        // Tapped, the input is selected; its name is changed for the
+        // performance, and every chain playing it follows.
+        v->grab();
+        click(v, v->hitRect("io in"));
+        v->grab();
+        QVERIFY(!v->hitRect("io name").isEmpty());
+        shot(v, "routing-input-selected");
+        click(v, v->hitRect("io name"));
+        v->grab();
+        v->typeEntry("Bass DI");
+        const QJsonObject renamed = link.last("rename");
+        QCOMPARE(renamed.value("input").toInt(-1), 0);
+        QCOMPARE(renamed.value("name").toString(), QString("Bass DI"));
+        QCOMPARE(s.perf.inputs, QStringList{"Bass DI"});
+        QCOMPARE(s.chain(1)->input, QString("Bass DI"));
+        QCOMPARE(s.chain(0)->input, QString("Bass DI"));
+        s.undo();
+        QCOMPARE(link.last("rename").value("name").toString(), QString("Bass"));
+        QCOMPARE(s.perf.inputs, QStringList{"Bass"});
+
+        // An output too: its wires stay with it, and so does its place.
+        v->grab();
+        click(v, v->hitRect("io out 0"));
+        v->grab();
+        click(v, v->hitRect("io name"));
+        v->grab();
+        v->typeEntry("Front");
+        QCOMPARE(link.last("rename").value("output").toInt(-1), 0);
+        QCOMPARE(s.perf.outputs, (QStringList{"Front", "Amp"}));
+        QVERIFY(s.chain(1)->wire(PortInfo::block(4), PortInfo::output(0)) >= 0);
+        QCOMPARE(*s.chain(1)->outputsAt.value(0), was.output[0]);
+        v->grab();
+        shot(v, "routing-output-renamed");
+        // Tapped again, it is let go.
+        click(v, v->hitRect("io out 0"));
+        v->grab();
+        QVERIFY(v->hitRect("io name").isEmpty());
     }
 
     void with_the_engine() {
@@ -2111,6 +2271,22 @@ private slots:
         QVERIFY(!ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{QJsonObject{{"from", 0}, {"to", 1}}}}}).value("ok").toBool());
         QVERIFY(ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{}}}).value("ok").toBool());
         QVERIFY(s.perf.chains[1].loose.isEmpty());
+        // The input and an output put somewhere, then an output renamed: the
+        // performance comes back with the new name, its place and its wires.
+        QVERIFY(ask({{"cmd", "place"}, {"chain", 1}, {"port", "in"}, {"x", -30}, {"y", 15}}).value("ok").toBool());
+        const QString foh = s.perf.outputs.first();
+        QVERIFY(ask({{"cmd", "place"}, {"chain", 1}, {"port", foh}, {"x", 400}, {"y", 15}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "place"}, {"chain", 1}, {"port", "Nowhere"}, {"x", 0}, {"y", 0}}).value("ok").toBool());
+        const int fohWires = s.perf.chains[1].wires.size();
+        QJsonObject renamed = ask({{"cmd", "rename"}, {"output", 0}, {"name", "Front"}});
+        QVERIFY2(renamed.value("ok").toBool(), qPrintable(renamed.value("error").toString()));
+        QCOMPARE(s.perf.outputs.first(), QString("Front"));
+        QCOMPARE(s.perf.chains[1].wires.size(), fohWires);
+        QCOMPARE(s.perf.chains[1].inputAt.value_or(QPointF()), QPointF(-30, 15));
+        QCOMPARE(s.perf.chains[1].outputsAt.value(0).value_or(QPointF()), QPointF(400, 15));
+        QVERIFY(!ask({{"cmd", "rename"}, {"output", 0}, {"name", s.perf.outputs.last()}}).value("ok").toBool());
+        QVERIFY(ask({{"cmd", "rename"}, {"output", 0}, {"name", foh}}).value("ok").toBool());
+        QCOMPARE(s.perf.outputs.first(), foh);
         s.select(1);
         QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, 1, 3000);
         const int had = s.perf.chains[1].numPlugins();

@@ -73,6 +73,13 @@ struct LooseSpec {
     bool feedback = false;
 };
 
+// Where the routing board draws a chain's input or one of its outputs,
+// once it has been put somewhere.
+struct BoardPlace {
+    bool placed = false;
+    double x = 0, y = 0;
+};
+
 // A line of plug-ins in series, as an INI config and a version 1 .cue file
 // describe a chain. The chain's first line is its main line; the others are
 // branches, each taking a copy of an earlier line's signal.
@@ -108,6 +115,9 @@ struct ChainSpec {
     std::vector<PluginSpec> blocks;
     std::vector<WireSpec> wires;
     std::vector<LooseSpec> loose; // wires attached at one end only
+    // Where the board draws its input, and each output (by number).
+    BoardPlace inputAt;
+    std::vector<BoardPlace> outputsAt;
     // As an INI config or a version 1 .cue file describes it: lines, and
     // where each output is taken (an output no tap names takes the end of
     // the main line). finishConfig makes blocks and wires of them, and

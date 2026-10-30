@@ -170,6 +170,11 @@ QJsonObject placeRequest(int chain, int slot, QPointF at) {
     return QJsonObject{{"cmd", "place"}, {"chain", chain}, {"slot", slot}, {"x", std::round(at.x() * 10) / 10}, {"y", std::round(at.y() * 10) / 10}};
 }
 
+// The input or an output.
+QJsonObject placeRequest(int chain, const PortInfo& port, const QStringList& outputs, QPointF at) {
+    return QJsonObject{{"cmd", "place"}, {"chain", chain}, {"port", port.json(outputs)}, {"x", std::round(at.x() * 10) / 10}, {"y", std::round(at.y() * 10) / 10}};
+}
+
 QString newToken(int& counter) { return QString("app-%1-%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++counter); }
 
 } // namespace
@@ -289,6 +294,7 @@ void ChainView::showChain(int chain) {
 
 void ChainView::selectSlot(int slot) {
     looseSel_ = -1;
+    ioSel_.reset();
     if (slot < 0)
         group_.clear();
     if (slot >= 0) {
@@ -613,7 +619,7 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
     // design; the zoom and pan go on top. While something is dragged the
     // board keeps its size, so it stays still under the finger.
     canvasRect_ = r;
-    if (dragBlock_ < 0 && !wiring_) {
+    if (dragBlock_ < 0 && !wiring_ && !ioDrag_) {
         layoutSize_ = B.bounds.size();
         boardTopLeft_ = B.bounds.topLeft();
         fitK_ = std::min({u, (r.width() - 8) / layoutSize_.width(), (r.height() - 8) / layoutSize_.height()});
@@ -850,10 +856,23 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
             hit(id, tap, {}, [this, b](QPointF pos, bool done) { dragBlock(b, pos, done); });
     }
 
-    // The input and the outputs: green while sound would reach them.
-    auto ioBox = [&](QPointF center, const QString& name, const QString& sub, bool on) {
+    // The input and the outputs: green while sound would reach them. A tap
+    // selects one (to rename it), a drag moves it.
+    auto ioBox = [&](const PortInfo& port, QPointF center, const QString& name, const QString& sub, bool on) {
         const QRectF b(at(center - QPointF(Board::ioW / 2, Board::ioH / 2)), QSizeF(Board::ioW * k, Board::ioH * k));
-        draw::card(p, b, 8 * k, on ? color::greenBg : color::panel2, on ? color::green : color::border2);
+        const bool selected = ioSel_ && *ioSel_ == port;
+        if (selected) {
+            draw::card(p, b, 8 * k, QColor(0x2A, 0x1A, 0x0A), color::orange);
+            p.setPen(QPen(color::orange, std::max(2.0, 3 * k)));
+            p.setBrush(Qt::NoBrush);
+            p.drawRoundedRect(b, 8 * k, 8 * k);
+        } else {
+            draw::card(p, b, 8 * k, on ? color::greenBg : color::panel2, on ? color::green : color::border2);
+        }
+        const QRectF tap = b.adjusted(-4, -4, 4, 4).intersected(r);
+        if (!tap.isEmpty())
+            hit(port.kind == PortInfo::Kind::Input ? QString("io in") : QString("io out %1").arg(port.index), tap, {},
+                [this, port](QPointF pos, bool done) { dragIo(port, pos, done); });
         p.setPen(on ? color::text : color::muted);
         p.setFont(draw::fitted(Face::Text, QFont::DemiBold, name, 14 * k, 8 * k, b.width() - 8 * k));
         draw::text(p, b.adjusted(4 * k, 6 * k, -4 * k, -b.height() / 2), Qt::AlignHCenter | Qt::AlignBottom, name);
@@ -863,9 +882,9 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
     };
     const bool muted = s.status.valid && s.status.muted;
     const int inputIndex = std::max(0, static_cast<int>(s.perf.inputs.indexOf(c.input)));
-    ioBox(B.input, c.input, muted ? "muted" : QString("in %1").arg(inputIndex + 1), !muted);
+    ioBox(PortInfo::input(), B.input, c.input, muted ? "muted" : QString("in %1").arg(inputIndex + 1), !muted);
     for (int o = 0; o < numOutputs; ++o)
-        ioBox(B.output[o], s.perf.outputs[o], muted ? "muted" : QString("out %1").arg(o + 1), flow.heard.value(o));
+        ioBox(PortInfo::output(o), B.output[o], s.perf.outputs[o], muted ? "muted" : QString("out %1").arg(o + 1), flow.heard.value(o));
 
     // The dots: where wires leave (right) and arrive (left), and a
     // plug-in's key, a small triangle. A drag from one draws a wire.
@@ -1154,7 +1173,7 @@ bool ChainView::deselect() {
         endEntry();
         return true;
     }
-    const bool any = slot_ >= 0 || wireOn_ || looseSel_ >= 0 || picker_ != Picker::None;
+    const bool any = slot_ >= 0 || wireOn_ || looseSel_ >= 0 || ioSel_ || picker_ != Picker::None;
     letGo_.stop();
     selectSlot(-1);
     wireOn_ = false;
@@ -1200,10 +1219,112 @@ QString ChainView::portName(const ChainInfo& c, const PortInfo& port) const {
 // The first change to a chain's routing puts every plug-in where it is
 // drawn, so the board does not lay itself out again under the hand.
 void ChainView::pin(const ChainInfo& c) {
-    const Board B(c, s.perf.outputs.size(), moving_);
+    // The input and outputs too, where they were before anything moved, so
+    // one that loses its wires stays put. All asked for at once: c changes
+    // as each is answered.
+    const Board B(c, s.perf.outputs.size(), moving_), before(c, s.perf.outputs.size());
+    QJsonArray place;
     for (int b = 0; b < c.numPlugins(); ++b)
         if (!c.blocks[b].placed)
-            s.change(placeRequest(c.index, b, B.block[b]));
+            place << placeRequest(c.index, b, B.block[b]);
+    if (!c.inputAt)
+        place << placeRequest(c.index, PortInfo::input(), s.perf.outputs, before.input);
+    for (int o = 0; o < before.output.size(); ++o)
+        if (!c.outputsAt.value(o))
+            place << placeRequest(c.index, PortInfo::output(o), s.perf.outputs, before.output[o]);
+    for (const QJsonValue& r : place)
+        s.change(r.toObject());
+}
+
+void ChainView::dragIo(const PortInfo& port, QPointF pos, bool done) {
+    const ChainInfo* c = s.chain(chain_);
+    if (!c || (port.kind == PortInfo::Kind::Output && port.index >= s.perf.outputs.size())) {
+        ioDrag_.reset();
+        return;
+    }
+    const int key = Board::keyOf(port);
+    const Board B(*c, s.perf.outputs.size(), moving_);
+    const QPointF now = port.kind == PortInfo::Kind::Input ? B.input : B.output[port.index];
+    if (!ioDrag_ || *ioDrag_ != port) {
+        // Pressed: a tap or a move, it is not yet clear which.
+        ioDrag_ = port;
+        dragMoved_ = false;
+        dragStart_ = pos;
+        dragFrom_ = now;
+        return;
+    }
+    if (!done) {
+        if (!dragMoved_ && QLineF(pos, dragStart_).length() < 8 * u)
+            return;
+        dragMoved_ = true;
+        QPointF to = dragFrom_ + (pos - dragStart_) / scaleNow();
+        // Near the height of a plug-in, the input or another output it
+        // takes it, so wires stay straight.
+        double best = 10;
+        auto snap = [&](double y) {
+            if (std::fabs(y - to.y()) < best) {
+                best = std::fabs(y - to.y());
+                to.setY(y);
+            }
+        };
+        for (const QPointF& b : B.block)
+            snap(b.y());
+        if (port.kind != PortInfo::Kind::Input)
+            snap(B.input.y());
+        for (int o = 0; o < B.output.size(); ++o)
+            if (port.kind != PortInfo::Kind::Output || o != port.index)
+                snap(B.output[o].y());
+        moving_[key] = to;
+        update();
+        return;
+    }
+    ioDrag_.reset();
+    if (pinching_ || !dragMoved_) {
+        moving_.remove(key);
+        if (!pinching_) {
+            // A tap selects it, or lets it go.
+            const bool was = ioSel_ && *ioSel_ == port;
+            letGo_.stop();
+            closeMenu();
+            commitEntry();
+            selectSlot(-1);
+            wireOn_ = false;
+            picker_ = Picker::None;
+            if (!was)
+                ioSel_ = port;
+        }
+        update();
+        return;
+    }
+    const int chain = c->index;
+    const QString name = portName(*c, port);
+    const QPointF to = moving_.value(key, dragFrom_);
+    pin(*c);
+    const QJsonObject before = placeRequest(chain, port, s.perf.outputs, dragFrom_), after = placeRequest(chain, port, s.perf.outputs, to);
+    s.change(after, [this, key](const QJsonObject& r) {
+        moving_.remove(key);
+        s.check(r, "Not moved");
+        update();
+    });
+    s.edited({"Moved " + name, chain, -1, before, after});
+}
+
+void ChainView::renameIo(const PortInfo& port, const QString& typed) {
+    const bool in = port.kind == PortInfo::Kind::Input;
+    const ChainInfo* c = s.chain(chain_);
+    const int index = in ? (c ? static_cast<int>(s.perf.inputs.indexOf(c->input)) : -1) : port.index;
+    const QStringList& names = in ? s.perf.inputs : s.perf.outputs;
+    const QString name = typed.trimmed();
+    if (index < 0 || index >= names.size() || name.isEmpty() || name == names[index])
+        return;
+    const QString was = names[index];
+    const QString key = in ? "input" : "output";
+    const QJsonObject make{{"cmd", "rename"}, {key, index}, {"name", name}}, back{{"cmd", "rename"}, {key, index}, {"name", was}};
+    s.change(make, [this, make, back, was, name](const QJsonObject& r) {
+        if (s.check(r, "Not renamed"))
+            s.edited({"Renamed " + was + " to " + name, chain_, -1, back, make});
+        update();
+    });
 }
 
 bool ChainView::adding() const { return selectMode_ || (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier); }
@@ -1827,6 +1948,42 @@ void ChainView::loosePanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
            color::border2, color::panel2, 16 * u);
 }
 
+// The input or an output selected: its name, which this performance gives
+// it, to change.
+void ChainView::ioPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
+    const PortInfo port = *ioSel_;
+    const bool in = port.kind == PortInfo::Kind::Input;
+    const int index = in ? static_cast<int>(s.perf.inputs.indexOf(c.input)) : port.index;
+    const QStringList& names = in ? s.perf.inputs : s.perf.outputs;
+    if (index < 0 || index >= names.size())
+        return;
+    const QString name = names[index];
+    const double pad = 18 * u, w = r.width() - 2 * pad;
+    double y = r.top() + 20 * u;
+    QFont label = typeface(Face::Text, 12 * u, QFont::DemiBold);
+    label.setLetterSpacing(QFont::AbsoluteSpacing, 1.5 * u);
+    p.setFont(label);
+    p.setPen(color::muted);
+    p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, QString(in ? "INPUT %1" : "OUTPUT %1").arg(index + 1));
+    y += 34 * u;
+    field(p, "io name", QRectF(r.left() + pad, y, w, 64 * u), "NAME", name, false, [this, port, name] {
+        startEntry("io name", name, "Its name", 40, [this, port](const QString& text) { renameIo(port, text); });
+    });
+    y += 84 * u;
+    p.setPen(color::text2);
+    p.setFont(typeface(Face::Text, 14 * u));
+    QStringList users;
+    if (in)
+        for (const ChainInfo& other : s.perf.chains)
+            if (other.input == name)
+                users << other.name;
+    const QString help = (in ? QString("Every chain playing this input sees the new name") + (users.size() > 1 ? " (" + users.join(", ") + ")" : "") +
+                                   ", and so does the tuner. "
+                             : QString("Every chain's wires to this output keep it under its new name. ")) +
+                         "The name is this performance's, saved with it; the sound card channel stays the same. Drag the box to move it.";
+    p.drawText(QRectF(r.left() + pad, y, w, 200 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, help);
+}
+
 QString ChainView::addTarget() const {
     const ChainInfo* c = s.chain(chain_);
     if (!c)
@@ -1883,13 +2040,22 @@ void ChainView::addPlugin(const PluginInfo& what) {
         bool taken = false;
         for (int b = 0; b < c->numPlugins(); ++b)
             taken = taken || B.box(b).intersects(spot);
+        for (const QPointF& o : B.output)
+            taken = taken || B.ioBox(o).intersects(spot);
+        auto along = [&](QPointF p) { return std::fabs(p.y() - at.y()) < Board::rowPitch / 2 && p.x() > at.x() - Board::colPitch / 2; };
+        auto push = [&](const QJsonObject& move, const QJsonObject& back) {
+            s.change(move);
+            pushed.append(move);
+            pushedBack.append(back);
+        };
         for (int b = 0; taken && b < c->numPlugins(); ++b)
-            if (std::fabs(B.block[b].y() - at.y()) < Board::rowPitch / 2 && B.block[b].x() > at.x() - Board::colPitch / 2) {
-                const QJsonObject move = placeRequest(chain, b, B.block[b] + QPointF(Board::colPitch, 0));
-                s.change(move);
-                pushed.append(move);
-                pushedBack.append(placeRequest(chain, b, B.block[b]));
-            }
+            if (along(B.block[b]))
+                push(placeRequest(chain, b, B.block[b] + QPointF(Board::colPitch, 0)), placeRequest(chain, b, B.block[b]));
+        // An output at the end of the row too.
+        for (int o = 0; taken && o < B.output.size(); ++o)
+            if (along(B.output[o]))
+                push(placeRequest(chain, PortInfo::output(o), outs, B.output[o] + QPointF(Board::colPitch, 0)),
+                     placeRequest(chain, PortInfo::output(o), outs, B.output[o]));
     }
     req["x"] = std::round(at.x() * 10) / 10;
     req["y"] = std::round(at.y() * 10) / 10;
@@ -1965,6 +2131,13 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
             search_->hide();
         listRect_ = {};
         loosePanel(p, r, c);
+        return;
+    }
+    if (ioSel_) {
+        if (search_)
+            search_->hide();
+        listRect_ = {};
+        ioPanel(p, r, c);
         return;
     }
     if (group_.size() > 1) {

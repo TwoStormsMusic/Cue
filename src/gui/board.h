@@ -4,7 +4,8 @@
 // at the left, the outputs at the right, and the path of every wire. In
 // board units, before the canvas fits and zooms them. A plug-in put
 // somewhere stays there; the others are laid out from the wires, a line of
-// plug-ins in series to a row, a branch on a row below.
+// plug-ins in series to a row, a branch on a row below. The input and
+// outputs too stay where they are put.
 
 #include "gui/model.h"
 
@@ -23,7 +24,11 @@ struct Board {
     static constexpr double colPitch = 128, rowPitch = 150, edge = 34, blockW = 100, blockH = 74, ioW = 72, ioH = 56;
     static constexpr double gainStageR = 34, actR = 15;
 
-    // moved: blocks being dragged, where they are now.
+    // moved: what is being dragged, where it is now: blocks by slot, the
+    // input and the outputs by these.
+    static constexpr int inputKey = -1;
+    static constexpr int outputKey(int o) { return -2 - o; }
+    static int keyOf(const PortInfo& p) { return p.kind == PortInfo::Kind::Input ? inputKey : p.kind == PortInfo::Kind::Output ? outputKey(p.index) : p.index; }
     Board(const ChainInfo& c, int numOutputs, const QHash<int, QPointF>& moved = {});
 
     QVector<QPointF> block;  // the centre of each block, by slot

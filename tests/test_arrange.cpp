@@ -6,11 +6,14 @@
 
 #include "app/arrange.h"
 #include "app/build.h"
+#include "app/cuefile.h"
 #include "host/clap_processor.h"
 #include "midi/eurekaprom.h"
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -331,4 +334,44 @@ TEST(arrange_adds_copies_and_takes_out_scenes) {
     CHECK(t.scene(3).name == "A" && t.show->scene() == 3 && t.playing() == 0);
     CHECK(!removeScene(*t.live, 3, nullptr, &t.err));
     CHECK(play.hears(0.25f));
+}
+
+TEST(arrange_renames_and_places_the_inputs_and_outputs) {
+    Live t;
+    ChainSpec& one = t.config.scenes.at(0).chains.at(0);
+    // A name of the performance's own: its chains, wires and tuner follow.
+    CHECK_MSG(renamePort(*t.live, false, 0, " Front ", &t.err), "%s", t.err.c_str());
+    CHECK(t.config.outputs == (std::vector<std::string>{"Front", "Amp"}));
+    CHECK_MSG(renamePort(*t.live, true, 0, "Bass DI", &t.err), "%s", t.err.c_str());
+    CHECK(t.config.inputs.at(0) == "Bass DI" && one.input == "Bass DI" && t.config.tuner.input == "Bass DI");
+    // Not empty, not another's, not how requests name another.
+    CHECK(!renamePort(*t.live, false, 0, "  ", &t.err));
+    CHECK(!renamePort(*t.live, false, 0, "amp", &t.err));
+    CHECK(!renamePort(*t.live, false, 0, "out2", &t.err));
+    CHECK(!renamePort(*t.live, true, 0, "in", &t.err));
+    CHECK(!renamePort(*t.live, false, 2, "Monitor", &t.err));
+    CHECK(renamePort(*t.live, false, 0, "out1", &t.err) && renamePort(*t.live, false, 0, "Front", &t.err));
+    CHECK(t.config.outputs.at(0) == "Front");
+
+    // Where the board draws the input and an output.
+    CHECK_MSG(placePort(*t.live, one.id, Port::input(), -20, 40.25, &t.err), "%s", t.err.c_str());
+    CHECK_MSG(placePort(*t.live, one.id, Port::output(1), 300, -40, &t.err), "%s", t.err.c_str());
+    CHECK(!placePort(*t.live, one.id, Port::output(2), 0, 0, &t.err));
+    CHECK(one.inputAt.placed && one.inputAt.x == -20 && one.outputsAt.size() == 2 && !one.outputsAt[0].placed && one.outputsAt[1].y == -40);
+
+    // Saved and read back, with the new names; on a rig that knows only
+    // the old ones, what it does not know takes a channel none of the rest has.
+    char name[] = "/tmp/cue-arrange-XXXXXX";
+    const std::string dir = mkdtemp(name) ? name : "/tmp";
+    CHECK_MSG(saveCue(t.config, dir + "/renamed.cue", &t.err), "%s", t.err.c_str());
+    std::ofstream(dir + "/rig.json") << R"({"cue_rig": 1, "inputs": {"Bass": 1}, "outputs": {"FOH": 2, "Amp": 1}})";
+    Config c;
+    CHECK_MSG(loadPerformance(dir + "/renamed.cue", dir + "/rig.json", c, &t.err), "%s", t.err.c_str());
+    CHECK(c.inputs == std::vector<std::string>{"Bass DI"} && c.outputs == (std::vector<std::string>{"Front", "Amp"}));
+    CHECK(c.tuner.input == "Bass DI");
+    CHECK(c.audio.outputChannels == (std::vector<unsigned>{1, 0}));
+    const ChainSpec& back = c.scenes.at(0).chains.at(0);
+    CHECK(back.inputAt.placed && back.inputAt.x == -20 && back.inputAt.y == 40.3);
+    CHECK(back.outputsAt.size() == 2 && !back.outputsAt[0].placed && back.outputsAt[1].placed && back.outputsAt[1].x == 300);
+    CHECK_MSG(wireList(back, c.outputs) == "in>0 0>Front 0>Amp", "%s", wireList(back, c.outputs).c_str());
 }

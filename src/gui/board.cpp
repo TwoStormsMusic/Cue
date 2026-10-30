@@ -118,8 +118,9 @@ Board::Board(const ChainInfo& c, int numOutputs, const QHash<int, QPointF>& move
         block[b] = moved.contains(b) ? moved.value(b) : c.blocks[b].placed ? c.blocks[b].at : laidOut[b];
     }
 
-    // The input left of every block, beside the first it feeds; the outputs
-    // right of them, each beside what feeds it, none on top of another.
+    // Unless put somewhere: the input left of every block, beside the first
+    // it feeds; the outputs right of them, each beside what feeds it, none on
+    // top of another.
     double minX = center(1, 0).x(), maxX = minX;
     if (n > 0) {
         minX = std::numeric_limits<double>::max();
@@ -140,10 +141,14 @@ Board::Board(const ChainInfo& c, int numOutputs, const QHash<int, QPointF>& move
             break;
         }
     }
-    input = QPointF(minX - colPitch, inputY);
+    input = moved.contains(inputKey) ? moved.value(inputKey) : c.inputAt ? *c.inputAt : QPointF(minX - colPitch, inputY);
     output.resize(numOutputs);
     QVector<QPair<double, int>> want;
     for (int o = 0; o < numOutputs; ++o) {
+        if (moved.contains(outputKey(o)) || c.outputsAt.value(o)) {
+            output[o] = moved.contains(outputKey(o)) ? moved.value(outputKey(o)) : *c.outputsAt.value(o);
+            continue;
+        }
         double y = std::numeric_limits<double>::max();
         for (const WireInfo& w : c.wires)
             if (w.to.kind == PortInfo::Kind::Output && w.to.index == o) {

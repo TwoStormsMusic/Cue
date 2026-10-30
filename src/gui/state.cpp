@@ -196,7 +196,19 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
     } else if (request.value("cmd").toString() == "place") {
         ChainInfo* c = perf.chain(request.value("chain").toInt(-1));
         const int slot = request.value("slot").toInt(-1);
-        if (c && slot >= 0 && slot < c->blocks.size()) {
+        const QPointF at(request.value("x").toDouble(), request.value("y").toDouble());
+        if (c && request.contains("port")) {
+            // The input, or an output by name.
+            const QString port = request.value("port").toString();
+            const int o = perf.output(port);
+            if (port == "in") {
+                c->inputAt = at;
+            } else if (o >= 0) {
+                c->outputsAt.resize(std::max(static_cast<int>(c->outputsAt.size()), static_cast<int>(perf.outputs.size())));
+                c->outputsAt[o] = at;
+            }
+            emit changed();
+        } else if (c && slot >= 0 && slot < c->blocks.size()) {
             PluginInfo& b = c->blocks[slot];
             b.placed = true;
             b.at = QPointF(request.value("x").toDouble(), request.value("y").toDouble());
@@ -214,7 +226,7 @@ void AppState::setWire(int chain, const QJsonObject& wj) {
     auto port = [&](const QJsonValue& v, bool from) {
         if (v.isDouble())
             return PortInfo::block(v.toInt(), !from && wj.value("key").toBool());
-        return from ? PortInfo::input() : PortInfo::output(perf.outputs.indexOf(v.toString()));
+        return from ? PortInfo::input() : PortInfo::output(perf.output(v.toString()));
     };
     const int i = c.wire(port(wj.value("from"), true), port(wj.value("to"), false));
     if (i < 0)

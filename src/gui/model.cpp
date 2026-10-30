@@ -41,7 +41,8 @@ QJsonValue PortInfo::json(const QStringList& outputs) const {
     case Kind::Block: return index;
     case Kind::Output: break;
     }
-    return index >= 0 && index < outputs.size() ? outputs[index] : QString("out%1").arg(index + 1);
+    Q_UNUSED(outputs);
+    return QString("out%1").arg(index + 1);
 }
 
 void WireInfo::readJump(const QJsonObject& wj) {
@@ -262,7 +263,7 @@ Performance Performance::fromJson(const QJsonObject& j) {
                     out = PortInfo::input();
                     return true;
                 }
-                const int o = perf.outputs.indexOf(v.toString());
+                const int o = perf.output(v.toString());
                 out = PortInfo::output(o);
                 return o >= 0;
             };
@@ -293,6 +294,15 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 l.feedback = lj.value("feedback").toBool();
                 c.loose << l;
             }
+            const QJsonObject board = cj.value("board").toObject();
+            auto place = [](const QJsonValue& v) { return QPointF(v.toObject().value("x").toDouble(), v.toObject().value("y").toDouble()); };
+            if (board.contains("input"))
+                c.inputAt = place(board.value("input"));
+            c.outputsAt.resize(perf.outputs.size());
+            const QJsonObject outs = board.value("outputs").toObject();
+            for (auto o = outs.begin(); o != outs.end(); ++o)
+                if (const int k = perf.output(o.key()); k >= 0)
+                    c.outputsAt[k] = place(o.value());
             scene.chains << c.index;
             perf.chains << c;
         }
@@ -325,6 +335,15 @@ const ChainInfo* Performance::chain(int index) const {
 }
 
 ChainInfo* Performance::chain(int index) { return const_cast<ChainInfo*>(std::as_const(*this).chain(index)); }
+
+int Performance::output(const QString& name) const {
+    for (int o = 0; o < outputs.size(); ++o)
+        if (outputs[o].compare(name, Qt::CaseInsensitive) == 0)
+            return o;
+    bool ok = false;
+    const int n = name.startsWith("out", Qt::CaseInsensitive) ? name.mid(3).toInt(&ok) : 0;
+    return ok && n >= 1 && n <= outputs.size() ? n - 1 : -1;
+}
 
 const ControlInfo* Performance::control(const QString& name) const {
     for (const ControlInfo& c : controls)

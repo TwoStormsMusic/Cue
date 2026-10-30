@@ -167,6 +167,11 @@ private:
     void setBypassMode(int chain, int slot, bool mute);
     // The routing board.
     void pin(const ChainInfo& c);
+    // The input or an output: dragged to move it, tapped to select it, and
+    // renamed (for the whole performance).
+    void dragIo(const PortInfo& port, QPointF pos, bool done);
+    void renameIo(const PortInfo& port, const QString& name);
+    void ioPanel(QPainter& p, const QRectF& r, const ChainInfo& c);
     void tapBlock(int slot);
     void dragBlock(int slot, QPointF pos, bool done);
     void dragWire(const PortInfo& port, bool source, QPointF pos, bool done);
@@ -285,6 +290,8 @@ private:
     bool looseMoved_ = false;
     QPointF looseStart_, looseFrom_, looseAt_;
     QVector<QPainterPath> looseShapes_;
+    // The input or an output selected, and one being dragged.
+    std::optional<PortInfo> ioSel_, ioDrag_;
     // The wire a dragged plug-in with none would go onto, or -1.
     int insertWire_ = -1;
     // Its gains while a slider moves, and as they were before.

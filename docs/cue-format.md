@@ -95,6 +95,9 @@ A `.cue` file is a zip:
   each has `from` or `to` (as a wire's), `key`, `x` and `y` (where its loose
   end lies on the board) and the wire's `level_db`, `width`, `pan`, `muted`
   and `feedback`, kept for when it is plugged in again. They carry nothing.
+- **Board.** `board` (left out until something is put there) says where the
+  routing board draws the chain's `input` and its `outputs` (by name), each
+  `{"x": ..., "y": ...}`; what is missing is laid out from the wires.
 - **Format 1** files (Cue 0.4 to 0.6) have `lines` and `outputs` instead: the
   main line first, then branches, each taking a copy of the line named in
   `from` (`""` is the main line) after that many of its plug-ins, and each
@@ -143,8 +146,9 @@ needs them.
 ```
 
 `inputs` and `outputs` give the sound card channel (from 1) of each name a
-performance uses. An input or output the rig does not list takes the channel
-of its place (the second output plays on channel 2), and `cue check` says
-which names it could not find. Two outputs cannot share a channel. Every
+performance uses. An input or output the rig does not list (one renamed in
+the app, say) takes the channel of its place (the second output plays on
+channel 2), or the first channel no other has, and `cue check` says which
+names it could not find. Two outputs cannot share a channel. Every
 setting can be left out; what is missing keeps its default (`[audio]` and
 `[midi]` in [config.md](config.md) describe each one).

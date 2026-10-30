@@ -57,5 +57,11 @@ bool removeWire(LiveRig& live, int chain, Port from, Port to, std::string* error
 bool setWires(LiveRig& live, int chain, const std::vector<WireSpec>* wires, const std::vector<LooseSpec>* loose, std::string* error);
 // Where the routing board draws a plug-in.
 bool placePlugin(LiveRig& live, int chain, size_t slot, double x, double y, std::string* error);
+// ...and its input or one of its outputs.
+bool placePort(LiveRig& live, int chain, Port port, double x, double y, std::string* error);
+// A new name for one of the performance's inputs or outputs (by number),
+// which its chains, wires and tuner then use. Refused if it is empty or
+// another of them has it.
+bool renamePort(LiveRig& live, bool input, size_t index, const std::string& name, std::string* error);
 
 } // namespace cue

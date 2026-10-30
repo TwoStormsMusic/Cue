@@ -255,6 +255,18 @@ struct Writer {
             }
             j["loose"] = loose;
         }
+        // Where the board draws its input and outputs, once they are put somewhere.
+        auto place = [](const BoardPlace& at) { return json{{"x", std::round(at.x * 10) / 10}, {"y", std::round(at.y * 10) / 10}}; };
+        json board = json::object(), outputs = json::object();
+        if (c.inputAt.placed)
+            board["input"] = place(c.inputAt);
+        for (size_t o = 0; o < c.outputsAt.size() && o < config.outputs.size(); ++o)
+            if (c.outputsAt[o].placed)
+                outputs[config.outputs[o]] = place(c.outputsAt[o]);
+        if (!outputs.empty())
+            board["outputs"] = outputs;
+        if (!board.empty())
+            j["board"] = board;
         return true;
     }
 
@@ -563,6 +575,20 @@ struct Reader {
                 l.feedback = lj.value("feedback", false);
                 c.loose.push_back(l);
             }
+        if (j.contains("board")) {
+            const json& b = j.at("board");
+            auto place = [](const json& at) { return BoardPlace{true, at.value("x", 0.0), at.value("y", 0.0)}; };
+            if (b.contains("input"))
+                c.inputAt = place(b.at("input"));
+            // An output the performance does not have is only not drawn there.
+            if (b.contains("outputs"))
+                for (const auto& [name, at] : b.at("outputs").items())
+                    for (size_t o = 0; o < config.outputs.size(); ++o)
+                        if (same(config.outputs[o], name)) {
+                            c.outputsAt.resize(config.outputs.size());
+                            c.outputsAt[o] = place(at);
+                        }
+        }
     }
 
     // Format 1: lines, and where each output is taken.
@@ -959,26 +985,35 @@ bool loadRig(const std::string& path, Config& c, std::string* error) {
                 }
             }
         }
-        // Each of the performance's inputs and outputs by name, else by position.
-        auto channel = [&](const char* key, const std::string& name, size_t position) {
-            if (j.contains(key))
-                for (const auto& [n, ch] : j.at(key).items())
-                    if (same(n, name)) {
-                        const int v = ch.get<int>();
-                        if (v < 1)
-                            throw std::runtime_error(std::string(key) + ": channels are numbered from 1");
-                        return static_cast<unsigned>(v - 1);
-                    }
-            c.warnings.push_back(path + ": no channel for " + (key[0] == 'i' ? "input" : "output") + " '" + name + "'; using channel " +
-                                 std::to_string(position + 1));
-            return static_cast<unsigned>(position);
+        // Each of the performance's inputs and outputs by name; one the rig
+        // does not know (renamed in this performance, say) takes the channel
+        // of its place, or the first that none of the others has.
+        auto channels = [&](const char* key, const std::vector<std::string>& names) {
+            std::vector<int> found(names.size(), -1);
+            for (size_t i = 0; i < names.size(); ++i)
+                if (j.contains(key))
+                    for (const auto& [n, ch] : j.at(key).items())
+                        if (same(n, names[i])) {
+                            const int v = ch.get<int>();
+                            if (v < 1)
+                                throw std::runtime_error(std::string(key) + ": channels are numbered from 1");
+                            found[i] = v - 1;
+                        }
+            auto taken = [&](int ch) { return std::find(found.begin(), found.end(), ch) != found.end(); };
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (found[i] >= 0)
+                    continue;
+                int ch = static_cast<int>(i);
+                for (int free = 0; taken(ch); ++free)
+                    ch = free;
+                found[i] = ch;
+                c.warnings.push_back(path + ": no channel for " + (key[0] == 'i' ? "input" : "output") + " '" + names[i] + "'; using channel " +
+                                     std::to_string(ch + 1));
+            }
+            return std::vector<unsigned>(found.begin(), found.end());
         };
-        c.audio.inputChannels.clear();
-        for (size_t i = 0; i < c.inputs.size(); ++i)
-            c.audio.inputChannels.push_back(channel("inputs", c.inputs[i], i));
-        c.audio.outputChannels.clear();
-        for (size_t o = 0; o < c.outputs.size(); ++o)
-            c.audio.outputChannels.push_back(channel("outputs", c.outputs[o], o));
+        c.audio.inputChannels = channels("inputs", c.inputs);
+        c.audio.outputChannels = channels("outputs", c.outputs);
         if (j.contains("midi")) {
             const json& m = j.at("midi");
             c.midi.enabled = m.value("enabled", c.midi.enabled);

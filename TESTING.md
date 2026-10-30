@@ -485,6 +485,15 @@ Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn e
 1. **Eject.** The block panel's middle button says **Eject**, and undo says "Ejected ...".
 2. **Remove.** Remove a plug-in in the middle of a chain (its button or Delete): its wires stay where its dots were, loose, and nothing is joined around it, so the chain goes silent after it. Drag another plug-in's dots onto the loose ends to plug it in there. **Undo**: the plug-in and its wires are back as they were. **Redo**: removed again, wires loose.
 
+## 23. Inputs and outputs stay put, move and rename (0.9.7)
+
+`bin/cue-app --version` should say 0.9.7.
+
+1. **No jumping.** On a chain with output 2 drawn above output 1, eject (or remove) the last plug-in before output 2: the output boxes stay where they were, and no wires cross.
+2. **Move.** Drag the input box, then an output box: they go where you put them, like plug-ins, and line up with a plug-in's height as they pass it. **Undo** puts each back. **Save** and open again: they stay.
+3. **Insert.** Insert a plug-in on the last wire of a row: the blocks after it, and the output at the end, move along to make room.
+4. **Rename.** Tap the input box: it lights orange and the right panel shows **Name**. Tap it, type a new name, Enter: the box, every chain and the tuner show it. Rename an output the same way: its wires stay. **Undo** after a rename, and undo further back past it: each step still works. **Save** and open again: the names stay and the sound comes out of the same outputs.
+
 ## What passes
 
 | Check | Pass when |

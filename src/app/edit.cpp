@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <memory>
 
 namespace cue {
@@ -22,6 +23,12 @@ namespace {
 bool fail(std::string* error, const std::string& why) {
     *error = why;
     return false;
+}
+
+std::string lower(std::string s) {
+    for (char& ch : s)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
 }
 
 std::vector<int> unchanged(size_t n) {
@@ -323,6 +330,56 @@ bool placePlugin(LiveRig& live, int chain, size_t slot, double x, double y, std:
     p.placed = true;
     p.x = x;
     p.y = y;
+    return true;
+}
+
+bool placePort(LiveRig& live, int chain, Port port, double x, double y, std::string* error) {
+    ChainSpec* cs = chainSpec(live.config, chain);
+    if (!cs)
+        return fail(error, "there is no chain number " + std::to_string(chain + 1));
+    if (port.kind == Port::Kind::Block)
+        return placePlugin(live, chain, static_cast<size_t>(port.index), x, y, error);
+    BoardPlace* at = &cs->inputAt;
+    if (port.kind == Port::Kind::Output) {
+        if (port.index < 0 || static_cast<size_t>(port.index) >= live.config.outputs.size())
+            return fail(error, "there is no output " + std::to_string(port.index + 1));
+        if (cs->outputsAt.size() < live.config.outputs.size())
+            cs->outputsAt.resize(live.config.outputs.size());
+        at = &cs->outputsAt[static_cast<size_t>(port.index)];
+    }
+    *at = {true, x, y};
+    return true;
+}
+
+bool renamePort(LiveRig& live, bool input, size_t index, const std::string& name, std::string* error) {
+    Config& config = live.config;
+    std::vector<std::string>& names = input ? config.inputs : config.outputs;
+    const std::string what = input ? "input" : "output";
+    if (index >= names.size())
+        return fail(error, "there is no " + what + " " + std::to_string(index + 1));
+    const size_t first = name.find_first_not_of(" \t"), last = name.find_last_not_of(" \t");
+    const std::string trimmed = first == std::string::npos ? "" : name.substr(first, last - first + 1);
+    if (trimmed.empty())
+        return fail(error, "an " + what + " needs a name");
+    // Requests name them so: "in" is a chain's input, in2 and out2 the second.
+    const std::string low = lower(trimmed), prefix = input ? "in" : "out";
+    const bool numbered = low.size() > prefix.size() && low.compare(0, prefix.size(), prefix) == 0 &&
+                          std::all_of(low.begin() + static_cast<long>(prefix.size()), low.end(), [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)); });
+    if (low == "in" || (numbered && low != prefix + std::to_string(index + 1)))
+        return fail(error, "'" + trimmed + "' is how requests name another " + what + "; choose another name");
+    for (size_t i = 0; i < names.size(); ++i)
+        if (i != index && lower(names[i]) == low)
+            return fail(error, "another " + what + " is named " + names[i]);
+    names[index] = trimmed;
+    // What names it by name follows.
+    if (input) {
+        for (auto& scene : config.scenes)
+            for (auto& cs : scene.chains)
+                if (cs.inputIndex == index)
+                    cs.input = trimmed;
+        if (config.tuner.inputIndex == index)
+            config.tuner.input = trimmed;
+    }
     return true;
 }
 
