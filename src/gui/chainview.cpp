@@ -1584,12 +1584,20 @@ void ChainView::removePlugin(int slot) {
     const QJsonObject take{{"cmd", "remove"}, {"chain", chain}, {"slot", slot}, {"token", token}};
     const QJsonObject back{{"cmd", "restore"}, {"token", token}};
     pin(*c);
-    s.change(take, [this, chain, slot, label, take, back](const QJsonObject& r) {
+    // Its wires stay, loose where its dots were, as when it is ejected:
+    // nothing is joined around it.
+    QVector<WireInfo> wires;
+    QVector<LooseInfo> loose;
+    unplugged(*c, slot, wires, loose);
+    const QJsonObject before = wiresRequest(*c, c->wires, c->loose), after = wiresRequest(*c, wires, loose);
+    s.change(after, [this](const QJsonObject& r) { s.check(r, "Not removed"); });
+    s.change(take, [this, chain, slot, label, take, back, before, after](const QJsonObject& r) {
         if (!s.check(r, "Not removed"))
             return;
         if (chain == chain_ && slot_ == slot)
             selectSlot(-1);
-        s.edited({"Removed " + label, chain, slot, back, take, -1});
+        s.edited({"Removed " + label, chain, slot, QJsonObject{{"cmd", "batch"}, {"requests", QJsonArray{back, before}}},
+                  QJsonObject{{"cmd", "batch"}, {"requests", QJsonArray{after, take}}}, -1});
         update();
     });
 }
@@ -1628,32 +1636,45 @@ void ChainView::rewire(const ChainInfo& c, const QVector<WireInfo>& wires, const
     update();
 }
 
-void ChainView::pullOut(int slot) {
-    const ChainInfo* c = s.chain(chain_);
-    if (!c || slot < 0 || slot >= c->numPlugins())
-        return;
-    const Board B(*c, s.perf.outputs.size(), moving_);
-    QVector<WireInfo> wires;
-    QVector<LooseInfo> loose = c->loose;
-    for (const WireInfo& w : c->wires) {
+// A plug-in's wires, as they would be with it off them: the others', and
+// its own left loose where its dots are (one into itself goes with it).
+void ChainView::unplugged(const ChainInfo& c, int slot, QVector<WireInfo>& wires, QVector<LooseInfo>& loose) const {
+    const Board B(c, s.perf.outputs.size(), moving_);
+    wires.clear();
+    loose = c.loose;
+    for (const WireInfo& w : c.wires) {
         const bool into = w.to.kind == PortInfo::Kind::Block && w.to.index == slot;
         const bool outOf = w.from.kind == PortInfo::Kind::Block && w.from.index == slot;
         if (into && !outOf)
             loose << LooseInfo::of(w, true, B.inPoint(w.to));
         else if (outOf && !into)
             loose << LooseInfo::of(w, false, B.outPoint(w.from));
-        else
-            wires << w; // another's, or into itself: that one goes with it
+        else if (!into)
+            wires << w;
     }
+}
+
+void ChainView::eject(int slot) {
+    const ChainInfo* c = s.chain(chain_);
+    if (!c || slot < 0 || slot >= c->numPlugins())
+        return;
+    QVector<WireInfo> wires;
+    QVector<LooseInfo> loose;
+    unplugged(*c, slot, wires, loose);
     const QString label = c->blocks[slot].label;
     if (loose.size() == c->loose.size()) {
-        emit s.message(label + " has no wires to pull out of", true);
+        emit s.message(label + " has no wires to eject from", true);
         return;
     }
-    // Off its wires, above where it was, so their loose ends show.
+    // Off its wires, above where it was, so their loose ends show. A wire
+    // into itself goes with it.
+    for (const WireInfo& w : c->wires)
+        if (w.from == PortInfo::block(slot) && w.to.kind == PortInfo::Kind::Block && w.to.index == slot)
+            wires << w;
+    const Board B(*c, s.perf.outputs.size(), moving_);
     const QPointF from = B.block[slot], to = B.freeNear(from - QPointF(0, Board::rowPitch * 0.8));
     moving_[slot] = to;
-    rewire(*c, wires, loose, "Pulled out " + label, {slot, from, to});
+    rewire(*c, wires, loose, "Ejected " + label, {slot, from, to});
     selectSlot(slot);
 }
 
@@ -2020,7 +2041,7 @@ void ChainView::panel(QPainter& p, const QRectF& r, const ChainInfo& c) {
     button(p, "bypass", QRectF(r.left() + pad, y, third, 50 * u), off ? "Turn on" : "Bypass",
            [this, chain = c.index, slot = slot_, off] { setBypass(chain, slot, !off); }, off ? color::green : color::text,
            off ? color::greenDark : color::border2, color::panel2, 15 * u);
-    button(p, "pull out", QRectF(r.left() + pad + third + 8 * u, y, third, 50 * u), "Pull out", [this, slot = slot_] { pullOut(slot); },
+    button(p, "eject", QRectF(r.left() + pad + third + 8 * u, y, third, 50 * u), "Eject", [this, slot = slot_] { eject(slot); },
            color::text, color::border2, color::panel2, 15 * u);
     button(p, "remove", QRectF(r.right() - pad - third, y, third, 50 * u), "Remove", [this, slot = slot_] { removePlugin(slot); }, color::red,
            color::border2, color::panel2, 15 * u);

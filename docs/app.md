@@ -112,10 +112,10 @@ selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
 room. **+ Plug-in** adds one to the board unwired. Both offer your
 favourite plug-ins, those the performance already has and the built-ins
 (gain, drive, lowpass, delay), and **Browse all plug-ins** for the rest. **Remove** on a block's panel, or Delete,
-takes a plug-in out with its wires, joining what fed it to what it fed.
-**Pull out** takes it off its wires instead, as you would unplug a pedal:
-it moves just off them, and its wires stay where its dots were, attached to
-nothing (dashed grey, ending in a ring) and carrying nothing. Drag a
+takes a plug-in out; its wires stay where its dots were, attached to
+nothing (dashed grey, ending in a ring) and carrying nothing, so nothing is
+joined around it. **Eject** takes it off its wires the same way, as you
+would unplug a pedal, and keeps it on the board, moved just above them. Drag a
 plug-in so its input or output dot comes near a loose end and it goes onto
 it, and stays there unless you keep dragging it away; let go there and the
 wire plugs into it, with the level, width and pan it had. Or drag a loose

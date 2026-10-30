@@ -1342,8 +1342,17 @@ private slots:
         const QJsonObject out = link.last("remove");
         QCOMPARE(out.value("slot").toInt(), 3);
         QCOMPARE(v->selectedSlot(), -1);
+        // Its wires were left loose first, not joined around it: Act's into
+        // it and its own on to Chorus.
+        const QJsonObject loosened = link.last("wires");
+        QCOMPARE(loosened.value("loose").toArray().size(), 2);
+        QCOMPARE(loosened.value("loose").toArray()[0].toObject().value("from").toInt(), 2);
+        QCOMPARE(loosened.value("loose").toArray()[1].toObject().value("to").toInt(), 4);
+        for (const QJsonValue& wv : loosened.value("wires").toArray())
+            QVERIFY(wv.toObject().value("from").toInt(-1) != 3 && wv.toObject().value("to").toInt(-1) != 3);
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
         QCOMPARE(link.last("restore").value("token").toString(), out.value("token").toString());
+        QCOMPARE(link.last("wires").value("loose").toArray().size(), 0);
         QCOMPARE(v->selectedSlot(), 3);
 
         // + Plug-in adds one to the board, unwired, in a free place.
@@ -1946,7 +1955,7 @@ private slots:
         QCOMPARE(v->selectedSlot(), 1);
         v->grab();
         const QPointF wasAt = Board(*s.chain(1), 2).block[1];
-        click(v, v->hitRect("pull out"));
+        click(v, v->hitRect("eject"));
         const QJsonObject pulled = link.last("wires");
         QVERIFY(!wired(pulled, 0, 1) && !wired(pulled, 1, 2) && wired(pulled, 2, 3));
         const QJsonArray loose = pulled.value("loose").toArray();

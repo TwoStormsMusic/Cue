@@ -174,10 +174,12 @@ private:
     void connectPorts(PortInfo from, PortInfo to);
     void removeWire(int wire);
     void removePlugin(int slot);
-    // Pulls a plug-in off its wires: they stay, loose, where its dots were,
-    // and it moves just below. A plug-in's dot dragged onto a loose end, or
-    // a loose end onto a dot, plugs it in again.
-    void pullOut(int slot);
+    // Ejects a plug-in from its wires: they stay, loose, where its dots
+    // were, and it moves just above. A plug-in's dot dragged onto a loose
+    // end, or a loose end onto a dot, plugs it in again. Remove leaves the
+    // wires loose the same way.
+    void eject(int slot);
+    void unplugged(const ChainInfo& c, int slot, QVector<WireInfo>& wires, QVector<LooseInfo>& loose) const;
     void dragLoose(int loose, QPointF pos, bool done);
     void removeLoose(int loose);
     void loosePanel(QPainter& p, const QRectF& r, const ChainInfo& c);

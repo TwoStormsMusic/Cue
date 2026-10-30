@@ -478,6 +478,13 @@ Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn e
 5. **Loose ends.** Pull a plug-in out, then drag one ring onto another plug-in's dot: it plugs in there (with the level the wire had). Tap the other loose wire, tap **Remove**: it goes. **Save** and open again with a loose wire left: it is still there.
 6. **Drop on a wire.** Add a plug-in (+ Plug-in, unwired), drag it over a wire: the wire lights orange dashed. Let go: the plug-in is on it, as with **Insert**.
 
+## 22. Eject, and Remove leaves wires loose (0.9.6)
+
+`bin/cue-app --version` should say 0.9.6. Step 21 still applies, with **Eject** where it says **Pull out**.
+
+1. **Eject.** The block panel's middle button says **Eject**, and undo says "Ejected ...".
+2. **Remove.** Remove a plug-in in the middle of a chain (its button or Delete): its wires stay where its dots were, loose, and nothing is joined around it, so the chain goes silent after it. Drag another plug-in's dots onto the loose ends to plug it in there. **Undo**: the plug-in and its wires are back as they were. **Redo**: removed again, wires loose.
+
 ## What passes
 
 | Check | Pass when |
