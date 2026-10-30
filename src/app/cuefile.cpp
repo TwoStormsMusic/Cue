@@ -289,6 +289,42 @@ struct Writer {
                       {"range", tunerRangeName(t.range)},
                       {"tolerance", t.tolerance},
                       {"names", t.flats ? "flats" : "sharps"}};
+        // The levels that are not as they start.
+        auto autoJson = [](const AutoSpec& a, json& j) {
+            if (a == AutoSpec{})
+                return;
+            j["auto"] = {{"measure", measureName(a.measure)}, {"target_db", a.targetDb}, {"seconds", a.seconds}};
+        };
+        json levels, ins = json::object(), outs = json::object();
+        for (size_t i = 0; i < c.inputs.size() && i < c.inputLevels.size(); ++i) {
+            const InputLevel& l = c.inputLevels[i];
+            json lj = json::object();
+            if (l.gainDb != 0.0f)
+                lj["gain_db"] = l.gainDb;
+            autoJson(l.autoSpec, lj);
+            if (!lj.empty())
+                ins[c.inputs[i]] = lj;
+        }
+        for (size_t o = 0; o < c.outputs.size() && o < c.outputLevels.size(); ++o) {
+            const OutputLevel& l = c.outputLevels[o];
+            json lj = json::object();
+            if (l.levelDb != 0.0f)
+                lj["level_db"] = l.levelDb;
+            if (l.muted)
+                lj["muted"] = true;
+            const OutputLevel plain;
+            if (l.limiter || l.ceilingDb != plain.ceilingDb || l.releaseMs != plain.releaseMs)
+                lj["limiter"] = {{"on", l.limiter}, {"ceiling_db", l.ceilingDb}, {"release_ms", l.releaseMs}};
+            autoJson(l.autoSpec, lj);
+            if (!lj.empty())
+                outs[c.outputs[o]] = lj;
+        }
+        if (!ins.empty())
+            levels["inputs"] = ins;
+        if (!outs.empty())
+            levels["outputs"] = outs;
+        if (!levels.empty())
+            j["levels"] = levels;
 
         json scenes = json::array();
         for (size_t s = 0; s < c.scenes.size(); ++s) {
@@ -692,6 +728,62 @@ struct Reader {
             if (names != "sharps" && names != "flats")
                 throw std::runtime_error("tuner names are sharps or flats");
             s.flats = names == "flats";
+        }
+        c.inputLevels.assign(c.inputs.size(), InputLevel{});
+        c.outputLevels.assign(c.outputs.size(), OutputLevel{});
+        if (j.contains("levels")) {
+            const json& l = j.at("levels");
+            auto db = [](const json& lj, const char* key, float now, float lowest, float highest) {
+                const float v = lj.value(key, now);
+                if (v < lowest || v > highest)
+                    throw std::runtime_error(std::string("levels: ") + key + " is " + std::to_string(static_cast<int>(lowest)) + " to " +
+                                             std::to_string(static_cast<int>(highest)));
+                return v;
+            };
+            auto readAuto = [&](const json& lj, AutoSpec& a) {
+                if (!lj.contains("auto"))
+                    return;
+                const json& aj = lj.at("auto");
+                const int m = measureOf(aj.value("measure", std::string(measureName(a.measure))));
+                if (m < 0)
+                    throw std::runtime_error("levels: auto measure is peak, rms or lufs");
+                a.measure = static_cast<AutoSpec::Measure>(m);
+                a.targetDb = db(aj, "target_db", a.targetDb, -60, 0);
+                a.seconds = db(aj, "seconds", a.seconds, 1, 60);
+            };
+            // By name; one the performance does not have is left out.
+            auto find = [&](const std::vector<std::string>& names, const std::string& name, const char* what) {
+                for (size_t k = 0; k < names.size(); ++k)
+                    if (lower(names[k]) == lower(name))
+                        return static_cast<int>(k);
+                c.warnings.push_back(path + ": levels for " + what + " '" + name + "', which this performance does not have, are left out");
+                return -1;
+            };
+            if (l.contains("inputs"))
+                for (const auto& [name, lj] : l.at("inputs").items()) {
+                    const int i = find(c.inputs, name, "input");
+                    if (i < 0)
+                        continue;
+                    InputLevel& in = c.inputLevels[i];
+                    in.gainDb = db(lj, "gain_db", in.gainDb, kLevelFloorDb, kLevelMaxDb);
+                    readAuto(lj, in.autoSpec);
+                }
+            if (l.contains("outputs"))
+                for (const auto& [name, lj] : l.at("outputs").items()) {
+                    const int o = find(c.outputs, name, "output");
+                    if (o < 0)
+                        continue;
+                    OutputLevel& out = c.outputLevels[o];
+                    out.levelDb = db(lj, "level_db", out.levelDb, kLevelFloorDb, kLevelMaxDb);
+                    out.muted = lj.value("muted", out.muted);
+                    if (lj.contains("limiter")) {
+                        const json& li = lj.at("limiter");
+                        out.limiter = li.value("on", true);
+                        out.ceilingDb = db(li, "ceiling_db", out.ceilingDb, -60, 0);
+                        out.releaseMs = db(li, "release_ms", out.releaseMs, 1, 5000);
+                    }
+                    readAuto(lj, out.autoSpec);
+                }
         }
 
         for (const json& sj : j.at("scenes")) {

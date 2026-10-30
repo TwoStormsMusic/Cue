@@ -866,6 +866,20 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
     return finishConfig(config, error);
 }
 
+const char* measureName(AutoSpec::Measure m) {
+    switch (m) {
+    case AutoSpec::Measure::Peak: return "peak";
+    case AutoSpec::Measure::Rms: return "rms";
+    case AutoSpec::Measure::Lufs: return "lufs";
+    }
+    return "peak";
+}
+
+int measureOf(const std::string& name) {
+    const std::string n = lower(name);
+    return n == "peak" ? 0 : n == "rms" ? 1 : n == "lufs" ? 2 : -1;
+}
+
 bool finishConfig(Config& config, std::string* error) {
     // Inputs and outputs: at least one of each, each name once, and a
     // channel for each (the ones not given take the channel of their place).
@@ -894,6 +908,8 @@ bool finishConfig(Config& config, std::string* error) {
     };
     fit(config.audio.inputChannels, config.inputs.size());
     fit(config.audio.outputChannels, config.outputs.size());
+    config.inputLevels.resize(config.inputs.size());
+    config.outputLevels.resize(config.outputs.size());
     // An input or output by name, or as in2 / out2.
     auto port = [](const std::vector<std::string>& names, const std::string& text, const char* prefix) {
         for (size_t k = 0; k < names.size(); ++k)

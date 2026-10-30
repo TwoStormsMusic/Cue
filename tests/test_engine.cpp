@@ -610,6 +610,93 @@ TEST(bypass_click_detector_catches_a_hard_cut) {
     CHECK_MSG(maxStep(h.out[0], from) > 2.0f * steady, "hard bypass not detected: %.5f vs %.5f", maxStep(h.out[0], from), steady);
 }
 
+TEST(input_and_output_levels_mute_and_the_limiter) {
+    Engine e(settings());
+    e.addChain(chain("A", slots(new GainProcessor(1.0f))));
+    CHECK(e.activate());
+    // Before the first block they apply at once.
+    e.setInputLevel(0, 6.0206f); // x2: the sine at 1.0
+    e.setOutputLevel(1, -6.0206f, false);
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    h.runSeconds(0.2);
+    const size_t end = h.out[0].size();
+    CHECK(std::fabs(peak(h.out[0], end - samples(0.1), end) - 1.0f) < 0.01f);
+    CHECK(std::fabs(peak(h.out[1], end - samples(0.1), end) - 0.5f) < 0.01f);
+    // Then they move over levelFadeMs, without a click.
+    const float sineStep = 1.0f * 2.0f * kPi * 110.0f / static_cast<float>(kRate);
+    size_t at = h.out[0].size();
+    e.setOutputLevel(0, -12.0f, false);
+    h.runSeconds(0.2);
+    CHECK(maxStep(h.out[0], at) <= 1.1f * sineStep);
+    CHECK(std::fabs(peak(h.out[0], h.out[0].size() - samples(0.1), h.out[0].size()) - 0.2512f) < 0.01f);
+    // Muted: silence, with a fade; the other output plays on.
+    at = h.out[0].size();
+    e.setOutputLevel(0, -12.0f, true);
+    h.runSeconds(0.2);
+    CHECK(maxStep(h.out[0], at) <= 1.1f * sineStep);
+    CHECK(peak(h.out[0], h.out[0].size() - samples(0.1), h.out[0].size()) == 0.0f);
+    CHECK(peak(h.out[1], h.out[1].size() - samples(0.1), h.out[1].size()) > 0.45f);
+    e.setOutputLevel(0, 0.0f, false);
+    h.runSeconds(0.2);
+    // The limiter: nothing over its ceiling, from the first sample over it.
+    e.setLimiter(0, true, -6.0f, 50.0f);
+    at = h.out[0].size();
+    h.runSeconds(0.5);
+    const float ceiling = std::pow(10.0f, -6.0f / 20.0f);
+    CHECK_MSG(peak(h.out[0], at, h.out[0].size()) <= ceiling + 1e-4f, "limited peak %.4f", peak(h.out[0], at, h.out[0].size()));
+    CHECK(peak(h.out[0], h.out[0].size() - samples(0.1), h.out[0].size()) > 0.9f * ceiling);
+    CHECK(e.takeLimiterDb(0) < -5.0f);
+    CHECK(e.takeLimiterDb(1) == 0.0f);
+    // Off, it lets go as it would release.
+    at = h.out[0].size();
+    e.setLimiter(0, false, -6.0f, 50.0f);
+    h.runSeconds(0.5);
+    CHECK(maxStep(h.out[0], at) <= 1.5f * sineStep);
+    CHECK(peak(h.out[0], h.out[0].size() - samples(0.1), h.out[0].size()) > 0.99f);
+}
+
+TEST(measuring_hands_over_the_inputs_and_outputs_before_their_levels) {
+    Engine e(settings());
+    e.addChain(chain("A", slots(new GainProcessor(1.0f))));
+    CHECK(e.activate());
+    e.setInputLevel(0, 6.0206f);
+    e.setOutputLevel(0, -20.0f, false);
+    Harness h{e, Sine{}};
+    h.settleOn(0);
+    LevelBin bin;
+    CHECK(!e.nextLevelBin(bin)); // only while asked
+    e.measure(true);
+    h.runSeconds(1.0);
+    double frames = 0, inE = 0, outE = 0, inK = 0;
+    float inPeak = 0, outPeak = 0;
+    int bins = 0;
+    while (e.nextLevelBin(bin)) {
+        ++bins;
+        frames += bin.frames;
+        inE += bin.in[0].energy;
+        inK += bin.in[0].kEnergy;
+        outE += bin.out[0].energy;
+        inPeak = std::max(inPeak, bin.in[0].peak);
+        outPeak = std::max(outPeak, bin.out[0].peak);
+    }
+    CHECK_MSG(bins >= 90 && bins <= 101, "%d bins", bins);
+    CHECK(std::fabs(inPeak - 0.5f) < 0.01f);  // as it arrives
+    CHECK(std::fabs(outPeak - 1.0f) < 0.01f); // after the input's level, before the output's
+    // A sine's mean square is half its peak squared.
+    CHECK(std::fabs(10 * std::log10(inE / frames) - 10 * std::log10(0.125)) < 0.1);
+    CHECK(std::fabs(10 * std::log10(outE / frames) - 10 * std::log10(0.5)) < 0.1);
+    // K-weighting takes a little off at 110 Hz (its high pass).
+    const double kDrop = 10 * std::log10(inK / inE);
+    CHECK_MSG(kDrop < 0.0 && kDrop > -1.0, "K-weighting at 110 Hz: %.2f dB", kDrop);
+    e.measure(false);
+    h.runSeconds(0.1);
+    while (e.nextLevelBin(bin)) {
+    }
+    h.runSeconds(0.1);
+    CHECK(!e.nextLevelBin(bin));
+}
+
 TEST(bypass_mode_mute_passes_silence_and_thru_passes_the_input) {
     auto c = chain("A", slots(new GainProcessor(0.5f), new GainProcessor(0.5f)));
     c->setMuteOnBypass(1, true);

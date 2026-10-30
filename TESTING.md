@@ -492,7 +492,20 @@ Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn e
 1. **No jumping.** On a chain with output 2 drawn above output 1, eject (or remove) the last plug-in before output 2: the output boxes stay where they were, and no wires cross.
 2. **Move.** Drag the input box, then an output box: they go where you put them, like plug-ins, and line up with a plug-in's height as they pass it. **Undo** puts each back. **Save** and open again: they stay.
 3. **Insert.** Insert a plug-in on the last wire of a row: the blocks after it, and the output at the end, move along to make room.
-4. **Rename.** Tap the input box: it lights orange and the right panel shows **Name**. Tap it, type a new name, Enter: the box, every chain and the tuner show it. Rename an output the same way: its wires stay. **Undo** after a rename, and undo further back past it: each step still works. **Save** and open again: the names stay and the sound comes out of the same outputs.
+4. **Rename.** Tap the input box: it lights orange and the right panel shows its name (from 0.9.8, on its card under **Inputs**). Tap it, type a new name, Enter: the box, every chain and the tuner show it. Rename an output the same way: its wires stay. **Undo** after a rename, and undo further back past it: each step still works. **Save** and open again: the names stay and the sound comes out of the same outputs.
+
+## 24. Gain Stage, output levels, limiter and Auto (0.9.8)
+
+`bin/cue-app --version` should say 0.9.8. Step 23 still applies, with the name on the card (see 1).
+
+1. **Gain Stage.** Tap a chain's input box: the right panel says **Gain Stage** with **Chain**, **Inputs** and **Outputs**. On **Inputs**, each input is a card: tap its name to rename it, as before.
+2. **Input gain.** Play and move Bass's fader: the sound and its meter get louder or quieter, and the input box shows the gain under its name. Switch to another chain: same gain, and its input box's Gain Stage shows the same. Double-tap the fader: back to 0 dB. Tap the dB box, type `6`, Enter. **Undo** works for each.
+3. **Auto.** Pick **Peak**, `−12`, `5 s` (tap them to change). Tap **Auto**: it says **Play…**; play: it counts to 5 s, then sets the gain, and a message says what it heard. Your loudest notes now peak near −12 dB on the meter. Try **RMS** and **LUFS** too. Tap **Auto** while it runs to stop it. **Undo** puts the gain back.
+4. **Outputs.** On **Outputs**, move FOH's fader: only FOH changes, in every chain. **Mute** Amp: the Amp box says muted and greys out, and the amp goes quiet with a short fade, not a click; **Unmute**.
+5. **Limiter.** Turn FOH's level up past +6 dB and play hard, then tap **Limiter**: FOH's meter stops at the ceiling (−1 dB) and an orange bar under it shows how far it turns down. Tap the ceiling, type `-6`: it holds there. No added latency (play and listen: no delay). Turn it off: the level comes back smoothly.
+6. **Chain.** The **Chain** tab shows the input this chain plays (the same card) and this chain's wires into the outputs with their levels; tap one to set it.
+7. **Output box.** Tap an output box: its panel is that output's card.
+8. **Kept.** **Save**, quit, open again: gains, levels, mutes, the limiter and Auto's settings are as you left them.
 
 ## What passes
 

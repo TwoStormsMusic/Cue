@@ -8,6 +8,7 @@
 
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
@@ -82,6 +83,19 @@ public:
     bool isFavourite(const ScannedPlugin& p) const { return settings.favourites.contains(p.key()); }
     void setFavourite(const ScannedPlugin& p, bool on);
 
+    // Auto running on an input ("in 0") or an output ("out 1"): waiting for
+    // signal or listening, and for how long of how long.
+    struct AutoNow {
+        bool listening = false;
+        double seconds = 0, of = 0;
+    };
+    QHash<QString, AutoNow> autoNow;
+    static QString autoKey(bool input, int index) { return QString(input ? "in %1" : "out %1").arg(index); }
+    // An input's gain or an output's level, mute, limiter or Auto settings
+    // (the fields of a level request); Auto started or stopped.
+    void setLevel(bool input, int index, const QJsonObject& fields, std::function<void(const QJsonObject&)> then = {});
+    void runAuto(bool input, int index, bool cancel);
+
     // Asks the engine for a change to the routing (add, remove, restore,
     // wire, unwire, place). The performance follows its answer, which then
     // goes to then.
@@ -124,6 +138,7 @@ private:
     // What a change's answer (or an event) says the performance is now.
     void follow(const QJsonObject& request, const QJsonObject& reply);
     void setWire(int chain, const QJsonObject& wire);
+    void setLevels(const QJsonObject& io);
 
     void takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing);
 

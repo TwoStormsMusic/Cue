@@ -104,10 +104,29 @@ made from it (an .RPP) are as for any wire.
 
 The input and output boxes move like plug-ins: drag one anywhere. Once
 anything on a chain's board changes they stay where they are, so an output
-that loses its wires (a plug-in ejected or removed) does not jump. Tap one
-to select it: its panel shows its **Name**, to change. The name is this
-performance's, saved with it, not a setting: every chain's wires and the
-tuner follow it, and it plays on the same sound card channel.
+that loses its wires (a plug-in ejected or removed) does not jump.
+
+Tap the input box for the **Gain Stage**. Its tabs are **Chain** (the input
+this chain plays, and its wires into the outputs with their levels: tap one
+to set it), **Inputs** and **Outputs**. Inputs and Outputs are a card for
+each input and output of the performance, the same in every chain's Gain
+Stage: change one anywhere and every chain hears it. A card has the name (tap
+to rename it), the level (tap to type one, or `off`), a meter, a fader
+(double tap: 0 dB) and **Auto**. An input's gain comes before every chain
+that plays it: its calibration, from off through -24 to +36 dB. An
+output's level comes after every chain, from off to +12 dB, then **Mute**
+and the **Limiter**, which turns any peak over its ceiling (tap the `≤`
+box to type it; -1 dB to start) down at once, with no added latency; an
+orange bar under the meter shows how far. **Auto** works as the Gain Stage
+plug-in's: pick what it measures (Peak, RMS, LUFS), the target and how long
+it listens, tap **Auto** and play. It waits for sound, listens, then sets the
+gain so what it heard reaches the target; tap it again to stop. The box on
+the board shows the gain or level under the name, and **muted**. Tap an
+output box for that output's card.
+
+Names and levels are this performance's, saved with it, not settings:
+every chain's wires and the tuner follow a new name, and it plays on the
+same sound card channel. Each change can be undone.
 
 To move several plug-ins at once, Shift-click them (or turn on **Select**,
 beside **+ Plug-in**, and tap them), or Shift-drag (with **Select** on, drag)

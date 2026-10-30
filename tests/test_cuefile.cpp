@@ -26,6 +26,16 @@ void writeFile(const std::string& path, const std::string& data) { std::ofstream
 
 std::string bytes(const std::vector<uint8_t>& v) { return std::string(v.begin(), v.end()); }
 
+// A .cue holding only performance.json.
+std::string zipWith(const std::string& path, const std::string& json) {
+    mz_zip_archive z{};
+    mz_zip_writer_init_file(&z, path.c_str(), 0);
+    mz_zip_writer_add_mem(&z, "performance.json", json.data(), json.size(), MZ_DEFAULT_COMPRESSION);
+    mz_zip_writer_finalize_archive(&z);
+    mz_zip_writer_end(&z);
+    return path;
+}
+
 // A performance with every kind of thing a .cue holds.
 std::string kPerformance(const std::string& dir) {
     return R"(
@@ -389,6 +399,69 @@ tap = out2
     CHECK(s.audio.inputChannels == (std::vector<unsigned>{1, 0}));
     CHECK(s.audio.outputChannels == (std::vector<unsigned>{1, 0, 2}));
     CHECK(s.warnings.size() == 1 && s.warnings[0].find("In-ear") != std::string::npos);
+}
+
+TEST(cue_file_keeps_the_levels_by_name) {
+    const std::string dir = tempDir();
+    Config ini;
+    std::string err;
+    CHECK_MSG(parseConfigText(R"(
+[performance Duo]
+inputs = Bass, Synth
+outputs = FOH, Amp
+[audio]
+device = hw:Test
+[chain Clean]
+plugin = builtin:gain 1
+)", dir + "/duo.ini", ini, &err), "%s", err.c_str());
+    CHECK(ini.inputLevels.size() == 2 && ini.outputLevels.size() == 2);
+    ini.inputLevels[1].gainDb = 4.5f;
+    ini.inputLevels[1].autoSpec = {AutoSpec::Measure::Rms, -18.0f, 10.0f};
+    ini.outputLevels[0].levelDb = -3.0f;
+    ini.outputLevels[0].muted = true;
+    ini.outputLevels[0].limiter = true;
+    ini.outputLevels[0].ceilingDb = -2.0f;
+    ini.outputLevels[1].levelDb = kLevelFloorDb;
+    std::string text;
+    CHECK_MSG(performanceText(ini, text, &err), "%s", err.c_str());
+    // Only what is not as it starts, by name.
+    CHECK_MSG(text.find("\"Bass\"") == std::string::npos || text.find("\"levels\"") != std::string::npos, "%s", text.c_str());
+    CHECK(text.find("\"gain_db\": 4.5") != std::string::npos);
+    CHECK(text.find("\"rms\"") != std::string::npos);
+    CHECK_MSG(saveCue(ini, dir + "/duo.cue", &err), "%s", err.c_str());
+
+    Config c;
+    CHECK_MSG(loadCue(dir + "/duo.cue", c, &err), "%s", err.c_str());
+    CHECK(c.inputLevels.size() == 2 && c.outputLevels.size() == 2);
+    if (c.inputLevels.size() != 2 || c.outputLevels.size() != 2)
+        return;
+    CHECK(c.inputLevels[0].gainDb == 0.0f && c.inputLevels[0].autoSpec == AutoSpec{});
+    CHECK(c.inputLevels[1].gainDb == 4.5f);
+    CHECK(c.inputLevels[1].autoSpec.measure == AutoSpec::Measure::Rms && c.inputLevels[1].autoSpec.targetDb == -18.0f &&
+          c.inputLevels[1].autoSpec.seconds == 10.0f);
+    const OutputLevel& foh = c.outputLevels[0];
+    CHECK(foh.levelDb == -3.0f && foh.muted && foh.limiter && foh.ceilingDb == -2.0f && foh.releaseMs == 100.0f);
+    CHECK(c.outputLevels[1].levelDb == kLevelFloorDb && !c.outputLevels[1].muted && !c.outputLevels[1].limiter);
+    CHECK(c.warnings.empty());
+
+    // Levels for an output the performance does not have: left out, with a warning.
+    std::string edited;
+    CHECK(performanceText(c, edited, &err));
+    const size_t at = edited.find("\"FOH\": {");
+    CHECK(at != std::string::npos);
+    if (at == std::string::npos)
+        return;
+    edited.replace(at, 5, "\"Monitor\"");
+    Config o;
+    CHECK_MSG(loadCue(zipWith(dir + "/other.cue", edited), o, &err), "%s", err.c_str());
+    CHECK(o.outputLevels.size() == 2 && o.outputLevels[0].levelDb == 0.0f && !o.outputLevels[0].muted);
+    CHECK(o.warnings.size() == 1 && o.warnings[0].find("Monitor") != std::string::npos);
+    // One out of range is refused.
+    std::string loud = edited;
+    loud.replace(loud.find("\"gain_db\": 4.5"), 14, "\"gain_db\": 99");
+    Config l;
+    CHECK(!loadCue(zipWith(dir + "/loud.cue", loud), l, &err));
+    CHECK_MSG(err.find("gain_db") != std::string::npos, "%s", err.c_str());
 }
 
 TEST(cue_file_keeps_loose_wires) {

@@ -34,6 +34,7 @@ A **performance** is the whole config: **scenes** in the order you play them. A 
 | Plug-in editors: each plug-in's own window, opened by the engine on the stage computer's screen over the app, drawn between blocks and never on the audio thread | done, Neural DSP through yabridge tested on the rig |
 | Routing board in the app: wires drawn between plug-ins, splits and merges, side-chains, each wire's level, width and pan, feedback wires (one block late, off unless Settings allows them), wires drawn as lettered jump cuts, several plug-ins moved at once, plug-ins ejected from their wires (or removed) leaving them loose, and plugged back in (loose wires that snap), Thru or Mute when bypassed, inputs and outputs moved and renamed per performance; a plug-in scanner (each file opened in a helper process) and browser | done, tested offline |
 | Chains and scenes added, copied, moved, set (pedal, FCB display, warm chain, actions) and taken out from the app while a chain plays, all with undo | done, tested offline |
+| Gain Stage in the app (the input box): every input's gain and every output's level, mute and zero-latency limiter, the same in every chain, with meters and Auto (peak, RMS or LUFS to a target) | done, tested offline |
 | Per-plug-in process isolation | **not yet** |
 | MIDI learn, looper, LV2, JACK, PipeWire | later |
 

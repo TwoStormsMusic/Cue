@@ -139,10 +139,39 @@ struct ControlInfo {
     bool mutes = false; // has a mute line: muting the outputs is what it is for
 };
 
+// Auto, as the Gain Stage does it: what it measures, the level it aims for
+// and how long it listens.
+struct AutoInfo {
+    QString measure = "peak"; // peak, rms, lufs
+    double targetDb = -12, seconds = 5;
+    static AutoInfo fromJson(const QJsonObject& j);
+    QJsonObject json() const;
+};
+
+// The performance's levels, the same whichever scene plays: an input's gain
+// before every chain, an output's level, mute and limiter after them all.
+// -100 dB is silence.
+struct InputLevel {
+    double gainDb = 0;
+    AutoInfo autoSet;
+};
+struct OutputLevel {
+    double levelDb = 0;
+    bool muted = false, limiter = false;
+    double ceilingDb = -1, releaseMs = 100;
+    AutoInfo autoSet;
+};
+struct IoLevels {
+    QVector<InputLevel> inputs;
+    QVector<OutputLevel> outputs;
+    static IoLevels fromJson(const QJsonObject& io);
+};
+
 struct Performance {
     bool valid = false;
     QString name;
     QStringList inputs, outputs;
+    IoLevels levels; // one for each input and output
     QVector<SceneInfo> scenes;
     QVector<ChainInfo> chains; // scene by scene, in order
     QVector<ControlInfo> controls;
@@ -171,7 +200,8 @@ struct ControlStatus {
 
 struct Level {
     QString name;
-    double peakDb = -120;
+    double peakDb = -120;  // an input after its gain, an output as it goes out
+    double limitDb = 0;    // how far an output's limiter turned it down
 };
 
 struct Status {

@@ -65,6 +65,12 @@ std::unique_ptr<Processor> makeBuiltin(const PluginSpec& spec, std::string* erro
 // the engine spareChains empty ones besides, for chains added as it plays.
 bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains = 0);
 
+// The performance's levels (Config::inputLevels, outputLevels) to the
+// engine: all of them, or one input or output.
+void postLevels(Engine& engine, const Config& config);
+void postInputLevel(Engine& engine, const Config& config, size_t input);
+void postOutputLevel(Engine& engine, const Config& config, size_t output);
+
 // A plug-in for a chain that is playing: loaded, activated for the engine,
 // with its state and params set. Not yet in any chain.
 bool loadLivePlugin(const PluginSpec& spec, const EngineSettings& engine, std::unique_ptr<Processor>& out, std::string* error);

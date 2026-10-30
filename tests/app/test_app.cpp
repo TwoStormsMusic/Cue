@@ -2134,9 +2134,9 @@ private slots:
         v->grab();
         click(v, v->hitRect("io in"));
         v->grab();
-        QVERIFY(!v->hitRect("io name").isEmpty());
+        QVERIFY(!v->hitRect("io in 0 name").isEmpty());
         shot(v, "routing-input-selected");
-        click(v, v->hitRect("io name"));
+        click(v, v->hitRect("io in 0 name"));
         v->grab();
         v->typeEntry("Bass DI");
         const QJsonObject renamed = link.last("rename");
@@ -2153,7 +2153,7 @@ private slots:
         v->grab();
         click(v, v->hitRect("io out 0"));
         v->grab();
-        click(v, v->hitRect("io name"));
+        click(v, v->hitRect("io out 0 name"));
         v->grab();
         v->typeEntry("Front");
         QCOMPARE(link.last("rename").value("output").toInt(-1), 0);
@@ -2165,7 +2165,128 @@ private slots:
         // Tapped again, it is let go.
         click(v, v->hitRect("io out 0"));
         v->grab();
-        QVERIFY(v->hitRect("io name").isEmpty());
+        QVERIFY(v->hitRect("io out 0 name").isEmpty());
+    }
+
+    void the_gain_stage_sets_the_levels_of_the_whole_performance() {
+        // The engine's levels, as it sends them back.
+        FakeLink link;
+        QJsonObject io{{"inputs", QJsonArray{QJsonObject{{"name", "Bass"}, {"gain_db", 0}}}},
+                       {"outputs", QJsonArray{QJsonObject{{"name", "FOH"}, {"level_db", 0}}, QJsonObject{{"name", "Amp"}, {"level_db", 0}}}}};
+        link.answer = [&](const QJsonObject& r) -> QJsonObject {
+            const QString cmd = r.value("cmd").toString();
+            if (cmd != "level" && cmd != "auto")
+                return {{"ok", true}};
+            const bool in = r.contains("input");
+            QJsonArray list = io[in ? "inputs" : "outputs"].toArray();
+            const int k = r.value(in ? "input" : "output").toInt();
+            QJsonObject one = list[k].toObject();
+            for (const char* key : {"gain_db", "level_db", "muted", "auto"})
+                if (r.contains(key))
+                    one[key] = r.value(key);
+            if (r.contains("limiter")) {
+                QJsonObject lim = one["limiter"].toObject();
+                const QJsonObject asked = r["limiter"].toObject();
+                for (auto it = asked.begin(); it != asked.end(); ++it)
+                    lim[it.key()] = it.value();
+                one["limiter"] = lim;
+            }
+            list[k] = one;
+            io[in ? "inputs" : "outputs"] = list;
+            QJsonObject reply{{"ok", true}, {"io", io}};
+            if (cmd == "auto" && !r.value("cancel").toBool())
+                reply["auto"] = QJsonObject{{in ? "input" : "output", k}, {"state", "waiting"}, {"seconds", 0}, {"of", 5}};
+            return reply;
+        };
+        AppState s(link);
+        fill(s);
+        MainWindow w(s);
+        w.resize(1280, 800);
+        w.showView("chains");
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        auto* v = static_cast<ChainView*>(w.view("chains"));
+        QCOMPARE(v->shownChain(), 1);
+
+        // The input box is the Gain Stage: Chain, Inputs and Outputs.
+        v->grab();
+        click(v, v->hitRect("io in"));
+        v->grab();
+        QVERIFY(!v->hitRect("io tab chain").isEmpty() && !v->hitRect("io tab inputs").isEmpty() && !v->hitRect("io tab outputs").isEmpty());
+        // Inputs: Bass's gain, moved on its fader, is the performance's.
+        const QRectF fader = v->hitRect("io in 0 fader");
+        QVERIFY(!fader.isEmpty());
+        QTest::mousePress(v, Qt::LeftButton, {}, fader.center().toPoint());
+        QTest::mouseMove(v, QPoint(int(fader.left() + fader.width() * 0.62), int(fader.center().y())));
+        QTest::mouseRelease(v, Qt::LeftButton, {}, QPoint(int(fader.left() + fader.width() * 0.62), int(fader.center().y())));
+        const QJsonObject gain = link.last("level");
+        QCOMPARE(gain.value("input").toInt(-1), 0);
+        QVERIFY2(gain.value("gain_db").toDouble() > 5, qPrintable(QString::number(gain.value("gain_db").toDouble())));
+        QCOMPARE(s.perf.levels.inputs.value(0).gainDb, gain.value("gain_db").toDouble());
+        // ...shown on every chain's input box, and undone like anything else.
+        v->grab();
+        shot(v, "gain-stage-inputs");
+        s.undo();
+        QCOMPARE(link.last("level").value("gain_db").toDouble(), 0.0);
+        QCOMPARE(s.perf.levels.inputs.value(0).gainDb, 0.0);
+        // A level typed.
+        click(v, v->hitRect("io in 0 value"));
+        v->grab();
+        v->typeEntry("+4.5");
+        QCOMPARE(link.last("level").value("gain_db").toDouble(), 4.5);
+
+        // Auto: started, waiting; what it set comes back and is undone.
+        v->grab();
+        click(v, v->hitRect("io in 0 auto"));
+        QCOMPARE(link.last("auto").value("input").toInt(-1), 0);
+        QVERIFY(s.autoNow.contains("in 0"));
+        emit link.event("auto", QJsonObject{{"input", 0}, {"state", "listening"}, {"seconds", 2.5}, {"of", 5}});
+        QVERIFY(s.autoNow.value("in 0").listening);
+        v->grab();
+        shot(v, "gain-stage-auto");
+        emit link.event("auto", QJsonObject{{"input", 0}, {"state", "done"}, {"level_db", -15.2}, {"from_db", 4.5}, {"to_db", 3.2}});
+        QVERIFY(!s.autoNow.contains("in 0"));
+        s.undo();
+        QCOMPARE(link.last("level").value("gain_db").toDouble(), 4.5);
+        // Its measure, cycled.
+        v->grab();
+        click(v, v->hitRect("io in 0 measure"));
+        QCOMPARE(link.last("level").value("auto").toObject().value("measure").toString(), QString("rms"));
+
+        // Outputs: mute, the limiter, and the level.
+        v->grab();
+        click(v, v->hitRect("io tab outputs"));
+        v->grab();
+        click(v, v->hitRect("io out 1 mute"));
+        QCOMPARE(link.last("level").value("output").toInt(-1), 1);
+        QVERIFY(s.perf.levels.outputs.value(1).muted);
+        v->grab();
+        click(v, v->hitRect("io out 0 limiter"));
+        QVERIFY(s.perf.levels.outputs.value(0).limiter);
+        v->grab();
+        shot(v, "gain-stage-outputs");
+        // The Amp box says it is muted.
+        s.undo();
+        QVERIFY(!s.perf.levels.outputs.value(0).limiter);
+
+        // Chain: its own input, and its wires into the outputs.
+        v->grab();
+        click(v, v->hitRect("io tab chain"));
+        v->grab();
+        QVERIFY(!v->hitRect("io in 0 fader").isEmpty());
+        int wiresShown = 0;
+        for (int i = 0; i < s.chain(1)->wires.size(); ++i)
+            wiresShown += !v->hitRect(QString("io wire %1").arg(i)).isEmpty();
+        QVERIFY(wiresShown >= 2);
+        shot(v, "gain-stage-chain");
+
+        // An output box is that output's card.
+        v->grab();
+        click(v, v->hitRect("io out 0"));
+        v->grab();
+        QVERIFY(!v->hitRect("io out 0 fader").isEmpty() && !v->hitRect("io out 0 ceiling").isEmpty());
+        QVERIFY(v->hitRect("io tab inputs").isEmpty());
+        shot(v, "output-card");
     }
 
     void with_the_engine() {
@@ -2287,6 +2408,29 @@ private slots:
         QVERIFY(!ask({{"cmd", "rename"}, {"output", 0}, {"name", s.perf.outputs.last()}}).value("ok").toBool());
         QVERIFY(ask({{"cmd", "rename"}, {"output", 0}, {"name", foh}}).value("ok").toBool());
         QCOMPARE(s.perf.outputs.first(), foh);
+        // The performance's levels: an input's gain, an output's level, mute
+        // and limiter, and Auto's settings, each set and sent back.
+        QCOMPARE(s.perf.levels.inputs.size(), s.perf.inputs.size());
+        QJsonObject lv = ask({{"cmd", "level"}, {"input", 0}, {"gain_db", 6.5}, {"auto", QJsonObject{{"measure", "lufs"}, {"target_db", -18}}}});
+        QVERIFY2(lv.value("ok").toBool(), qPrintable(lv.value("error").toString()));
+        QCOMPARE(s.perf.levels.inputs.value(0).gainDb, 6.5);
+        QCOMPARE(s.perf.levels.inputs.value(0).autoSet.measure, QString("lufs"));
+        lv = ask({{"cmd", "level"}, {"output", 1}, {"level_db", -4}, {"muted", true}, {"limiter", QJsonObject{{"on", true}, {"ceiling_db", -3}}}});
+        QVERIFY2(lv.value("ok").toBool(), qPrintable(lv.value("error").toString()));
+        const OutputLevel amp = s.perf.levels.outputs.value(1);
+        QVERIFY(amp.levelDb == -4 && amp.muted && amp.limiter && amp.ceilingDb == -3);
+        QVERIFY(!ask({{"cmd", "level"}, {"output", 1}, {"limiter", QJsonObject{{"ceiling_db", 3}}}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "level"}, {"output", 9}, {"level_db", 0}}).value("ok").toBool());
+        // Auto starts, waiting to hear something, and stops when asked.
+        QJsonObject started = ask({{"cmd", "auto"}, {"input", 0}});
+        QVERIFY2(started.value("ok").toBool(), qPrintable(started.value("error").toString()));
+        QCOMPARE(started.value("auto").toObject().value("state").toString(), QString("waiting"));
+        QVERIFY(ask({{"cmd", "auto"}, {"input", 0}, {"cancel", true}}).value("ok").toBool());
+        // Kept in the performance, as the app is told it.
+        s.reloadPerformance();
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.levels.outputs.value(1).ceilingDb, -3.0, 3000);
+        QVERIFY(ask({{"cmd", "level"}, {"input", 0}, {"gain_db", 0}}).value("ok").toBool());
+        QVERIFY(ask({{"cmd", "level"}, {"output", 1}, {"level_db", 0}, {"muted", false}, {"limiter", QJsonObject{{"on", false}}}}).value("ok").toBool());
         s.select(1);
         QTRY_COMPARE_WITH_TIMEOUT(s.status.selected, 1, 3000);
         const int had = s.perf.chains[1].numPlugins();

@@ -171,7 +171,19 @@ private:
     // renamed (for the whole performance).
     void dragIo(const PortInfo& port, QPointF pos, bool done);
     void renameIo(const PortInfo& port, const QString& name);
+    void renamePort(bool input, int index, const QString& name);
+    // The input's panel is the Gain Stage: tabs for this chain, every input
+    // and every output, each a card that sets its level for the whole
+    // performance. An output's panel is its card.
     void ioPanel(QPainter& p, const QRectF& r, const ChainInfo& c);
+    // A card: the name (a tap renames it), the level (a tap types one), a
+    // meter, a fader, mute and limiter for an output, and Auto. Returns its
+    // height.
+    double levelCard(QPainter& p, const QRectF& r, bool input, int index, bool own);
+    void dragLevel(bool input, int index, const QRectF& track, const QString& id, QPointF pos, bool done);
+    void sendLevel(bool input, int index, double db, bool done, double fromDb);
+    void meterBar(QPainter& p, const QRectF& r, const QString& key, bool output);
+    void followMeters();
     void tapBlock(int slot);
     void dragBlock(int slot, QPointF pos, bool done);
     void dragWire(const PortInfo& port, bool source, QPointF pos, bool done);
@@ -292,6 +304,24 @@ private:
     QVector<QPainterPath> looseShapes_;
     // The input or an output selected, and one being dragged.
     std::optional<PortInfo> ioSel_, ioDrag_;
+    // The Gain Stage's tab: this chain, the inputs, the outputs.
+    enum class IoTab { Chain, Inputs, Outputs } ioTab_ = IoTab::Inputs;
+    // A gain or level fader being moved: whose, from what, and to what now.
+    struct LevelDrag {
+        bool input = true;
+        int index = -1;
+        double fromDb = 0, nowDb = 0;
+        bool reset = false;
+    };
+    std::optional<LevelDrag> levelDrag_;
+    qint64 lastLevelSend_ = 0;
+    // The meters: they fall back slowly and hold their peak, as meters do.
+    struct IoMeter {
+        double shown = -120, peak = -120, limit = 0;
+        qint64 peakAt = 0, clipAt = -100000;
+    };
+    QHash<QString, IoMeter> ioMeters_;
+    qint64 lastMeters_ = 0;
     // The wire a dragged plug-in with none would go onto, or -1.
     int insertWire_ = -1;
     // Its gains while a slider moves, and as they were before.

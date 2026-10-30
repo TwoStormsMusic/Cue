@@ -17,6 +17,7 @@
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
 #include "app/arrange.h"
+#include "app/autolevel.h"
 #include "app/build.h"
 #include "app/config.h"
 #include "app/convert.h"
@@ -185,14 +186,24 @@ public:
                 peaks_[c].store(peak, std::memory_order_relaxed);
         }
     }
-    // Main thread: {"inputs": [{"name", "peak_db"}], "outputs": [...]}, -120 for silence.
-    Json take(const Config& config) {
+    // Main thread: {"inputs": [{"name", "peak_db"}], "outputs": [{"name",
+    // "peak_db", "limit_db"}]}, -120 for silence. An input as the chains hear
+    // it, after its gain; an output as it goes out, with how far its limiter
+    // turned it down.
+    Json take(const Config& config, Engine& engine) {
         Json j = {{"inputs", Json::array()}, {"outputs", Json::array()}};
         for (size_t c = 0; c < inputs_ + outputs_; ++c) {
-            const float peak = peaks_[c].exchange(0.0f, std::memory_order_relaxed);
-            const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
             const bool in = c < inputs_;
-            j[in ? "inputs" : "outputs"].push_back({{"name", in ? config.inputs[c] : config.outputs[c - inputs_]}, {"peak_db", std::round(db * 10) / 10}});
+            float peak = peaks_[c].exchange(0.0f, std::memory_order_relaxed);
+            if (in && c < config.inputLevels.size()) {
+                const float g = config.inputLevels[c].gainDb;
+                peak = g <= kLevelFloorDb ? 0.0f : peak * std::pow(10.0f, g / 20.0f);
+            }
+            const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
+            Json m = {{"name", in ? config.inputs[c] : config.outputs[c - inputs_]}, {"peak_db", std::round(db * 10) / 10}};
+            if (!in)
+                m["limit_db"] = std::round(engine.takeLimiterDb(c - inputs_) * 10) / 10;
+            j[in ? "inputs" : "outputs"].push_back(m);
         }
         return j;
     }
@@ -236,6 +247,44 @@ Json tunerJson(const TunerReading& r, const TunerSettings& s, const std::string&
     j["tolerance"] = s.tolerance;
     j["names"] = s.flats ? "flats" : "sharps";
     return j;
+}
+
+// The performance's levels, every input and output in order.
+Json autoJson(const AutoSpec& a) { return {{"measure", measureName(a.measure)}, {"target_db", a.targetDb}, {"seconds", a.seconds}}; }
+
+Json ioJson(const Config& config) {
+    Json j = {{"inputs", Json::array()}, {"outputs", Json::array()}};
+    for (size_t i = 0; i < config.inputs.size() && i < config.inputLevels.size(); ++i) {
+        const InputLevel& l = config.inputLevels[i];
+        j["inputs"].push_back({{"name", config.inputs[i]}, {"gain_db", l.gainDb}, {"auto", autoJson(l.autoSpec)}});
+    }
+    for (size_t o = 0; o < config.outputs.size() && o < config.outputLevels.size(); ++o) {
+        const OutputLevel& l = config.outputLevels[o];
+        j["outputs"].push_back({{"name", config.outputs[o]},
+                                {"level_db", l.levelDb},
+                                {"muted", l.muted},
+                                {"limiter", {{"on", l.limiter}, {"ceiling_db", l.ceilingDb}, {"release_ms", l.releaseMs}}},
+                                {"auto", autoJson(l.autoSpec)}});
+    }
+    return j;
+}
+
+// Auto's settings from a request, onto a; false with why if one is out of range.
+bool readAuto(const Json& j, AutoSpec& a, std::string* why) {
+    if (j.contains("measure")) {
+        const int m = measureOf(j.at("measure").get<std::string>());
+        if (m < 0)
+            return *why = "auto measure is peak, rms or lufs", false;
+        a.measure = static_cast<AutoSpec::Measure>(m);
+    }
+    const float target = j.value("target_db", a.targetDb), seconds = j.value("seconds", a.seconds);
+    if (target < -60 || target > 0)
+        return *why = "auto target_db is -60 to 0", false;
+    if (seconds < 1 || seconds > 60)
+        return *why = "auto seconds is 1 to 60", false;
+    a.targetDb = target;
+    a.seconds = seconds;
+    return true;
 }
 
 Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& show, const Config& config) {
@@ -639,7 +688,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     const size_t tunerInput = config.tuner.inputIndex;
 
     Meters meters(config.inputs.size(), config.outputs.size());
-    Json levels = meters.take(config);
+    Json levels = meters.take(config, engine);
 
     std::atomic<bool> marked{false};
     audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
@@ -665,6 +714,13 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     Kept<Removed> removedPlugins;
     Kept<RemovedChain> removedChains;
     Kept<RemovedScene> removedScenes;
+    // Auto, running on inputs and outputs: at most one on each.
+    std::vector<AutoRun> autoRuns;
+    auto autoEvent = [](const AutoRun& run, const char* state) {
+        Json j = {{run.input() ? "input" : "output", run.index()}, {"state", state}, {"seconds", std::round(run.seconds() * 10) / 10},
+                  {"of", run.spec().seconds}};
+        return j;
+    };
     // The performance as the app sees it: the file's, each chain's number
     // (its index, which stays while it plays), and which plug-ins have a
     // side-chain input to wire into.
@@ -673,6 +729,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         if (!performanceText(config, text, why))
             return false;
         out = Json::parse(text);
+        out["io"] = ioJson(config);
         Json& scenes = out.at("scenes");
         for (size_t s = 0; s < scenes.size() && s < config.scenes.size(); ++s)
             for (Json& chain : scenes[s].at("chains")) {
@@ -726,6 +783,81 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             if (!livePerformance(now, &err))
                 return refuse(err);
             reply["performance"] = now;
+        } else if (cmd == "level" || cmd == "auto") {
+            // An input's gain or an output's level, mute and limiter, the
+            // same whichever scene plays; or Auto, on one of them.
+            const bool in = req.contains("input");
+            if (in == req.contains("output"))
+                return refuse(cmd + " needs input or output (its number, from 0)");
+            const long index = req.at(in ? "input" : "output").get<long>();
+            if (index < 0 || static_cast<size_t>(index) >= (in ? config.inputLevels.size() : config.outputLevels.size()))
+                return refuse(std::string("there is no such ") + (in ? "input" : "output"));
+            const size_t k = static_cast<size_t>(index);
+            InputLevel inLevel = in ? config.inputLevels[k] : InputLevel{};
+            OutputLevel outLevel = in ? OutputLevel{} : config.outputLevels[k];
+            AutoSpec& spec = in ? inLevel.autoSpec : outLevel.autoSpec;
+            std::string why;
+            if (req.contains("auto") && !readAuto(req.at("auto"), spec, &why))
+                return refuse(why);
+            auto db = [&](const char* key, float now, float lowest, float highest, float& out) {
+                const float v = req.value(key, now);
+                if (std::isnan(v) || v < lowest || v > highest) {
+                    why = std::string(key) + " is " + std::to_string(static_cast<int>(lowest)) + " to " + std::to_string(static_cast<int>(highest));
+                    return false;
+                }
+                out = std::max(v, kLevelFloorDb);
+                return true;
+            };
+            if (cmd == "level") {
+                if (in && !db("gain_db", inLevel.gainDb, -1000, kLevelMaxDb, inLevel.gainDb))
+                    return refuse(why);
+                if (!in) {
+                    if (!db("level_db", outLevel.levelDb, -1000, kLevelMaxDb, outLevel.levelDb))
+                        return refuse(why);
+                    outLevel.muted = req.value("muted", outLevel.muted);
+                    if (req.contains("limiter")) {
+                        const Json& l = req.at("limiter");
+                        outLevel.limiter = l.value("on", outLevel.limiter);
+                        const float ceiling = l.value("ceiling_db", outLevel.ceilingDb), release = l.value("release_ms", outLevel.releaseMs);
+                        if (ceiling < -60 || ceiling > 0)
+                            return refuse("limiter ceiling_db is -60 to 0");
+                        if (release < 1 || release > 5000)
+                            return refuse("limiter release_ms is 1 to 5000");
+                        outLevel.ceilingDb = ceiling;
+                        outLevel.releaseMs = release;
+                    }
+                }
+            }
+            if (in) {
+                config.inputLevels[k] = inLevel;
+                postInputLevel(engine, config, k);
+            } else {
+                config.outputLevels[k] = outLevel;
+                postOutputLevel(engine, config, k);
+            }
+            if (cmd == "auto") {
+                const auto same = [&](const AutoRun& r) { return r.input() == in && r.index() == k; };
+                for (const AutoRun& r : autoRuns)
+                    if (same(r) && service.subscribed("auto"))
+                        service.publish("auto", autoEvent(r, "cancelled"));
+                autoRuns.erase(std::remove_if(autoRuns.begin(), autoRuns.end(), same), autoRuns.end());
+                if (!req.value("cancel", false)) {
+                    if (k >= LevelBin::kMax)
+                        return refuse("Auto measures the first " + std::to_string(LevelBin::kMax) + " inputs and outputs");
+                    if (autoRuns.empty()) {
+                        LevelBin stale;
+                        while (engine.nextLevelBin(stale)) {
+                        }
+                        engine.measure(true);
+                    }
+                    autoRuns.emplace_back(in, k, spec, config.audio.rate);
+                    reply["auto"] = autoEvent(autoRuns.back(), "waiting");
+                } else if (autoRuns.empty()) {
+                    engine.measure(false);
+                }
+            }
+            reply["io"] = ioJson(config);
+            service.publish("io", reply["io"]);
         } else if (cmd == "select") {
             int index = -1;
             if (req.contains("step")) {
@@ -1132,7 +1264,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         } else {
             refuse("unknown command '" + cmd +
                    "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
-                   "place, rename, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
+                   "place, rename, level, auto, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
                    "plugins, quit, subscribe, unsubscribe)");
         }
     };
@@ -1153,7 +1285,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     };
     Sampler sampler;
     Window window(engine.numChains());
-    auto nextSample = Clock::now(), nextStatus = Clock::now();
+    auto nextSample = Clock::now(), nextStatus = Clock::now(), nextAutoNote = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
     uint64_t reportedXruns = 0, reportedStartup = 0;
@@ -1192,6 +1324,51 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
         // What edits replaced, now that the audio thread is done with it.
         engine.collect();
+        // Auto: what the engine measured, to each run; a run that has heard
+        // enough sets its gain or level.
+        if (!autoRuns.empty()) {
+            LevelBin bin;
+            while (engine.nextLevelBin(bin))
+                for (AutoRun& run : autoRuns)
+                    run.add(bin);
+            const bool note = Clock::now() >= nextAutoNote;
+            if (note)
+                nextAutoNote = Clock::now() + std::chrono::milliseconds(200);
+            bool changed = false;
+            for (size_t k = 0; k < autoRuns.size();) {
+                const AutoRun& run = autoRuns[k];
+                if (run.state() != AutoRun::State::Done) {
+                    if (note && service.subscribed("auto"))
+                        service.publish("auto", autoEvent(run, run.state() == AutoRun::State::Waiting ? "waiting" : "listening"));
+                    ++k;
+                    continue;
+                }
+                Json ev = autoEvent(run, "done");
+                const double heard = run.levelDb();
+                if (heard <= AutoRun::kNothingDb) {
+                    ev["state"] = "failed";
+                    ev["error"] = "it heard nothing louder than -70 dB";
+                } else {
+                    float& gain = run.input() ? config.inputLevels[run.index()].gainDb : config.outputLevels[run.index()].levelDb;
+                    ev["level_db"] = std::round(heard * 10) / 10;
+                    ev["from_db"] = gain;
+                    gain = static_cast<float>(std::round(run.gainDb() * 10) / 10);
+                    ev["to_db"] = gain;
+                    if (run.input())
+                        postInputLevel(engine, config, run.index());
+                    else
+                        postOutputLevel(engine, config, run.index());
+                    changed = true;
+                }
+                if (service.subscribed("auto"))
+                    service.publish("auto", ev);
+                autoRuns.erase(autoRuns.begin() + static_cast<long>(k));
+            }
+            if (changed)
+                service.publish("io", ioJson(config));
+            if (autoRuns.empty())
+                engine.measure(false);
+        }
         // A plug-in scan: how far it is, and what it found once it ends.
         if (scanner->takeProgressed() && service.subscribed("scan"))
             service.publish("scan", scanProgressJson(*scanner));
@@ -1247,7 +1424,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 nextSample = now + std::chrono::milliseconds(33);
             lastSample = sampler.take(st, engine);
             window.add(lastSample);
-            levels = meters.take(config);
+            levels = meters.take(config, engine);
             if (service.subscribed("status"))
                 service.publish("status", status());
             // The tuner listens while someone looks at it.

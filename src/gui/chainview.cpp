@@ -1,4 +1,5 @@
 #include "gui/chainview.h"
+#include "gui/levels.h"
 
 #include <QDateTime>
 #include <QFontMetricsF>
@@ -25,32 +26,6 @@ namespace {
 
 const QColor kSilentWire{0x6B, 0x6B, 0x73};
 const QColor kDot{0xA1, 0xA1, 0xAA};
-constexpr double kOffDb = -96;
-
-// A wire's level on its fader: 0 dB three quarters along, +12 dB at the
-// end, and below 0 dB a fader's curve down to silent.
-double levelToFader(double db) {
-    if (db <= kOffDb)
-        return 0;
-    if (db >= 0)
-        return 0.75 + std::min(db, 12.0) / 12.0 * 0.25;
-    return 0.75 * std::pow(10.0, db / 60.0);
-}
-
-double faderToLevel(double f) {
-    if (f >= 0.75)
-        return (f - 0.75) / 0.25 * 12.0;
-    if (f <= levelToFader(kOffDb + 0.1))
-        return kOffDb;
-    return 60.0 * std::log10(f / 0.75);
-}
-
-QString levelText(double db) {
-    if (db <= kOffDb)
-        return "off";
-    const double r = std::round(db * 10) / 10;
-    return QString("%1%2 dB").arg(r > 0 ? "+" : r < 0 ? "−" : "").arg(std::fabs(r), 0, 'f', 1);
-}
 
 // The panel says L30; the wire's tag, 30L.
 QString panText(double pan, bool tag) {
@@ -187,6 +162,7 @@ ChainView::ChainView(AppState& state, QWidget* parent) : Surface(state, parent) 
     connect(&refresh_, &QTimer::timeout, this, &ChainView::requestPlugin);
     // The chain playing, until another is picked here.
     connect(&s, &AppState::statusChanged, this, [this] {
+        followMeters();
         if (followPlaying_ && s.playing() != chain_ && s.chain(s.playing()))
             showChain(s.playing());
         if (isVisible())
@@ -880,11 +856,21 @@ void ChainView::canvas(QPainter& p, const QRectF& r, const ChainInfo& c) {
         p.setFont(typeface(Face::Mono, 12 * k));
         p.drawText(b.adjusted(0, b.height() / 2 + 2 * k, 0, 0), Qt::AlignHCenter | Qt::AlignTop, sub);
     };
+    // Under the name, its gain or level when it has one.
     const bool muted = s.status.valid && s.status.muted;
     const int inputIndex = std::max(0, static_cast<int>(s.perf.inputs.indexOf(c.input)));
-    ioBox(PortInfo::input(), B.input, c.input, muted ? "muted" : QString("in %1").arg(inputIndex + 1), !muted);
-    for (int o = 0; o < numOutputs; ++o)
-        ioBox(PortInfo::output(o), B.output[o], s.perf.outputs[o], muted ? "muted" : QString("out %1").arg(o + 1), flow.heard.value(o));
+    auto sub = [](const QString& tag, double db) {
+        if (std::fabs(db) < 0.05)
+            return tag;
+        return db <= kOffDb ? QString("off") : QString("%1%2").arg(db > 0 ? "+" : "−").arg(std::fabs(db), 0, 'f', 1);
+    };
+    ioBox(PortInfo::input(), B.input, c.input, muted ? "muted" : sub(QString("in %1").arg(inputIndex + 1), s.perf.levels.inputs.value(inputIndex).gainDb),
+          !muted);
+    for (int o = 0; o < numOutputs; ++o) {
+        const OutputLevel l = s.perf.levels.outputs.value(o);
+        ioBox(PortInfo::output(o), B.output[o], s.perf.outputs[o], muted || l.muted ? "muted" : sub(QString("out %1").arg(o + 1), l.levelDb),
+              flow.heard.value(o) && !l.muted);
+    }
 
     // The dots: where wires leave (right) and arrive (left), and a
     // plug-in's key, a small triangle. A drag from one draws a wire.
@@ -1312,7 +1298,10 @@ void ChainView::dragIo(const PortInfo& port, QPointF pos, bool done) {
 void ChainView::renameIo(const PortInfo& port, const QString& typed) {
     const bool in = port.kind == PortInfo::Kind::Input;
     const ChainInfo* c = s.chain(chain_);
-    const int index = in ? (c ? static_cast<int>(s.perf.inputs.indexOf(c->input)) : -1) : port.index;
+    renamePort(in, in ? (c ? static_cast<int>(s.perf.inputs.indexOf(c->input)) : -1) : port.index, typed);
+}
+
+void ChainView::renamePort(bool in, int index, const QString& typed) {
     const QStringList& names = in ? s.perf.inputs : s.perf.outputs;
     const QString name = typed.trimmed();
     if (index < 0 || index >= names.size() || name.isEmpty() || name == names[index])
@@ -1950,40 +1939,6 @@ void ChainView::loosePanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
 
 // The input or an output selected: its name, which this performance gives
 // it, to change.
-void ChainView::ioPanel(QPainter& p, const QRectF& r, const ChainInfo& c) {
-    const PortInfo port = *ioSel_;
-    const bool in = port.kind == PortInfo::Kind::Input;
-    const int index = in ? static_cast<int>(s.perf.inputs.indexOf(c.input)) : port.index;
-    const QStringList& names = in ? s.perf.inputs : s.perf.outputs;
-    if (index < 0 || index >= names.size())
-        return;
-    const QString name = names[index];
-    const double pad = 18 * u, w = r.width() - 2 * pad;
-    double y = r.top() + 20 * u;
-    QFont label = typeface(Face::Text, 12 * u, QFont::DemiBold);
-    label.setLetterSpacing(QFont::AbsoluteSpacing, 1.5 * u);
-    p.setFont(label);
-    p.setPen(color::muted);
-    p.drawText(QRectF(r.left() + pad, y, w, 18 * u), Qt::AlignLeft | Qt::AlignVCenter, QString(in ? "INPUT %1" : "OUTPUT %1").arg(index + 1));
-    y += 34 * u;
-    field(p, "io name", QRectF(r.left() + pad, y, w, 64 * u), "NAME", name, false, [this, port, name] {
-        startEntry("io name", name, "Its name", 40, [this, port](const QString& text) { renameIo(port, text); });
-    });
-    y += 84 * u;
-    p.setPen(color::text2);
-    p.setFont(typeface(Face::Text, 14 * u));
-    QStringList users;
-    if (in)
-        for (const ChainInfo& other : s.perf.chains)
-            if (other.input == name)
-                users << other.name;
-    const QString help = (in ? QString("Every chain playing this input sees the new name") + (users.size() > 1 ? " (" + users.join(", ") + ")" : "") +
-                                   ", and so does the tuner. "
-                             : QString("Every chain's wires to this output keep it under its new name. ")) +
-                         "The name is this performance's, saved with it; the sound card channel stays the same. Drag the box to move it.";
-    p.drawText(QRectF(r.left() + pad, y, w, 200 * u), Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, help);
-}
-
 QString ChainView::addTarget() const {
     const ChainInfo* c = s.chain(chain_);
     if (!c)

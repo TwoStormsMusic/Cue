@@ -202,6 +202,35 @@ struct TunerSpec {
     std::string where;
 };
 
+// Auto, as the Gain Stage does it: what it measures, the level it aims
+// for and how long it listens once it hears something.
+struct AutoSpec {
+    enum class Measure : uint8_t { Peak, Rms, Lufs } measure = Measure::Peak;
+    float targetDb = -12.0f;
+    float seconds = 5.0f;
+    bool operator==(const AutoSpec&) const = default;
+};
+const char* measureName(AutoSpec::Measure m);
+// -1 if it is none of peak, rms, lufs.
+int measureOf(const std::string& name);
+
+// The performance's levels, the same whichever scene plays: an input's
+// gain before every chain (its calibration) and an output's level, mute
+// and limiter after them all. In dB; -100 or less is silence.
+struct InputLevel {
+    float gainDb = 0.0f;
+    AutoSpec autoSpec;
+};
+struct OutputLevel {
+    float levelDb = 0.0f;
+    bool muted = false;
+    bool limiter = false;
+    float ceilingDb = -1.0f;
+    float releaseMs = 100.0f;
+    AutoSpec autoSpec;
+};
+constexpr float kLevelFloorDb = -100.0f, kLevelMaxDb = 60.0f;
+
 struct MidiSettings {
     bool enabled = true;
     std::string in = "any";    // sequencer port name match for input, or "any"
@@ -226,6 +255,9 @@ struct Config {
     // and outputChannels, in the same order).
     std::vector<std::string> inputs = {"In 1"};
     std::vector<std::string> outputs = {"Out 1", "Out 2"};
+    // One for each input and output, in their order (finishConfig sees to it).
+    std::vector<InputLevel> inputLevels;
+    std::vector<OutputLevel> outputLevels;
     std::vector<SceneSpec> scenes;
     std::vector<ControlSpec> controls;
     std::vector<TriggerSpec> triggers;

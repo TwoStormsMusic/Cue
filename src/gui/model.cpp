@@ -205,6 +205,40 @@ Flow flowOf(const ChainInfo& c, const std::function<bool(int)>& bypassed, bool i
     return f;
 }
 
+AutoInfo AutoInfo::fromJson(const QJsonObject& j) {
+    AutoInfo a;
+    a.measure = j.value("measure").toString(a.measure);
+    a.targetDb = j.value("target_db").toDouble(a.targetDb);
+    a.seconds = j.value("seconds").toDouble(a.seconds);
+    return a;
+}
+
+QJsonObject AutoInfo::json() const { return {{"measure", measure}, {"target_db", targetDb}, {"seconds", seconds}}; }
+
+IoLevels IoLevels::fromJson(const QJsonObject& io) {
+    IoLevels l;
+    for (const QJsonValue& v : io.value("inputs").toArray()) {
+        const QJsonObject j = v.toObject();
+        InputLevel in;
+        in.gainDb = j.value("gain_db").toDouble(0);
+        in.autoSet = AutoInfo::fromJson(j.value("auto").toObject());
+        l.inputs << in;
+    }
+    for (const QJsonValue& v : io.value("outputs").toArray()) {
+        const QJsonObject j = v.toObject();
+        OutputLevel out;
+        out.levelDb = j.value("level_db").toDouble(0);
+        out.muted = j.value("muted").toBool(false);
+        const QJsonObject lim = j.value("limiter").toObject();
+        out.limiter = lim.value("on").toBool(false);
+        out.ceilingDb = lim.value("ceiling_db").toDouble(out.ceilingDb);
+        out.releaseMs = lim.value("release_ms").toDouble(out.releaseMs);
+        out.autoSet = AutoInfo::fromJson(j.value("auto").toObject());
+        l.outputs << out;
+    }
+    return l;
+}
+
 Performance Performance::fromJson(const QJsonObject& j) {
     Performance perf;
     perf.valid = true;
@@ -214,6 +248,9 @@ Performance Performance::fromJson(const QJsonObject& j) {
     if (perf.inputs.isEmpty())
         perf.inputs << "In 1";
     perf.tunerInput = j.value("tuner").toObject().value("input").toString(perf.inputs.first());
+    perf.levels = IoLevels::fromJson(j.value("io").toObject());
+    perf.levels.inputs.resize(perf.inputs.size());
+    perf.levels.outputs.resize(perf.outputs.size());
     int index = 0;
     const QJsonArray scenes = j.value("scenes").toArray();
     for (int s = 0; s < scenes.size(); ++s) {
@@ -387,7 +424,7 @@ Status Status::fromJson(const QJsonObject& j) {
     for (const QJsonValue& v : levels.value("inputs").toArray())
         s.inputs << Level{v.toObject().value("name").toString(), v.toObject().value("peak_db").toDouble(-120)};
     for (const QJsonValue& v : levels.value("outputs").toArray())
-        s.outputs << Level{v.toObject().value("name").toString(), v.toObject().value("peak_db").toDouble(-120)};
+        s.outputs << Level{v.toObject().value("name").toString(), v.toObject().value("peak_db").toDouble(-120), v.toObject().value("limit_db").toDouble(0)};
     return s;
 }
 

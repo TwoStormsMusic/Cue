@@ -41,6 +41,9 @@ A `.cue` file is a zip:
                 "tail_quiet_db": -90, "bypass_fade_ms": 10, "mute_fade_ms": 10, "reset_tails_on_warm": true},
   "controller": {"profile": "eurekaprom", "channel": 1, "forward": true},
   "tuner": {"input": "Bass", "reference": 440, "range": "bass", "tolerance": 2, "names": "sharps"},
+  "levels": {"inputs": {"Bass": {"gain_db": 4.5, "auto": {"measure": "rms", "target_db": -18, "seconds": 5}}},
+             "outputs": {"FOH": {"level_db": -3, "limiter": {"on": true, "ceiling_db": -1, "release_ms": 100}},
+                         "Amp": {"muted": true}}},
   "scenes": [{
     "name": "Covers", "display": "CV", "pedal": 2,
     "chains": [{
@@ -111,6 +114,15 @@ A `.cue` file is a zip:
   (`cue params` lists them).
   `shown` is the parameters the app shows under the selected block, by id
   in the order picked there; without it the app shows the first eight.
+- **levels** are the performance's, the same whichever chain plays (the
+  app's Gain Stage sets them): each input's `gain_db` before every chain
+  (its calibration), each output's `level_db`, `muted` and `limiter` after
+  every chain is mixed, by name, and the settings Auto uses on each
+  (`measure`: peak, rms or lufs; `target_db`; `seconds`). Only what is not as
+  it starts is written: 0 dB, not muted, the limiter off with a -1 dB
+  ceiling and 100 ms release, Auto on peak to -12 dB over 5 s. -100 dB is
+  silence. Levels for an input or output the performance does not have are
+  left out, with a warning.
 - **tuner** is the built-in tuner: the input it listens to and its settings,
   as `[tuner]` in [config.md](config.md).
 - The mapping strings (`on_select`, controls, triggers, groups, `fcb`) are the

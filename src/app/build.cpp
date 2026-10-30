@@ -286,6 +286,7 @@ bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains) 
     for (size_t i = 0; i < rig.plugins.size(); ++i)
         rig.bypassedNow[i].store(rig.plugins[i].bypassed, std::memory_order_relaxed);
 
+    postLevels(*rig.engine, config);
     const auto t0 = std::chrono::steady_clock::now();
     if (!rig.engine->activate()) {
         *error = "a plug-in failed to activate";
@@ -308,6 +309,26 @@ bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains) 
     rig.engine->prime(100.0f);
     std::printf("primed every plug-in in %.1f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
     return true;
+}
+
+void postInputLevel(Engine& engine, const Config& config, size_t input) {
+    if (input < config.inputLevels.size())
+        engine.setInputLevel(input, config.inputLevels[input].gainDb);
+}
+
+void postOutputLevel(Engine& engine, const Config& config, size_t output) {
+    if (output >= config.outputLevels.size())
+        return;
+    const OutputLevel& l = config.outputLevels[output];
+    engine.setOutputLevel(output, l.levelDb, l.muted);
+    engine.setLimiter(output, l.limiter, l.ceilingDb, l.releaseMs);
+}
+
+void postLevels(Engine& engine, const Config& config) {
+    for (size_t i = 0; i < config.inputLevels.size(); ++i)
+        postInputLevel(engine, config, i);
+    for (size_t o = 0; o < config.outputLevels.size(); ++o)
+        postOutputLevel(engine, config, o);
 }
 
 } // namespace cue

@@ -48,7 +48,45 @@ const char* toString(ChainState s) {
     return "?";
 }
 
-Engine::Engine(EngineSettings settings) : settings_(settings) {}
+namespace {
+
+float dbToGain(float db) { return db <= -100.0f ? 0.0f : std::pow(10.0f, db / 20.0f); }
+
+// BS.1770's K-weighting at any sample rate: a high shelf, then a high pass.
+void kWeights(double rate, double shelf[5], double highPass[5]) {
+    const double pi = 3.14159265358979323846;
+    double k = std::tan(pi * 1681.974450955533 / rate);
+    const double q = 0.7071752369554196, vh = std::pow(10.0, 3.999843853973347 / 20.0), vb = std::pow(vh, 0.4996667741545416);
+    double a0 = 1.0 + k / q + k * k;
+    shelf[0] = (vh + vb * k / q + k * k) / a0;
+    shelf[1] = 2.0 * (k * k - vh) / a0;
+    shelf[2] = (vh - vb * k / q + k * k) / a0;
+    shelf[3] = 2.0 * (k * k - 1.0) / a0;
+    shelf[4] = (1.0 - k / q + k * k) / a0;
+    k = std::tan(pi * 38.13547087602444 / rate);
+    const double q2 = 0.5003270373238773;
+    a0 = 1.0 + k / q2 + k * k;
+    highPass[0] = 1.0;
+    highPass[1] = -2.0;
+    highPass[2] = 1.0;
+    highPass[3] = 2.0 * (k * k - 1.0) / a0;
+    highPass[4] = (1.0 - k / q2 + k * k) / a0;
+}
+
+} // namespace
+
+Engine::Engine(EngineSettings settings)
+    : settings_(settings), inLevel_(std::max<size_t>(settings.numInputs, 1), Ramp(1.0f)), outLevel_(settings.numOutputs, Ramp(1.0f)),
+      limiters_(settings.numOutputs), limiterLow_(new std::atomic<float>[std::max<size_t>(settings.numOutputs, 1)]),
+      kState_(4 * (std::max<size_t>(settings.numInputs, 1) + settings.numOutputs), 0.0) {
+    for (size_t o = 0; o < settings_.numOutputs; ++o)
+        limiterLow_[o].store(1.0f, std::memory_order_relaxed);
+    double shelf[5], highPass[5];
+    kWeights(settings_.sampleRate, shelf, highPass);
+    kShelf_ = {{shelf[0], shelf[1], shelf[2]}, {shelf[3], shelf[4]}};
+    kHighPass_ = {{highPass[0], highPass[1], highPass[2]}, {highPass[3], highPass[4]}};
+    binLength_ = std::max<uint32_t>(1, static_cast<uint32_t>(settings_.sampleRate * 0.01 + 0.5));
+}
 
 Engine::~Engine() { deactivate(); }
 
@@ -112,6 +150,7 @@ bool Engine::activate() {
         }
     }
     gainScratch_.assign(maxFrames, 0.0f);
+    levelScratch_.assign(maxFrames, 0.0f);
     for (auto& s : chains_) {
         s.buffers.assign((3 + settings_.numOutputs) * static_cast<size_t>(maxFrames), 0.0f);
         s.in = s.buffers.data();
@@ -447,6 +486,43 @@ void Engine::handle(const EngineCommand& cmd) {
         if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size()))
             chains_[cmd.chain].chain->setWireGains(cmd.slot, cmd.gains, ms(settings_.bypassFadeMs));
         break;
+    case EngineCommand::Type::SetInputLevel:
+        if (cmd.slot < inLevel_.size()) {
+            Ramp& r = inLevel_[cmd.slot];
+            const float to = dbToGain(cmd.value);
+            if (started_)
+                r.dbTo(to, ms(settings_.levelFadeMs));
+            else
+                r.set(to);
+        }
+        break;
+    case EngineCommand::Type::SetOutputLevel:
+        if (cmd.slot < outLevel_.size()) {
+            Ramp& r = outLevel_[cmd.slot];
+            const float to = cmd.on ? 0.0f : dbToGain(cmd.value);
+            if (started_)
+                r.dbTo(to, ms(settings_.levelFadeMs));
+            else
+                r.set(to);
+        }
+        break;
+    case EngineCommand::Type::SetLimiter:
+        if (cmd.slot < limiters_.size()) {
+            Limiter& l = limiters_[cmd.slot];
+            l.on = cmd.on;
+            l.ceiling = std::min(1.0f, dbToGain(std::max(cmd.value, -60.0f)));
+            l.releaseMs = std::clamp(cmd.value2, 1.0f, 5000.0f);
+            // About -60 dB of the way back in releaseMs.
+            l.release = std::exp(-6.9f / std::max(1.0f, l.releaseMs * 0.001f * static_cast<float>(settings_.sampleRate)));
+        }
+        break;
+    case EngineCommand::Type::Measure:
+        if (cmd.on != measuring_) {
+            measuring_ = cmd.on;
+            bin_ = LevelBin{};
+            std::fill(kState_.begin(), kState_.end(), 0.0);
+        }
+        break;
     case EngineCommand::Type::SetMute:
         if (cmd.on != muted_) {
             muted_ = cmd.on;
@@ -744,6 +820,10 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
         advance(static_cast<int>(i), frames, peak);
         restWhenQuiet(s, frames, peak);
     }
+    if (measuring_)
+        measureBin(ins, outs, frames);
+    applyOutputLevels(outs, frames);
+    started_ = true;
 
     block.ns = nsSince(blockStart);
     if (block.ns > slowest_.ns) {
@@ -766,16 +846,32 @@ void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, s
     // A copy of the inputs: background chains may read them after process()
     // has returned and the caller has reused its buffers.
     // Muted, they hear silence (with a fade), so tails ring out.
+    // Each with its level (its calibration) too.
     const bool inputsLive = inputGain_.done() && inputGain_.value() == 1.0f;
     if (!inputsLive)
         inputGain_.render(gainScratch_.data(), frames);
     for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i) {
         float* dst = jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames);
-        if (inputsLive) {
+        Ramp& level = inLevel_[i];
+        const bool steady = level.done();
+        const float g = level.value();
+        if (inputsLive && steady && g == 1.0f) {
             std::memcpy(dst, ins[i], frames * sizeof(float));
-        } else {
+        } else if (inputsLive && steady) {
             for (uint32_t n = 0; n < frames; ++n)
-                dst[n] = ins[i][n] * gainScratch_[n];
+                dst[n] = ins[i][n] * g;
+        } else if (steady) {
+            for (uint32_t n = 0; n < frames; ++n)
+                dst[n] = ins[i][n] * gainScratch_[n] * g;
+        } else {
+            level.render(levelScratch_.data(), frames);
+            if (inputsLive) {
+                for (uint32_t n = 0; n < frames; ++n)
+                    dst[n] = ins[i][n] * levelScratch_[n];
+            } else {
+                for (uint32_t n = 0; n < frames; ++n)
+                    dst[n] = ins[i][n] * gainScratch_[n] * levelScratch_[n];
+            }
         }
     }
     jobFrames_ = frames;
@@ -882,6 +978,101 @@ void Engine::runChain(int index, bool helper) {
     }
     s.helper = helper;
     s.blockNs = nsSince(t0);
+}
+
+// Each output's level, then its limiter.
+void Engine::applyOutputLevels(float* const* outs, uint32_t frames) {
+    for (size_t o = 0; o < settings_.numOutputs; ++o) {
+        float* x = outs[o];
+        Ramp& level = outLevel_[o];
+        if (!level.done()) {
+            level.render(levelScratch_.data(), frames);
+            for (uint32_t n = 0; n < frames; ++n)
+                x[n] *= levelScratch_[n];
+        } else if (level.value() != 1.0f) {
+            const float g = level.value();
+            for (uint32_t n = 0; n < frames; ++n)
+                x[n] *= g;
+        }
+        Limiter& l = limiters_[o];
+        if (!l.on && l.gain == 1.0f)
+            continue;
+        float g = l.gain, low = 1.0f;
+        if (l.on) {
+            for (uint32_t n = 0; n < frames; ++n) {
+                const float a = std::fabs(x[n]);
+                const float want = a > l.ceiling ? l.ceiling / a : 1.0f;
+                g = want < g ? want : want + (g - want) * l.release;
+                x[n] *= g;
+                low = std::min(low, g);
+            }
+        } else {
+            // Turned off while it was turning down: back to 1 as it would release.
+            for (uint32_t n = 0; n < frames; ++n) {
+                g = 1.0f + (g - 1.0f) * l.release;
+                x[n] *= g;
+            }
+            if (g > 0.9999f)
+                g = 1.0f;
+        }
+        l.gain = g;
+        if (low < limiterLow_[o].load(std::memory_order_relaxed))
+            limiterLow_[o].store(low, std::memory_order_relaxed);
+    }
+}
+
+float Engine::takeLimiterDb(size_t output) {
+    if (output >= settings_.numOutputs)
+        return 0.0f;
+    const float low = limiterLow_[output].exchange(1.0f, std::memory_order_relaxed);
+    return low >= 1.0f ? 0.0f : 20.0f * std::log10(std::max(low, 1e-6f));
+}
+
+// Adds this block to the bin: the inputs as they arrive, the outputs before
+// their levels. A full bin goes to the reader.
+void Engine::measureBin(const float* const* ins, const float* const* outs, uint32_t frames) {
+    const size_t numIn = std::min(settings_.numInputs, LevelBin::kMax);
+    const size_t numOut = std::min(settings_.numOutputs, LevelBin::kMax);
+    const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
+    auto add = [&](const float* x, LevelBin::Channel& ch, double* st) {
+        float peak = ch.peak;
+        double e = 0.0, ke = 0.0;
+        const KWeight& f1 = kShelf_;
+        const KWeight& f2 = kHighPass_;
+        for (uint32_t n = 0; n < frames; ++n) {
+            const double v = x[n];
+            peak = std::max(peak, static_cast<float>(std::fabs(v)));
+            e += v * v;
+            // Transposed direct form II, twice.
+            const double y1 = f1.b[0] * v + st[0];
+            st[0] = f1.b[1] * v - f1.a[0] * y1 + st[1];
+            st[1] = f1.b[2] * v - f1.a[1] * y1;
+            const double y2 = f2.b[0] * y1 + st[2];
+            st[2] = f2.b[1] * y1 - f2.a[0] * y2 + st[3];
+            st[3] = f2.b[2] * y1 - f2.a[1] * y2;
+            ke += y2 * y2;
+        }
+        ch.peak = peak;
+        ch.energy += static_cast<float>(e);
+        ch.kEnergy += static_cast<float>(ke);
+    };
+    for (size_t i = 0; i < numIn; ++i)
+        add(ins[i], bin_.in[i], &kState_[4 * i]);
+    for (size_t o = 0; o < numOut; ++o)
+        add(outs[o], bin_.out[o], &kState_[4 * (inputs + o)]);
+    bin_.frames += frames;
+    if (bin_.frames >= binLength_) {
+        bins_.push(bin_); // dropped if nobody reads
+        bin_ = LevelBin{};
+    }
+}
+
+bool Engine::nextLevelBin(LevelBin& bin) {
+    auto b = bins_.pop();
+    if (!b)
+        return false;
+    bin = *b;
+    return true;
 }
 
 } // namespace cue

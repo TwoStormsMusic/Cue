@@ -48,13 +48,14 @@ void Settings::save() const {
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
     connect(&link, &EngineLink::connectionChanged, this, &AppState::onConnection);
     connect(&link, &EngineLink::event, this, &AppState::onEvent);
-    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins", "edited"});
+    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins", "edited", "io", "auto"});
 }
 
 void AppState::onConnection(bool up) {
     // What could be undone was for the engine that was here.
     undo_.clear();
     redo_.clear();
+    autoNow.clear();
     emit undoChanged();
     if (up) {
         link.request({{"cmd", "hello"}}, [this](const QJsonObject& r) {
@@ -105,6 +106,35 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         emit changed();
     } else if (name == "wire") {
         setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
+    } else if (name == "io") {
+        setLevels(m);
+    } else if (name == "auto") {
+        const bool input = m.contains("input");
+        const int index = m.value(input ? "input" : "output").toInt(-1);
+        const QString key = autoKey(input, index), state = m.value("state").toString();
+        const QStringList& names = input ? perf.inputs : perf.outputs;
+        const QString what = names.value(index, input ? "the input" : "the output");
+        if (state == "waiting" || state == "listening") {
+            autoNow[key] = {state == "listening", m.value("seconds").toDouble(), m.value("of").toDouble()};
+        } else {
+            autoNow.remove(key);
+            if (state == "done") {
+                // Undone like a fader moved by hand.
+                const char* field = input ? "gain_db" : "level_db";
+                auto set = [&](double db) { return QJsonObject{{"cmd", "level"}, {input ? "input" : "output", index}, {field, db}}; };
+                const QJsonObject undo = set(m.value("from_db").toDouble()), redo = set(m.value("to_db").toDouble());
+                edited({"Auto on " + what, -1, -1, undo, redo});
+                const double to = m.value("to_db").toDouble();
+                emit message(QString("Auto set %1 to %2%3 dB (it heard %4 dB)")
+                                 .arg(what, to > 0 ? "+" : "")
+                                 .arg(to, 0, 'f', 1)
+                                 .arg(m.value("level_db").toDouble(), 0, 'f', 1),
+                             false);
+            } else if (state == "failed") {
+                emit message("Auto on " + what + ": " + m.value("error").toString(), true);
+            }
+        }
+        emit statusChanged();
     } else if (name == "edited") {
         // A knob turned in a plug-in's own editor: undone like a slider here.
         const int chain = m.value("chain").toInt(-1), slot = m.value("slot").toInt(-1), param = m.value("param").toInt();
@@ -191,6 +221,8 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
     if (r.contains("performance")) {
         perf = Performance::fromJson(r.value("performance").toObject());
         emit changed();
+    } else if (r.contains("io")) {
+        setLevels(r.value("io").toObject());
     } else if (r.contains("wire")) {
         setWire(request.value("chain").toInt(-1), r.value("wire").toObject());
     } else if (request.value("cmd").toString() == "place") {
@@ -215,6 +247,36 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
             emit changed();
         }
     }
+}
+
+void AppState::setLevels(const QJsonObject& io) {
+    perf.levels = IoLevels::fromJson(io);
+    perf.levels.inputs.resize(perf.inputs.size());
+    perf.levels.outputs.resize(perf.outputs.size());
+    emit changed();
+}
+
+void AppState::setLevel(bool input, int index, const QJsonObject& fields, std::function<void(const QJsonObject&)> then) {
+    QJsonObject req = fields;
+    req["cmd"] = "level";
+    req[input ? "input" : "output"] = index;
+    change(req, std::move(then));
+}
+
+void AppState::runAuto(bool input, int index, bool cancel) {
+    QJsonObject req{{"cmd", "auto"}, {input ? "input" : "output", index}};
+    if (cancel)
+        req["cancel"] = true;
+    link.request(req, [this, input, index, cancel](const QJsonObject& r) {
+        follow(QJsonObject{{"cmd", "auto"}}, r);
+        if (!check(r, "Auto"))
+            return;
+        if (cancel)
+            autoNow.remove(autoKey(input, index));
+        else
+            autoNow[autoKey(input, index)] = {false, 0, r.value("auto").toObject().value("of").toDouble()};
+        emit statusChanged();
+    });
 }
 
 // A wire's gains, as the engine has them now.
