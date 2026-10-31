@@ -109,6 +109,47 @@ std::vector<ConfigText> texts(const json& j, const char* key, const std::string&
     return out;
 }
 
+// One output of a plug-in or of the chain input: what is not as it starts.
+json outputJson(const WireGains& g) {
+    json j = json::object();
+    if (g.levelDb != 0.0f)
+        j["level_db"] = std::max(kWireOffDb, std::round(g.levelDb * 100) / 100);
+    if (g.width != 1.0f)
+        j["width"] = std::round(g.width * 1000) / 10;
+    if (g.pan != 0.0f)
+        j["pan"] = std::round(g.pan * 1000) / 10;
+    if (g.muted)
+        j["muted"] = true;
+    return j;
+}
+
+json outputsJson(const std::vector<WireGains>& outs) {
+    json j = json::array();
+    for (const WireGains& g : outs)
+        j.push_back(outputJson(g));
+    return j;
+}
+
+// One output as it starts: nothing to write.
+bool plain(const std::vector<WireGains>& outs) { return outs.size() == 1 && outs[0].neutral(); }
+
+std::vector<WireGains> readOutputs(const json& j, const std::string& where) {
+    if (!j.is_array() || j.empty() || j.size() > static_cast<size_t>(kMaxOuts))
+        throw std::runtime_error(where + ": outputs is a list of 1 to " + std::to_string(kMaxOuts));
+    std::vector<WireGains> outs;
+    for (const json& oj : j) {
+        WireGains g;
+        g.levelDb = oj.value("level_db", 0.0f);
+        g.width = oj.value("width", 100.0f) / 100.0f;
+        g.pan = oj.value("pan", 0.0f) / 100.0f;
+        g.muted = oj.value("muted", false);
+        if (g.levelDb > 24 || g.width < 0 || g.width > 2 || g.pan < -1 || g.pan > 1)
+            throw std::runtime_error(where + ": an output's level is at most +24 dB, its width 0 to 200 and its pan -100 to 100");
+        outs.push_back(g);
+    }
+    return outs;
+}
+
 // ----------------------------------------------------------------- writing
 
 struct Writer {
@@ -164,6 +205,8 @@ struct Writer {
         }
         if (p.shownSet)
             j["shown"] = p.shown;
+        if (!plain(p.outs))
+            j["outputs"] = outputsJson(p.outs);
         std::string name;
         if (!state(p, false, stateName, name))
             return false;
@@ -203,6 +246,8 @@ struct Writer {
             blocks.push_back(pj);
         }
         j["blocks"] = blocks;
+        if (!plain(c.inputOuts))
+            j["input_outputs"] = outputsJson(c.inputOuts);
         json wires = json::array();
         for (const WireSpec& w : c.wires) {
             json wj;
@@ -210,14 +255,8 @@ struct Writer {
             wj["to"] = w.to.kind == Port::Kind::Output ? json(config.outputs.at(w.to.index)) : json(w.to.index);
             if (w.to.key)
                 wj["key"] = true;
-            if (w.gains.levelDb != 0.0f)
-                wj["level_db"] = std::max(kWireOffDb, std::round(w.gains.levelDb * 100) / 100);
-            if (w.gains.width != 1.0f)
-                wj["width"] = std::round(w.gains.width * 1000) / 10;
-            if (w.gains.pan != 0.0f)
-                wj["pan"] = std::round(w.gains.pan * 1000) / 10;
-            if (w.gains.muted)
-                wj["muted"] = true;
+            if (w.from.out > 0)
+                wj["out"] = w.from.out;
             if (w.feedback)
                 wj["feedback"] = true;
             if (w.jump)
@@ -241,14 +280,8 @@ struct Writer {
                     lj["key"] = true;
                 lj["x"] = std::round(l.x * 10) / 10;
                 lj["y"] = std::round(l.y * 10) / 10;
-                if (l.gains.levelDb != 0.0f)
-                    lj["level_db"] = std::max(kWireOffDb, std::round(l.gains.levelDb * 100) / 100);
-                if (l.gains.width != 1.0f)
-                    lj["width"] = std::round(l.gains.width * 1000) / 10;
-                if (l.gains.pan != 0.0f)
-                    lj["pan"] = std::round(l.gains.pan * 1000) / 10;
-                if (l.gains.muted)
-                    lj["muted"] = true;
+                if (l.from && l.port.out > 0)
+                    lj["out"] = l.port.out;
                 if (l.feedback)
                     lj["feedback"] = true;
                 loose.push_back(lj);
@@ -498,6 +531,8 @@ struct Reader {
             p.shown = j.at("shown").get<std::vector<uint32_t>>();
             p.shownSet = true;
         }
+        if (j.contains("outputs"))
+            p.outs = readOutputs(j.at("outputs"), where);
         for (const char* key : {"state", "controller_state"}) {
             if (!j.contains(key))
                 continue;
@@ -552,7 +587,20 @@ struct Reader {
                 }
                 c.blocks.push_back(std::move(ps));
             }
+        if (j.contains("input_outputs"))
+            c.inputOuts = readOutputs(j.at("input_outputs"), c.where + " input");
         const std::string input = c.input.empty() ? config.inputs.at(0) : c.input;
+        // Which of its source's outputs a wire leaves.
+        auto outOf = [&](const json& wj, const Port& from) -> uint8_t {
+            const int n = wj.value("out", 0);
+            const std::vector<WireGains>* outs = outsOf(static_cast<const ChainSpec&>(c), from);
+            const int have = outs ? static_cast<int>(outs->size()) : 1;
+            if (n < 0 || n >= have)
+                throw std::runtime_error("chain '" + c.name + "': a wire leaves output " + std::to_string(n) + " of " +
+                                         (from.kind == Port::Kind::Input ? std::string("the input") : "block " + std::to_string(from.index)) +
+                                         ", which has " + std::to_string(have) + " output(s), numbered from 0");
+            return static_cast<uint8_t>(n);
+        };
         auto end = [&](const json& e, bool from) {
             if (e.is_number_integer()) {
                 const long n = e.get<long>();
@@ -584,16 +632,11 @@ struct Reader {
                     throw std::runtime_error("chain '" + c.name + "': only a plug-in has a key (a side-chain input)");
                 w.to.key = true;
             }
-            w.gains.levelDb = wj.value("level_db", 0.0f);
-            w.gains.width = wj.value("width", 100.0f) / 100.0f;
-            w.gains.pan = wj.value("pan", 0.0f) / 100.0f;
-            w.gains.muted = wj.value("muted", false);
+            w.from.out = outOf(wj, w.from);
             w.feedback = wj.value("feedback", false);
             w.jump = wj.value("jump", false);
             w.jumpOut = wj.value("jump_out", std::vector<double>());
             w.jumpIn = wj.value("jump_in", std::vector<double>());
-            if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1)
-                throw std::runtime_error("chain '" + c.name + "': a wire's width is 0 to 200 and its pan -100 to 100");
             c.wires.push_back(w);
         }
         // Wires attached at one end only, with where the other end lies.
@@ -612,10 +655,8 @@ struct Reader {
                 }
                 l.x = lj.value("x", 0.0);
                 l.y = lj.value("y", 0.0);
-                l.gains.levelDb = lj.value("level_db", 0.0f);
-                l.gains.width = lj.value("width", 100.0f) / 100.0f;
-                l.gains.pan = lj.value("pan", 0.0f) / 100.0f;
-                l.gains.muted = lj.value("muted", false);
+                if (l.from)
+                    l.port.out = outOf(lj, l.port);
                 l.feedback = lj.value("feedback", false);
                 c.loose.push_back(l);
             }

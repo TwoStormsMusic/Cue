@@ -272,11 +272,12 @@ Json ioJson(const Config& config) {
     return j;
 }
 
-// A wire's gains, as the app is told them: the wire, not the whole
-// performance. from and to as the request named them.
+// A wire as the app is told it: the wire, not the whole performance. from
+// and to as the request named them.
 Json wireJson(const Json& from, const Json& to, const WireSpec& w) {
-    Json wj = {{"from", from}, {"to", to}, {"level_db", w.gains.levelDb}, {"width", std::round(w.gains.width * 1000) / 10},
-               {"pan", std::round(w.gains.pan * 1000) / 10}, {"muted", w.gains.muted}, {"jump", w.jump}};
+    Json wj = {{"from", from}, {"to", to}, {"jump", w.jump}};
+    if (w.from.out)
+        wj["out"] = w.from.out;
     if (w.jumpOut.size() == 2)
         wj["jump_out"] = w.jumpOut;
     if (w.jumpIn.size() == 2)
@@ -284,6 +285,25 @@ Json wireJson(const Json& from, const Json& to, const WireSpec& w) {
     if (w.to.key)
         wj["key"] = true;
     return wj;
+}
+
+// An output's gains, as the app is told them: level_db, width and pan in
+// per cent, muted.
+Json gainsJson(const WireGains& g) {
+    return {{"level_db", g.levelDb}, {"width", std::round(g.width * 1000) / 10}, {"pan", std::round(g.pan * 1000) / 10}, {"muted", g.muted}};
+}
+
+// ...and from a request, over those it has; false with why if out of range.
+bool readGains(const Json& j, WireGains& g, std::string* error) {
+    g.levelDb = std::max(j.value("level_db", g.levelDb), -1000.0f);
+    g.width = j.value("width", g.width * 100.0f) / 100.0f;
+    g.pan = j.value("pan", g.pan * 100.0f) / 100.0f;
+    g.muted = j.value("muted", g.muted);
+    if (!(g.levelDb <= 24) || !(g.width >= 0 && g.width <= 2) || !(g.pan >= -1 && g.pan <= 1)) {
+        *error = "an output's level is up to +24 dB, its width 0 to 200 % and its pan -100 to 100";
+        return false;
+    }
+    return true;
 }
 
 // Auto's settings from a request, onto a; false with why if one is out of range.
@@ -334,7 +354,7 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
     for (size_t k = 0; k < rig.plugins.size(); ++k)
         if (rig.bypassedNow[k].load(std::memory_order_relaxed))
             chains[rig.plugins[k].chain]["bypassed"].push_back(rig.plugins[k].slot);
-    // A playing chain's wires: each one's peak after its gains, in the
+    // A playing chain's wires: each one's peak after its output's gains, in the
     // order the performance lists them.
     for (const SceneSpec& scene : config.scenes)
         for (const ChainSpec& cs : scene.chains) {
@@ -414,14 +434,30 @@ bool portOf(const Json& j, bool from, bool key, const Config& config, const Chai
     return false;
 }
 
-// A wire from a request: its ends, and its gains (level_db, width and pan
-// in per cent, muted) over those it has, or a plain wire's.
-bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec& w, std::string* error) {
-    if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
+// Which output of its source a wire in a request leaves: out, from 0.
+bool outOf(const Json& req, Port& from, std::string* error) {
+    const int o = req.value("out", 0);
+    if (o < 0 || o >= kMaxOuts) {
+        *error = "out is 0 to " + std::to_string(kMaxOuts - 1) + ": channels 1-2 to " + std::to_string(2 * kMaxOuts - 1) + "-" + std::to_string(2 * kMaxOuts);
         return false;
+    }
+    from.out = static_cast<uint8_t>(o);
+    return true;
+}
+
+// A wire from a request: its ends (and which output of its source it
+// leaves), over what the wire there has. It has no gains: its output does.
+bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec& w, std::string* error) {
+    if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !outOf(req, w.from, error) ||
+        !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
+        return false;
+    for (const char* key : {"level_db", "width", "pan", "muted"})
+        if (req.contains(key)) {
+            *error = std::string("a wire has no ") + key + " of its own: the output it leaves has (see the output command)";
+            return false;
+        }
     for (const WireSpec& had : cs.wires)
         if (had.from == w.from && had.to == w.to) {
-            w.gains = had.gains;
             w.feedback = had.feedback;
             w.jump = had.jump;
             w.jumpOut = had.jumpOut;
@@ -432,20 +468,12 @@ bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec
     for (auto [key, at] : {std::pair{"jump_out", &w.jumpOut}, std::pair{"jump_in", &w.jumpIn}})
         if (req.contains(key) && req.at(key).is_array() && req.at(key).size() == 2)
             *at = req.at(key).get<std::vector<double>>();
-    w.gains.levelDb = req.value("level_db", w.gains.levelDb);
-    w.gains.width = req.value("width", w.gains.width * 100.0f) / 100.0f;
-    w.gains.pan = req.value("pan", w.gains.pan * 100.0f) / 100.0f;
-    w.gains.muted = req.value("muted", w.gains.muted);
-    if (w.gains.width < 0 || w.gains.width > 2 || w.gains.pan < -1 || w.gains.pan > 1) {
-        *error = "a wire's width is 0 to 200 % and its pan -100 to 100";
-        return false;
-    }
     w.where = "the app";
     return true;
 }
 
-// A loose wire as the app sends it: "from" or "to" (the end still
-// attached), where its other end is, and its gains.
+// A loose wire as the app sends it: "from" (and its out) or "to" (the end
+// still attached), and where its other end is.
 bool looseOf(const Json& req, const Config& config, const ChainSpec& cs, LooseSpec& l, std::string* error) {
     l.from = req.contains("from");
     if (l.from == req.contains("to")) {
@@ -454,17 +482,11 @@ bool looseOf(const Json& req, const Config& config, const ChainSpec& cs, LooseSp
     }
     if (!portOf(req.at(l.from ? "from" : "to"), l.from, req.value("key", false), config, cs, l.port, error))
         return false;
+    if (l.from && !outOf(req, l.port, error))
+        return false;
     l.x = req.value("x", 0.0);
     l.y = req.value("y", 0.0);
-    l.gains.levelDb = req.value("level_db", 0.0f);
-    l.gains.width = req.value("width", 100.0f) / 100.0f;
-    l.gains.pan = req.value("pan", 0.0f) / 100.0f;
-    l.gains.muted = req.value("muted", false);
     l.feedback = req.value("feedback", false);
-    if (l.gains.width < 0 || l.gains.width > 2 || l.gains.pan < -1 || l.gains.pan > 1) {
-        *error = "a wire's width is 0 to 200 % and its pan -100 to 100";
-        return false;
-    }
     return true;
 }
 
@@ -758,21 +780,19 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                   {"of", run.spec().seconds}};
         return j;
     };
-    // ...and on a block's outputs, the wires leaving it: at most one in each
-    // chain, which measures the block (or the chain's input) as it plays.
+    // ...and on one of a plug-in's outputs (or the chain input's): at most
+    // one in each chain, which measures the plug-in (or the input) as it plays.
     struct WireRun {
         int chain;
-        Json from, to; // as the request named them
-        WireSpec wire; // its ends
+        Json from; // as the request named it
+        Port port; // the output
         int probe;
         AutoRun run;
     };
     std::vector<WireRun> wireRuns;
     auto wireEvent = [](const WireRun& w, const char* state) {
-        Json j = {{"chain", w.chain}, {"from", w.from}, {"to", w.to}, {"state", state}, {"seconds", std::round(w.run.seconds() * 10) / 10},
+        Json j = {{"chain", w.chain}, {"from", w.from}, {"out", w.port.out}, {"state", state}, {"seconds", std::round(w.run.seconds() * 10) / 10},
                   {"of", w.run.spec().seconds}, {"match", w.run.match()}};
-        if (w.wire.to.key)
-            j["key"] = true;
         return j;
     };
     auto stopProbe = [&](int chain) {
@@ -854,18 +874,18 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             reply["io"] = ioJson(config);
             service.publish("io", reply["io"]);
         } else if (cmd == "auto" && req.contains("chain")) {
-            // Auto on one output of a block: the wire from it to there.
+            // Auto on one output of a plug-in, or of the chain's input.
             const int chain = req.at("chain").get<int>();
             ChainSpec* cs = chainSpec(config, chain);
             if (!cs || chain < 0 || static_cast<size_t>(chain) >= engine.numChains())
                 return refuse("there is no chain number " + std::to_string(chain + 1));
-            WireSpec w;
+            Port from;
             std::string why;
-            if (!wireOf(req, config, *cs, w, &why))
+            if (!portOf(req.at("from"), true, false, config, *cs, from, &why) || !outOf(req, from, &why))
                 return refuse(why);
-            if (!req.value("cancel", false) &&
-                std::none_of(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == w.from && o.to == w.to; }))
-                return refuse("no wire joins those two");
+            const std::vector<WireGains>* outs = outsOf(*cs, from);
+            if (!req.value("cancel", false) && (!outs || from.out >= outs->size()))
+                return refuse("it has no output " + std::to_string(from.out + 1));
             for (const WireRun& r : wireRuns)
                 if (r.chain == chain && service.subscribed("auto"))
                     service.publish("auto", wireEvent(r, "cancelled"));
@@ -875,11 +895,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (static_cast<ChainState>(engine.stats(chain).state.load()) == ChainState::Idle)
                     return refuse("Auto listens to the chain as it plays: play it first");
                 // From the chain's input there is nothing to match: to the target.
-                const bool fromInput = w.from.kind == Port::Kind::Input;
-                const int probe = fromInput ? Chain::kProbeInput : w.from.index;
+                const bool fromInput = from.kind == Port::Kind::Input;
+                const int probe = fromInput ? Chain::kProbeInput : from.index;
                 engine.chain(chain).probe(probe);
-                wireRuns.push_back({chain, req.at("from"), req.at("to"), w, probe,
-                                    AutoRun(config.wireAuto.spec, config.audio.rate, config.wireAuto.match && !fromInput)});
+                wireRuns.push_back({chain, req.at("from"), from, probe, AutoRun(config.wireAuto.spec, config.audio.rate, config.wireAuto.match && !fromInput)});
                 reply["auto"] = wireEvent(wireRuns.back(), "waiting");
             }
         } else if (cmd == "level" || cmd == "auto") {
@@ -1112,6 +1131,67 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 ps->shownSet = true;
             }
             reply["plugin"] = pluginJson(rig, k, *ps, show.ties(chain, slot), &editors);
+        } else if (cmd == "output" || cmd == "outputs") {
+            // A plug-in's (or the chain input's) outputs: one's level,
+            // width, pan and mute, or taking it out; or all of them at once,
+            // or how many there are.
+            const int chain = req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs)
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            std::string why;
+            Port from;
+            if (!portOf(req.at("from"), true, false, config, *cs, from, &why))
+                return refuse(why);
+            const std::vector<WireGains>* outs = outsOf(*cs, from);
+            if (!outs)
+                return refuse("only a plug-in or the chain's input has outputs");
+            const Json fromJ = from.kind == Port::Kind::Input ? Json("in") : Json(from.index);
+            if (cmd == "output") {
+                if (!outOf(req, from, &why))
+                    return refuse(why);
+                if (from.out >= outs->size())
+                    return refuse("it has " + std::to_string(outs->size()) + " output(s), numbered from 0");
+                if (req.value("remove", false)) {
+                    if (!removeOutput(live, chain, from, &why))
+                        return refuse(why);
+                } else {
+                    WireGains g = (*outs)[from.out];
+                    if (!readGains(req, g, &why) || !setOutput(live, chain, from, g, &why))
+                        return refuse(why);
+                    Json oj = gainsJson(g);
+                    oj["from"] = fromJ;
+                    oj["out"] = from.out;
+                    reply["output"] = oj;
+                    service.publish("output", {{"chain", chain}, {"output", oj}});
+                    return;
+                }
+            } else {
+                std::vector<WireGains> now = *outs;
+                if (req.contains("outputs")) {
+                    const Json& list = req.at("outputs");
+                    if (!list.is_array() || list.empty() || list.size() > static_cast<size_t>(kMaxOuts))
+                        return refuse("outputs is a list of 1 to " + std::to_string(kMaxOuts));
+                    now.assign(list.size(), WireGains{});
+                    for (size_t o = 0; o < list.size(); ++o)
+                        if (!readGains(list[o], now[o], &why))
+                            return refuse(why);
+                } else if (req.contains("count")) {
+                    const int n = req.at("count").get<int>();
+                    if (n < 1 || n > kMaxOuts)
+                        return refuse("count is 1 to " + std::to_string(kMaxOuts));
+                    now.resize(static_cast<size_t>(n));
+                } else {
+                    return refuse("outputs needs outputs or count");
+                }
+                if (!setOutputs(live, chain, from, now, &why))
+                    return refuse(why);
+            }
+            Json perf;
+            if (livePerformance(perf, &why)) {
+                reply["performance"] = perf;
+                service.publish("performance", perf);
+            }
         } else if (cmd == "add" || cmd == "remove" || cmd == "restore" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
             // restore: the chain is the one it was taken out of.
             const std::string token = req.value("token", std::string());
@@ -1174,7 +1254,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 if (!(cmd == "wire" ? setWire(live, chain, w, &why) : removeWire(live, chain, w.from, w.to, &why)))
                     return refuse(why);
                 if (cmd == "wire" && had) {
-                    // Only its gains: the wire, not the whole performance.
+                    // Only how it is drawn: the wire, not the whole performance.
                     const Json wj = wireJson(req.at("from"), req.at("to"), w);
                     reply["wire"] = wj;
                     service.publish("wire", {{"chain", chain}, {"wire", wj}});
@@ -1461,7 +1541,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 engine.measure(false);
         }
         // Auto on a block's outputs: what its chain measured; one that has
-        // heard enough sets the wire's level.
+        // heard enough sets the output's level.
         for (size_t k = 0; k < wireRuns.size();) {
             WireRun& wr = wireRuns[k];
             if (static_cast<size_t>(wr.chain) >= engine.numChains()) {
@@ -1483,26 +1563,27 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             Json ev = wireEvent(wr, "done");
             const double heard = wr.run.levelDb(), fed = wr.run.fedDb();
             ChainSpec* cs = chainSpec(config, wr.chain);
-            const auto had = cs ? std::find_if(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == wr.wire.from && o.to == wr.wire.to; })
-                                : std::vector<WireSpec>::iterator{};
+            const std::vector<WireGains>* outs = cs ? outsOf(*cs, wr.port) : nullptr;
             std::string why;
             if (heard <= AutoRun::kNothingDb || (wr.run.match() && fed <= AutoRun::kNothingDb)) {
                 ev["state"] = "failed";
                 ev["error"] = heard <= AutoRun::kNothingDb ? "it heard nothing louder than -70 dB" : "the block was fed nothing louder than -70 dB";
-            } else if (!cs || had == cs->wires.end()) {
+            } else if (!outs || wr.port.out >= outs->size()) {
                 ev["state"] = "failed";
-                ev["error"] = "the wire is gone";
+                ev["error"] = "the output is gone";
             } else {
-                WireSpec w = *had;
+                WireGains g = (*outs)[wr.port.out];
                 ev["level_db"] = std::round(heard * 10) / 10;
                 if (wr.run.match())
                     ev["fed_db"] = std::round(fed * 10) / 10;
-                ev["from_db"] = w.gains.levelDb;
-                w.gains.levelDb = static_cast<float>(std::round(wr.run.gainDb() * 10) / 10);
-                ev["to_db"] = w.gains.levelDb;
-                w.where = "the app";
-                if (setWire(live, wr.chain, w, &why)) {
-                    service.publish("wire", {{"chain", wr.chain}, {"wire", wireJson(wr.from, wr.to, w)}});
+                ev["from_db"] = g.levelDb;
+                g.levelDb = static_cast<float>(std::round(wr.run.gainDb() * 10) / 10);
+                ev["to_db"] = g.levelDb;
+                if (setOutput(live, wr.chain, wr.port, g, &why)) {
+                    Json oj = gainsJson(g);
+                    oj["from"] = wr.from;
+                    oj["out"] = wr.port.out;
+                    service.publish("output", {{"chain", wr.chain}, {"output", oj}});
                 } else {
                     ev["state"] = "failed";
                     ev["error"] = why;
@@ -1946,8 +2027,8 @@ int cmdParams(const std::string& spec) {
         return 1;
     }
     const auto params = p->params();
-    std::printf("%s: %zu parameter(s)%s\n", p->name().c_str(), params.size(),
-                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "");
+    std::printf("%s: %zu parameter(s)%s, latency %u samples at 48 kHz\n", p->name().c_str(), params.size(),
+                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "", p->latencySamples());
     std::printf("%10s  %-32s %10s %10s %10s\n", "id", "name", "min", "max", "default");
     for (const auto& i : params)
         std::printf("%10u  %-32s %10g %10g %10g%s\n", i.id, i.name.c_str(), i.min, i.max, i.def,

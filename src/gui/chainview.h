@@ -9,8 +9,10 @@
 // picked; a double tap switches it on or off, and one on a chain in the
 // list plays it. "Show all parameters" lists every one to pick from. A
 // block is dragged to move it; a drag from one of its dots draws a wire.
-// Tapping a wire shows its level, width and pan; its + puts a plug-in on
-// it. Delete takes away what is selected. Undo takes back what was changed
+// Every plug-in, and the chain's input, has outputs (1-2, 3-4...), each a
+// dot on its right with a level, width, pan and mute of its own; a wire
+// carries the output it leaves. Tapping a wire shows its output's; its +
+// puts a plug-in on it. Delete takes away what is selected. Undo takes back what was changed
 // here, wiring and plug-ins added or taken out too. Save keeps it all in
 // the .cue file.
 //
@@ -183,14 +185,33 @@ private:
     void dragLevel(bool input, int index, const QRectF& track, const QString& id, QPointF pos, bool done);
     void sendLevel(bool input, int index, double db, bool done, double fromDb);
     void meterBar(QPainter& p, const QRectF& r, const QString& key, bool output);
-    // The wires leaving a block are its outputs. Its panel lists
-    // them, each with a meter and its level (a tap selects the wire); the
-    // Gain Stage's Chain tab shows each as a card: level, meter, fader,
-    // mute, mono and Auto, under a row of Auto's settings for them all.
-    // Each returns its height.
+    // A plug-in's (or the input's) outputs. Its panel lists them, each with
+    // a meter, its level and where it goes (a tap opens it in the Gain
+    // Stage); the Gain Stage's Chain tab shows each as a card, as the
+    // TwoStorms plug-ins have it: + (another output; held or right-clicked,
+    // several), width, pan and its … menu, then its level, meter, fader,
+    // mute and Auto, under a row of Auto's settings for them all. Each
+    // returns its height.
     double outputRows(QPainter& p, const QRectF& r, const ChainInfo& c, const PortInfo& from);
-    double outputCard(QPainter& p, const QRectF& r, const ChainInfo& c, int wire);
+    double outputCard(QPainter& p, const QRectF& r, const ChainInfo& c, const PortInfo& from);
     double wireAutoRow(QPainter& p, const QRectF& r);
+    // An output's gains as shown (while a fader moves, where it is), and
+    // asking for them, undoably once done.
+    OutputInfo outputNow(const ChainInfo& c, const PortInfo& from) const;
+    void setOutputGains(const PortInfo& from, const OutputInfo& gains, bool done);
+    // A fader for an output's level (0), width (1) or pan (2) on track: a
+    // drag moves it, a double tap sets it back.
+    void gainFader(const QString& id, const QRectF& grab, const QRectF& track, int which, const PortInfo& from);
+    // A small one, its value written in it: a card's width and pan.
+    void gainBar(QPainter& p, const QString& id, const QRectF& r, int which, const PortInfo& from, const OutputInfo& g);
+    // More outputs (up to count in all), or one taken out with its wires;
+    // the menu that adds several.
+    void addOutputs(const PortInfo& from, int count);
+    void removeOutput(const PortInfo& from);
+    void addOutputsMenu(const PortInfo& from, const QRectF& under);
+    void outputMenu(const PortInfo& from, const QRectF& under);
+    // The level meters' key for an output, which meters its wires.
+    QString meterKey(int chain, const PortInfo& from) const;
     // A Gain Stage tab's cards, scrolled; returns their height.
     double ioBody(QPainter& p, const QRectF& body, const ChainInfo& c, int own);
     void followMeters();
@@ -226,7 +247,8 @@ private:
     QVector<int> pluggedAt(const ChainInfo& c, int slot, QPointF at) const;
     int wireUnder(const ChainInfo& c, int slot, QPointF at) const;
     void addPlugin(const PluginInfo& what);
-    void setGains(const WireInfo& gains, bool done);
+    // A wire drawn as a jump cut or not, or its letters moved.
+    void setJump(const WireInfo& wire, bool done);
     WireInfo wireNow(const ChainInfo& c, int wire) const;
     QString portName(const ChainInfo& c, const PortInfo& p) const;
     void wirePanel(QPainter& p, const QRectF& r, const ChainInfo& c);
@@ -334,11 +356,19 @@ private:
     qint64 lastMeters_ = 0;
     // The wire a dragged plug-in with none would go onto, or -1.
     int insertWire_ = -1;
-    // Its gains while a slider moves, and as they were before.
+    // A jump cut's letter while it is dragged, and as it was before.
+    std::optional<WireInfo> jumpNow_;
+    WireInfo jumpFrom_;
+    // An output's gains while a slider moves, and as they were before.
     int gainDrag_ = -1; // 0 level, 1 width, 2 pan
     bool gainReset_ = false;
-    std::optional<WireInfo> gainsNow_;
-    WireInfo gainsFrom_;
+    struct OutputNow {
+        int chain = -1;
+        PortInfo from;
+        OutputInfo gains;
+    };
+    std::optional<OutputNow> outNow_;
+    OutputInfo outFrom_;
     qint64 lastWireSend_ = 0;
     // Adding a plug-in: where (a wire, or a free place on the board).
     enum class Picker { None, Add, Insert } picker_ = Picker::None;

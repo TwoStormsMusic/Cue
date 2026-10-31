@@ -166,10 +166,11 @@ TEST(cue_file_round_trips_a_whole_performance) {
     ChainSpec& iniPunk = ini.scenes[0].chains[0];
     iniPunk.blocks[1].shown = {7, 2, 40};
     iniPunk.blocks[1].shownSet = true;
-    // Routing a line cannot say: the IR merges into the Amp output too, a
-    // wire with gains, a key, and a block placed on the board.
-    iniPunk.wires.push_back({Port::block(4), Port::output(1), {-3.5f, 0.5f, -0.25f}, ""});
-    iniPunk.wires.push_back({Port::input(), Port::block(3, true), {}, ""});
+    // Routing a line cannot say: the IR merges into the Amp output too, from
+    // a second output on the IR with gains, a key, and a block placed on the board.
+    iniPunk.blocks[4].outs = {WireGains{}, WireGains{-3.5f, 0.5f, -0.25f}};
+    iniPunk.wires.push_back({Port::blockOut(4, 1), Port::output(1), ""});
+    iniPunk.wires.push_back({Port::input(), Port::block(3, true), ""});
     iniPunk.blocks[2].placed = true;
     iniPunk.blocks[2].x = 320;
     iniPunk.blocks[2].y = -40.5;
@@ -196,7 +197,7 @@ TEST(cue_file_round_trips_a_whole_performance) {
     CHECK(s.chains.size() == 2 && s.presets.size() == 2);
     const ChainSpec& punk = s.chains[0];
     CHECK(punk.name == "Punk" && punk.blocks.size() == 5);
-    CHECK_MSG(wireList(punk, c.outputs) == "in>0 0>1 1>2 2>3 1>4 4>FOH 1>Amp 4>Amp(-3.5dB w50 p-25) in>3:key", "%s", wireList(punk, c.outputs).c_str());
+    CHECK_MSG(wireList(punk, c.outputs) == "in>0 0>1 1>2 2>3 1>4 4>FOH 1>Amp 4@1>Amp(-3.5dB w50 p-25) in>3:key", "%s", wireList(punk, c.outputs).c_str());
     if (punk.blocks.size() != 5)
         return;
     CHECK(punk.blocks[2].placed && punk.blocks[2].x == 320 && punk.blocks[2].y == -40.5 && !punk.blocks[1].placed);
@@ -484,33 +485,43 @@ plugin = builtin:gain 1
 plugin = builtin:gain 0.5
 )", dir + "/loose.ini", ini, &err), "%s", err.c_str());
     ChainSpec& clean = ini.scenes.at(0).chains.at(0);
+    // The first plug-in and the input have two outputs each; loose wires
+    // leave the second ones.
+    clean.blocks[0].outs = {WireGains{}, WireGains{-6.0f}};
+    clean.inputOuts = {WireGains{}, WireGains{0.0f, 0.0f, -0.5f, true}};
     LooseSpec out;
-    out.port = Port::block(0);
+    out.port = Port::blockOut(0, 1);
     out.from = true;
     out.x = 120.25;
     out.y = -40;
-    out.gains.levelDb = -6;
     LooseSpec in;
     in.port = Port::block(1, true);
     in.from = false;
     in.x = 300;
     in.y = 80;
-    in.gains.pan = -0.5f;
     in.feedback = true;
+    LooseSpec fromIn;
+    fromIn.port = Port::input(1);
+    fromIn.from = true;
     LooseSpec amp;
     amp.port = Port::output(1);
     amp.from = false;
-    clean.loose = {out, in, amp};
+    clean.loose = {out, in, amp, fromIn};
     CHECK_MSG(saveCue(ini, dir + "/loose.cue", &err), "%s", err.c_str());
     CHECK_MSG(saveRig(ini, dir + "/rig.json", &err), "%s", err.c_str());
 
     Config c;
     CHECK_MSG(loadPerformance(dir + "/loose.cue", dir + "/rig.json", c, &err), "%s", err.c_str());
-    const std::vector<LooseSpec>& loose = c.scenes.at(0).chains.at(0).loose;
-    CHECK(loose.size() == 3);
-    if (loose.size() != 3)
+    const ChainSpec& back = c.scenes.at(0).chains.at(0);
+    const std::vector<LooseSpec>& loose = back.loose;
+    CHECK(loose.size() == 4);
+    if (loose.size() != 4)
         return;
-    CHECK(loose[0].from && loose[0].port == Port::block(0) && loose[0].x == 120.3 && loose[0].y == -40 && loose[0].gains.levelDb == -6);
-    CHECK(!loose[1].from && loose[1].port == Port::block(1, true) && loose[1].gains.pan == -0.5f && loose[1].feedback);
-    CHECK(!loose[2].from && loose[2].port == Port::output(1) && loose[2].gains.neutral());
+    CHECK(loose[0].from && loose[0].port == Port::blockOut(0, 1) && loose[0].x == 120.3 && loose[0].y == -40);
+    CHECK(!loose[1].from && loose[1].port == Port::block(1, true) && loose[1].feedback);
+    CHECK(!loose[2].from && loose[2].port == Port::output(1));
+    CHECK(loose[3].from && loose[3].port == Port::input(1));
+    CHECK(back.blocks.at(0).outs.size() == 2 && back.blocks[0].outs[0].neutral() && back.blocks[0].outs[1].levelDb == -6);
+    CHECK(back.blocks.at(1).outs.size() == 1 && back.blocks[1].outs[0].neutral());
+    CHECK(back.inputOuts.size() == 2 && back.inputOuts[1].pan == -0.5f && back.inputOuts[1].muted && back.inputOuts[1].width == 0.0f);
 }

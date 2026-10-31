@@ -25,12 +25,24 @@ bool isBlock(const PortInfo& p, int n) { return p.kind == PortInfo::Kind::Block 
 
 double halfWidthOf(Shape s) { return s == Shape::GainStage ? Board::gainStageR : s == Shape::Act ? Board::actR : Board::blockW / 2; }
 
+// Where output out of n sits on a side span tall: evenly about its middle,
+// at most 16 apart.
+double spread(int out, int n, double span) {
+    if (n <= 1)
+        return 0;
+    const double step = std::min(16.0, span / (n - 1));
+    return (std::clamp(out, 0, n - 1) - (n - 1) / 2.0) * step;
+}
+
 } // namespace
 
 Board::Board(const ChainInfo& c, int numOutputs, const QHash<int, QPointF>& moved) {
     const int n = c.blocks.size();
-    for (const PluginInfo& p : c.blocks)
+    for (const PluginInfo& p : c.blocks) {
         shapes_ << shapeOf(p);
+        outs_ << std::max(1, static_cast<int>(p.outs.size()));
+    }
+    inputOuts_ = std::max(1, static_cast<int>(c.inputOuts.size()));
 
     // The order the engine plays them in: what feeds a plug-in first, the
     // lowest slot first.
@@ -186,11 +198,19 @@ QRectF Board::box(int slot) const {
 
 QPointF Board::outPoint(const PortInfo& p) const {
     switch (p.kind) {
-    case PortInfo::Kind::Input: return input + QPointF(ioW / 2, 0);
-    case PortInfo::Kind::Block: return block.value(p.index) + QPointF(halfWidthOf(shapes_.value(p.index)), 0);
-    case PortInfo::Kind::Output: break;
+    case PortInfo::Kind::Input: return input + QPointF(ioW / 2, spread(p.out, inputOuts_, ioH - 16));
+    case PortInfo::Kind::Block: break;
+    case PortInfo::Kind::Output: return output.value(p.index);
     }
-    return output.value(p.index);
+    // On the edge of its shape: a hexagon's slants in to its corners, a circle's round.
+    const Shape s = shapes_.value(p.index);
+    const int n = outs_.value(p.index, 1);
+    if (s == Shape::Hexagon) {
+        const double dy = spread(p.out, n, blockH - 22);
+        return block.value(p.index) + QPointF(blockW / 2 - 14 * std::fabs(dy) / (blockH / 2), dy);
+    }
+    const double r = halfWidthOf(s), dy = spread(p.out, n, 2 * r - 10);
+    return block.value(p.index) + QPointF(std::sqrt(std::max(0.0, r * r - dy * dy)), dy);
 }
 
 QPointF Board::inPoint(const PortInfo& p) const {

@@ -56,14 +56,15 @@ A `.cue` file is a zip:
          "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru", "midi": true,
          "params": {"54": 1}, "state": "states/01 Covers/01 Punk/01 Gain Stage.clapstate", "x": 196, "y": 109},
         {"format": "vst3", "path": "~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "...": "..."},
-        {"format": "clap", "path": "~/.clap/TwoStorms IR Loader.clap", "...": "..."}
+        {"format": "clap", "path": "~/.clap/TwoStorms IR Loader.clap", "...": "...",
+         "outputs": [{}, {"level_db": -3, "width": 50, "pan": -30}]}
       ],
       "wires": [
         {"from": "Bass", "to": 0},
         {"from": 0, "to": 1},
         {"from": 1, "to": 2},
         {"from": 2, "to": "FOH"},
-        {"from": 1, "to": "Amp", "level_db": -3, "width": 50, "pan": -30}
+        {"from": 2, "out": 1, "to": "Amp"}
       ]
     }]
   }],
@@ -85,20 +86,26 @@ A `.cue` file is a zip:
   in the order listed; `wires` join them. A wire comes `from` the chain's
   input (by its name, or `in`) or a block's output (its number), and goes
   `to` a block's input, its side-chain input with `"key": true`, or an
-  output (by name). A block's output can feed any number of wires, and wires
-  into one input are summed. Each wire has a `level_db` (0 when left out;
-  -96 or less is off), a `width` (100 % when left out; 0 folds to mono, up
-  to 200), a `pan` (a balance, -100 left to 100 right, 0 when left out),
-  and `muted`. Width comes before pan. A loop is refused as the file loads.
+  output (by name). `out` says which of its source's outputs it leaves: 0
+  (1-2, when left out), 1 (3-4) and on. An output can feed any number of
+  wires, and wires into one input are summed. A loop is refused as the file
+  loads.
+- **Outputs.** Every block, and the chain's input, has one output (1-2) or
+  more, up to 8 (15-16): `outputs` on a block, `input_outputs` on the chain,
+  left out when there is one as it starts. Each has a `level_db` (0 when
+  left out; -96 or less is off), a `width` (100 % when left out; 0 folds to
+  mono, up to 200), a `pan` (a balance, -100 left to 100 right, 0 when left
+  out), and `muted`. Width comes before pan. Every wire leaving an output
+  carries it so: a wire has none of these of its own.
   A block that the input does not reach, or no output hears, is loaded but
   not processed. `x` and `y` are where the app's routing board draws a
   block the user put somewhere; a block without them is laid out from its
   wires.
 - **Loose wires.** `loose` (left out when there are none) lists wires
   attached at one end only, left where a plug-in was pulled out of them:
-  each has `from` or `to` (as a wire's), `key`, `x` and `y` (where its loose
-  end lies on the board) and the wire's `level_db`, `width`, `pan`, `muted`
-  and `feedback`, kept for when it is plugged in again. They carry nothing.
+  each has `from` (with its `out`) or `to` (as a wire's), `key`, `x` and `y`
+  (where its loose end lies on the board) and `feedback`, kept for when it
+  is plugged in again. They carry nothing.
 - **Board.** `board` (left out until something is put there) says where the
   routing board draws the chain's `input` and its `outputs` (by name), each
   `{"x": ..., "y": ...}`; what is missing is laid out from the wires.
@@ -120,7 +127,7 @@ A `.cue` file is a zip:
   (its calibration), each output's `level_db`, `muted` and `limiter` after
   every chain is mixed, by name, and the settings Auto uses on each
   (`measure`: peak, rms or lufs; `target_db`; `seconds`). `wires` holds the
-  settings of Auto on the plug-ins' outputs (the wires leaving them), the
+  settings of Auto on the plug-ins' outputs, the
   same in every chain, with `match` (true: as loud as the plug-in is fed;
   false: to the target). Only what is not as it starts is written: 0 dB, not
   muted, the limiter off with a -1 dB ceiling and 100 ms release, Auto on

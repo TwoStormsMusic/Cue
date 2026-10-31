@@ -58,8 +58,12 @@ bool rewire(LiveRig& live, int chain, ChainSpec next, const std::vector<int>& ke
             brought.push_back(added[a].get());
             edit.added.push_back({std::move(added[a++]), next.blocks[i].bypassed, next.blocks[i].muteOnBypass});
         }
-    for (const WireSpec& w : next.wires)
-        edit.wires.push_back({w.from, w.to, w.gains, 0, w.feedback});
+    for (const WireSpec& w : next.wires) {
+        const std::vector<WireGains>* outs = outsOf(static_cast<const ChainSpec&>(next), w.from);
+        if (w.from.out >= (outs ? outs->size() : 1))
+            return fail(error, "a wire leaves an output its plug-in or input does not have");
+        edit.wires.push_back({w.from, w.to, gainsOf(next, w.from), 0, w.feedback});
+    }
     Engine::PreparedEdit prepared;
     if (!engine.prepareEdit(chain, edit, prepared, error))
         return false;
@@ -172,9 +176,9 @@ bool addPlugin(LiveRig& live, int chain, PluginSpec spec, const WireSpec* on, si
         if (w < 0)
             return fail(error, "there is no such wire to put it on");
         const WireSpec was = next.wires[w];
-        next.wires[w] = {was.from, Port::block(n), {}, was.where};
+        next.wires[w] = {was.from, Port::block(n), was.where};
         // On a feedback wire, the new plug-in's way on is the one heard late.
-        next.wires.insert(next.wires.begin() + w + 1, {Port::block(n), was.to, was.gains, was.where, was.feedback});
+        next.wires.insert(next.wires.begin() + w + 1, {Port::block(n), was.to, was.where, was.feedback});
     }
     std::unique_ptr<Processor> p;
     if (!loadLivePlugin(spec, live.rig.engine->settings(), p, error))
@@ -204,11 +208,11 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
     const Port self = Port::block(static_cast<int>(slot));
     std::vector<WireSpec> into, outOf, wires;
     for (const WireSpec& w : next.wires) {
-        if (w.from == self && w.to.kind == Port::Kind::Block && w.to.index == self.index)
+        if (w.from.same(self) && w.to.kind == Port::Kind::Block && w.to.index == self.index)
             continue; // into itself: it goes with it
         if (w.to == self)
             into.push_back(w);
-        else if (w.from == self)
+        else if (w.from.same(self))
             outOf.push_back(w);
         else if (!(w.to.kind == Port::Kind::Block && w.to.index == self.index))
             wires.push_back(w); // its key's wires go with it
@@ -218,7 +222,7 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
         for (const WireSpec& b : outOf) {
             const bool there = std::any_of(wires.begin(), wires.end(), [&](const WireSpec& w) { return w.from == a.from && w.to == b.to; });
             if (!there)
-                wires.push_back({a.from, b.to, b.gains, b.where, a.feedback || b.feedback});
+                wires.push_back({a.from, b.to, b.where, a.feedback || b.feedback});
         }
     for (WireSpec& w : wires)
         for (Port* p : {&w.from, &w.to})
@@ -275,18 +279,103 @@ bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error)
         return fail(error, "there is no chain number " + std::to_string(chain + 1));
     const int w = findWire(*cs, wire.from, wire.to);
     if (w >= 0) {
-        // Only its gains: they move, nothing is swapped. How it is drawn
-        // is the app's.
-        if (!live.rig.engine->setWire(chain, wire.from, wire.to, wire.gains))
-            return fail(error, "the engine has no such wire");
-        cs->wires[w].gains = wire.gains;
+        // Only how it is drawn, which is the app's.
         cs->wires[w].jump = wire.jump;
         cs->wires[w].jumpOut = wire.jumpOut;
         cs->wires[w].jumpIn = wire.jumpIn;
         return true;
     }
+    const std::vector<WireGains>* outs = outsOf(*cs, wire.from);
+    if (outs && wire.from.out >= outs->size())
+        return fail(error, "it has no output " + std::to_string(wire.from.out + 1));
     ChainSpec next = *cs;
     next.wires.push_back(wire);
+    return rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error);
+}
+
+bool setOutput(LiveRig& live, int chain, Port from, const WireGains& gains, std::string* error) {
+    ChainSpec* cs = chainSpec(live.config, chain);
+    if (!cs)
+        return fail(error, "there is no chain number " + std::to_string(chain + 1));
+    std::vector<WireGains>* outs = outsOf(*cs, from);
+    if (!outs || from.out >= outs->size())
+        return fail(error, "there is no such output");
+    // Every wire leaving it moves to them, with a short fade; nothing is swapped.
+    for (const WireSpec& w : cs->wires)
+        if (w.from == from && !live.rig.engine->setWire(chain, w.from, w.to, gains))
+            return fail(error, "the engine has no such wire");
+    (*outs)[from.out] = gains;
+    return true;
+}
+
+bool setOutputs(LiveRig& live, int chain, Port from, const std::vector<WireGains>& gains, std::string* error) {
+    ChainSpec* cs = chainSpec(live.config, chain);
+    if (!cs)
+        return fail(error, "there is no chain number " + std::to_string(chain + 1));
+    const std::vector<WireGains>* outs = outsOf(*cs, from);
+    if (!outs)
+        return fail(error, "only the input and plug-ins have outputs");
+    if (gains.empty() || gains.size() > static_cast<size_t>(kMaxOuts))
+        return fail(error, "it has 1 to " + std::to_string(kMaxOuts) + " outputs");
+    const size_t had = outs->size();
+    if (gains.size() >= had) {
+        // As many or more: each that was there moves, the new ones carry nothing yet.
+        for (size_t o = 0; o < had; ++o) {
+            Port p = from;
+            p.out = static_cast<uint8_t>(o);
+            if (!setOutput(live, chain, p, gains[o], error))
+                return false;
+        }
+        outsOf(*chainSpec(live.config, chain), from)->assign(gains.begin(), gains.end());
+        return true;
+    }
+    // Fewer: the wires leaving those it no longer has go.
+    ChainSpec next = *cs;
+    *outsOf(next, from) = gains;
+    std::vector<WireSpec> wires;
+    for (const WireSpec& w : next.wires)
+        if (!(w.from.same(from) && w.from.out >= gains.size()))
+            wires.push_back(w);
+    next.wires = std::move(wires);
+    std::vector<LooseSpec> loose;
+    for (const LooseSpec& l : next.loose)
+        if (!(l.from && l.port.same(from) && l.port.out >= gains.size()))
+            loose.push_back(l);
+    next.loose = std::move(loose);
+    return rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error);
+}
+
+bool removeOutput(LiveRig& live, int chain, Port from, std::string* error) {
+    ChainSpec* cs = chainSpec(live.config, chain);
+    if (!cs)
+        return fail(error, "there is no chain number " + std::to_string(chain + 1));
+    const std::vector<WireGains>* outs = outsOf(*cs, from);
+    if (!outs || from.out >= outs->size())
+        return fail(error, "there is no such output");
+    if (outs->size() == 1)
+        return fail(error, "it keeps one output at least");
+    // Its wires go; those leaving the outputs after it are renumbered.
+    ChainSpec next = *cs;
+    std::vector<WireGains>& now = *outsOf(next, from);
+    now.erase(now.begin() + from.out);
+    std::vector<WireSpec> wires;
+    for (WireSpec w : next.wires) {
+        if (w.from.same(from) && w.from.out == from.out)
+            continue;
+        if (w.from.same(from) && w.from.out > from.out)
+            --w.from.out;
+        wires.push_back(w);
+    }
+    next.wires = std::move(wires);
+    std::vector<LooseSpec> loose;
+    for (LooseSpec l : next.loose) {
+        if (l.from && l.port.same(from) && l.port.out == from.out)
+            continue;
+        if (l.from && l.port.same(from) && l.port.out > from.out)
+            --l.port.out;
+        loose.push_back(l);
+    }
+    next.loose = std::move(loose);
     return rewire(live, chain, std::move(next), unchanged(cs->blocks.size()), {}, error);
 }
 

@@ -27,8 +27,8 @@ ChainSpec* chainSpec(Config& config, int chain);
 // Main thread. Each returns false with why, and then nothing has changed.
 
 // A plug-in, loaded and added to a chain. on: the wire it goes on, which
-// then runs through it (the wire's gains stay with the part that arrives
-// where it did); without one it is not wired. slot: where it went.
+// then runs through it (from the same output as before, and on from the
+// plug-in's first); without one it is not wired. slot: where it went.
 bool addPlugin(LiveRig& live, int chain, PluginSpec spec, const WireSpec* on, size_t* slot, std::string* error);
 // What a removal took out, so it can be put back as it was (an undo).
 struct Removed {
@@ -47,9 +47,18 @@ bool removePlugin(LiveRig& live, int chain, size_t slot, Removed* removed, std::
 // The plug-in back where it was, with its state and the chain's wires as
 // they were. Refused if the chain has gained or lost a plug-in since.
 bool restorePlugin(LiveRig& live, const Removed& removed, std::string* error);
-// A wire between two ports, or new gains for the one already there (which
-// move with a short fade rather than a swap).
+// A wire between two ports (from one of its source's outputs), or how the
+// one already there is drawn.
 bool setWire(LiveRig& live, int chain, const WireSpec& wire, std::string* error);
+// The gains of one output (from.out) of the chain's input or a plug-in:
+// every wire leaving it moves to them with a short fade.
+bool setOutput(LiveRig& live, int chain, Port from, const WireGains& gains, std::string* error);
+// ...all of its outputs at once: more of them adds outputs that carry
+// nothing yet; fewer takes the last ones out, and the wires leaving them.
+bool setOutputs(LiveRig& live, int chain, Port from, const std::vector<WireGains>& gains, std::string* error);
+// One output taken out (it keeps one at least): its wires go, and those of
+// the outputs after it move down a number.
+bool removeOutput(LiveRig& live, int chain, Port from, std::string* error);
 bool removeWire(LiveRig& live, int chain, Port from, Port to, std::string* error);
 // A chain's wires all at once: what an undo puts back. With loose, its
 // loose wires too (pulling a plug-in out, plugging one in); without wires,

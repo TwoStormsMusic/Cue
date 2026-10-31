@@ -48,7 +48,7 @@ void Settings::save() const {
 AppState::AppState(EngineLink& l, QObject* parent) : QObject(parent), link(l) {
     connect(&link, &EngineLink::connectionChanged, this, &AppState::onConnection);
     connect(&link, &EngineLink::event, this, &AppState::onEvent);
-    link.setEvents({"status", "log", "tuner", "performance", "wire", "scan", "plugins", "edited", "io", "auto"});
+    link.setEvents({"status", "log", "tuner", "performance", "wire", "output", "scan", "plugins", "edited", "io", "auto"});
 }
 
 void AppState::onConnection(bool up) {
@@ -106,34 +106,25 @@ void AppState::onEvent(const QString& name, const QJsonObject& m) {
         emit changed();
     } else if (name == "wire") {
         setWire(m.value("chain").toInt(-1), m.value("wire").toObject());
+    } else if (name == "output") {
+        setOutput(m.value("chain").toInt(-1), m.value("output").toObject());
     } else if (name == "io") {
         setLevels(m);
     } else if (name == "auto" && m.contains("chain")) {
-        // Auto on a block's output.
-        const int chain = m.value("chain").toInt(-1);
-        const QString key = autoKey(chain, m.value("from"), m.value("to"), m.value("key").toBool()), state = m.value("state").toString();
+        // Auto on an output of a plug-in or of the chain's input.
+        const int chain = m.value("chain").toInt(-1), out = m.value("out").toInt(0);
+        const QString key = autoKey(chain, m.value("from"), out), state = m.value("state").toString();
         if (state == "waiting" || state == "listening") {
             autoNow[key] = {state == "listening", m.value("seconds").toDouble(), m.value("of").toDouble()};
         } else {
             autoNow.remove(key);
             const ChainInfo* c = perf.chain(chain);
-            auto end = [&](const QJsonValue& v, bool from) {
-                if (v.isDouble()) {
-                    const PluginInfo* pi = c ? c->plugin(v.toInt()) : nullptr;
-                    return pi ? pi->label : QString("Block %1").arg(v.toInt() + 1);
-                }
-                const int o = perf.output(v.toString());
-                return from ? (c ? c->input : QString("the input")) : perf.outputs.value(o, v.toString());
-            };
-            const QString what = end(m.value("from"), true) + " → " + end(m.value("to"), false);
+            const QJsonValue fromJ = m.value("from");
+            const PortInfo from = fromJ.isDouble() ? PortInfo::blockOut(fromJ.toInt(), out) : PortInfo::input(out);
+            const QString what = c ? outputName(*c, from) : OutputInfo::name(out);
             if (state == "done") {
                 // Undone like a fader moved by hand.
-                auto set = [&](double db) {
-                    QJsonObject r{{"cmd", "wire"}, {"chain", chain}, {"from", m.value("from")}, {"to", m.value("to")}, {"level_db", db}};
-                    if (m.value("key").toBool())
-                        r["key"] = true;
-                    return r;
-                };
+                auto set = [&](double db) { return QJsonObject{{"cmd", "output"}, {"chain", chain}, {"from", fromJ}, {"out", out}, {"level_db", db}}; };
                 edited({"Auto on " + what, chain, -1, set(m.value("from_db").toDouble()), set(m.value("to_db").toDouble())});
                 const double to = m.value("to_db").toDouble();
                 QString heard = QString("it heard %1 dB").arg(m.value("level_db").toDouble(), 0, 'f', 1);
@@ -262,6 +253,8 @@ void AppState::follow(const QJsonObject& request, const QJsonObject& r) {
         setLevels(r.value("io").toObject());
     } else if (r.contains("wire")) {
         setWire(request.value("chain").toInt(-1), r.value("wire").toObject());
+    } else if (r.contains("output")) {
+        setOutput(request.value("chain").toInt(-1), r.value("output").toObject());
     } else if (request.value("cmd").toString() == "place") {
         ChainInfo* c = perf.chain(request.value("chain").toInt(-1));
         const int slot = request.value("slot").toInt(-1);
@@ -316,20 +309,22 @@ void AppState::runAuto(bool input, int index, bool cancel) {
     });
 }
 
-QString AppState::autoKey(int chain, const QJsonValue& from, const QJsonValue& to, bool key) {
-    auto end = [](const QJsonValue& v) { return v.isDouble() ? QString::number(v.toInt()) : v.toString().toLower(); };
-    return QString("wire %1 %2 %3%4").arg(chain).arg(end(from), end(to), key ? " key" : "");
+QString AppState::autoKey(int chain, const QJsonValue& from, int out) {
+    const QString end = from.isDouble() ? QString::number(from.toInt()) : QString("in");
+    return QString("output %1 %2 %3").arg(chain).arg(end).arg(out);
 }
 
-QString AppState::autoKey(int chain, const WireInfo& w) const {
-    return autoKey(chain, w.from.json(perf.outputs), w.to.json(perf.outputs), w.to.key);
+QString AppState::outputName(const ChainInfo& c, const PortInfo& from) const {
+    const PluginInfo* pi = from.kind == PortInfo::Kind::Block ? c.plugin(from.index) : nullptr;
+    const QString source = pi ? pi->label : from.kind == PortInfo::Kind::Input ? c.input : QString("Block %1").arg(from.index + 1);
+    return source + " " + OutputInfo::name(from.out);
 }
 
-void AppState::runAuto(int chain, const WireInfo& w, bool cancel) {
-    QJsonObject req = w.request(chain, perf.outputs, "auto");
+void AppState::runAuto(int chain, const PortInfo& from, bool cancel) {
+    QJsonObject req{{"cmd", "auto"}, {"chain", chain}, {"from", from.json(perf.outputs)}, {"out", from.out}};
     if (cancel)
         req["cancel"] = true;
-    const QString key = autoKey(chain, w);
+    const QString key = autoKey(chain, from);
     link.request(req, [this, key, cancel](const QJsonObject& r) {
         if (!check(r, "Auto"))
             return;
@@ -347,7 +342,7 @@ void AppState::setWireAuto(const AutoInfo& to, bool match, std::function<void(co
     change({{"cmd", "level"}, {"wires", true}, {"auto", a}}, std::move(then));
 }
 
-// A wire's gains, as the engine has them now.
+// A wire as the engine has it now: how it is drawn.
 void AppState::setWire(int chain, const QJsonObject& wj) {
     ChainInfo* found = perf.chain(chain);
     if (!found)
@@ -358,15 +353,24 @@ void AppState::setWire(int chain, const QJsonObject& wj) {
             return PortInfo::block(v.toInt(), !from && wj.value("key").toBool());
         return from ? PortInfo::input() : PortInfo::output(perf.output(v.toString()));
     };
-    const int i = c.wire(port(wj.value("from"), true), port(wj.value("to"), false));
+    const int i = c.wire(port(wj.value("from"), true).withOut(wj.value("out").toInt(0)), port(wj.value("to"), false));
     if (i < 0)
         return;
-    WireInfo& w = c.wires[i];
-    w.levelDb = wj.value("level_db").toDouble(0);
-    w.width = wj.value("width").toDouble(100);
-    w.pan = wj.value("pan").toDouble(0);
-    w.muted = wj.value("muted").toBool();
-    w.readJump(wj);
+    c.wires[i].readJump(wj);
+    emit changed();
+}
+
+// An output's gains, as the engine has them now.
+void AppState::setOutput(int chain, const QJsonObject& oj) {
+    ChainInfo* c = perf.chain(chain);
+    if (!c)
+        return;
+    const QJsonValue from = oj.value("from");
+    const int out = oj.value("out").toInt(0);
+    QVector<OutputInfo>* outs = c->outsOf(from.isDouble() ? PortInfo::block(from.toInt()) : PortInfo::input());
+    if (!outs || out < 0 || out >= outs->size())
+        return;
+    (*outs)[out] = OutputInfo::fromJson(oj);
     emit changed();
 }
 

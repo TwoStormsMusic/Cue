@@ -40,8 +40,8 @@ struct Board {
     // A block's outline and the box around it.
     QRectF box(int slot) const;
     QRectF ioBox(QPointF center) const { return {center.x() - ioW / 2, center.y() - ioH / 2, ioW, ioH}; }
-    // Where a wire leaves a port (the right side of what it comes out of)
-    // and where one arrives (the left side, or a block's key: the small
+    // Where a wire leaves a port (the right side of what it comes out of,
+    // its outputs one above the other, 1-2 at the top) and where one arrives (the left side, or a block's key: the small
     // triangle low on its left).
     QPointF outPoint(const PortInfo& p) const;
     QPointF inPoint(const PortInfo& p) const;
@@ -57,6 +57,8 @@ struct Board {
 
 private:
     QVector<Shape> shapes_;
+    QVector<int> outs_; // how many outputs each block has
+    int inputOuts_ = 1;
 };
 
 } // namespace cue::gui

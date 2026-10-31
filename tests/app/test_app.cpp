@@ -58,11 +58,12 @@ const char* kPerformance = R"({
     {"name": "Slap", "display": "SL", "pedal": 7, "warm": "next", "blocks": [
        {"format": "clap", "path": "~/x/Test.clap", "id": "cue.test.gain", "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru"},
        {"format": "builtin", "args": ["lowpass", "2500"], "label": "Wah", "bypassed": true, "bypass_mode": "thru"},
-       {"format": "builtin", "args": ["gain", "1"], "label": "Act", "bypassed": false, "bypass_mode": "thru"},
+       {"format": "builtin", "args": ["gain", "1"], "label": "Act", "bypassed": false, "bypass_mode": "thru",
+        "outputs": [{}, {"level_db": -3, "width": 50, "pan": -30}]},
        {"format": "builtin", "args": ["lowpass", "6000"], "label": "IR Loader", "bypassed": false, "bypass_mode": "mute"},
        {"format": "clap", "path": "~/x/Test.clap", "id": "cue.test.delay", "label": "Chorus", "bypassed": true, "bypass_mode": "thru", "has_key": true}],
      "wires": [{"from": "Bass", "to": 0}, {"from": 0, "to": 1}, {"from": 1, "to": 2}, {"from": 2, "to": 3}, {"from": 3, "to": 4},
-               {"from": 4, "to": "FOH"}, {"from": 2, "to": "Amp", "level_db": -3, "width": 50, "pan": -30}]},
+               {"from": 4, "to": "FOH"}, {"from": 2, "out": 1, "to": "Amp"}]},
     {"name": "2000s", "pedal": 8, "warm": "next", "blocks": [], "wires": [{"from": "Bass", "to": "FOH"}, {"from": "Bass", "to": "Amp"}]},
     {"name": "Motown", "pedal": 9, "warm": "next", "blocks": [], "wires": [{"from": "Bass", "to": "FOH"}, {"from": "Bass", "to": "Amp"}]},
     {"name": "Djent", "pedal": 10, "warm": "next", "blocks": [], "wires": [{"from": "Bass", "to": "FOH"}, {"from": "Bass", "to": "Amp"}]}]}],
@@ -198,13 +199,30 @@ private slots:
         QCOMPARE(slap.plugin(1)->args, (QStringList{"lowpass", "2500"}));
         QCOMPARE(slap.wires.size(), 7);
         QCOMPARE(slap.wires[0].from, PortInfo::input());
-        const int amp = slap.wire(PortInfo::block(2), PortInfo::output(1));
+        // Act's second output, 3-4, goes to the Amp with gains of its own.
+        const int amp = slap.wire(PortInfo::blockOut(2, 1), PortInfo::output(1));
         QVERIFY(amp >= 0);
-        QCOMPARE(slap.wires[amp].levelDb, -3.0);
-        QCOMPARE(slap.wires[amp].width, 50.0);
-        QCOMPARE(slap.wires[amp].pan, -30.0);
-        QVERIFY(!slap.wires[amp].neutral());
-        QVERIFY(slap.wires[0].neutral());
+        QCOMPARE(slap.numOuts(PortInfo::block(2)), 2);
+        QCOMPARE(slap.numOuts(PortInfo::block(3)), 1);
+        QCOMPARE(slap.numOuts(PortInfo::input()), 1);
+        QCOMPARE(slap.numOuts(PortInfo::output(0)), 0);
+        const OutputInfo g = slap.gainsOf(slap.wires[amp].from);
+        QCOMPARE(g.levelDb, -3.0);
+        QCOMPARE(g.width, 50.0);
+        QCOMPARE(g.pan, -30.0);
+        QVERIFY(!g.neutral());
+        QVERIFY(slap.gainsOf(PortInfo::block(2)).neutral());
+        QVERIFY(slap.gainsOf(slap.wires[0].from).neutral());
+        QCOMPARE(slap.wiresFrom(PortInfo::blockOut(2, 1)), QVector<int>{amp});
+        QCOMPARE(slap.wiresFrom(PortInfo::block(2)).size(), 1);
+        QCOMPARE(OutputInfo::name(1), QString("3-4"));
+        QCOMPARE(slap.wires[amp].request(1, p.outputs).value("out").toInt(), 1);
+        QVERIFY(!slap.wires[0].request(1, p.outputs).contains("out"));
+        const QJsonObject set = outputRequest(1, PortInfo::blockOut(2, 1), g);
+        QCOMPARE(set.value("cmd").toString(), QString("output"));
+        QCOMPARE(set.value("from").toInt(), 2);
+        QCOMPARE(set.value("out").toInt(), 1);
+        QCOMPARE(set.value("pan").toDouble(), -30.0);
         QCOMPARE(slap.outputsUsed(), (QVector<int>{0, 1}));
         // A request names the ends as the engine does: an output by number,
         // which stays if it is renamed.
@@ -214,7 +232,8 @@ private slots:
         QCOMPARE(p.output("out2"), 1);
         QCOMPARE(p.output("foh"), 0);
         QCOMPARE(p.output("out3"), -1);
-        QCOMPARE(r.value("pan").toDouble(), -30.0);
+        QCOMPARE(r.value("out").toInt(), 1);
+        QVERIFY(!r.contains("pan"));
         // A chain with no plug-ins: its input wired straight to the outputs.
         QCOMPARE(p.chains[2].wires.size(), 2);
         QCOMPARE(p.chains[2].wires[1].to, PortInfo::output(1));
@@ -270,7 +289,7 @@ private slots:
         QVERIFY(!f.wires[w(PortInfo::block(2), PortInfo::block(3))]);
         QVERIFY(!f.wires[w(PortInfo::block(3), PortInfo::block(4))]);
         QVERIFY(!f.wires[w(PortInfo::block(4), PortInfo::output(0))]);
-        QVERIFY(f.wires[w(PortInfo::block(2), PortInfo::output(1))]);
+        QVERIFY(f.wires[w(PortInfo::blockOut(2, 1), PortInfo::output(1))]);
         QVERIFY(f.wires[w(PortInfo::block(1), PortInfo::block(2))]);
         QVERIFY(f.played[3]);
         QVERIFY(!f.heard[0]);
@@ -288,15 +307,15 @@ private slots:
         QVERIFY(!f.played[4]);
         QVERIFY(!f.played[3]);
         QVERIFY(!f.wires[cut.wire(PortInfo::block(2), PortInfo::block(3))]);
-        QVERIFY(f.wires[cut.wire(PortInfo::block(2), PortInfo::output(1))]);
+        QVERIFY(f.wires[cut.wire(PortInfo::blockOut(2, 1), PortInfo::output(1))]);
         QVERIFY(!f.heard[0]);
-        // A muted wire carries nothing; one into a key carries the sound
+        // A muted output carries nothing; a wire into a key carries the sound
         // the plug-in listens to.
         ChainInfo muted = slap;
-        muted.wires[muted.wire(PortInfo::block(2), PortInfo::output(1))].muted = true;
+        muted.blocks[2].outs[1].muted = true;
         muted.wires.append(WireInfo{PortInfo::block(0), PortInfo::block(4, true)});
         f = flowOf(muted, none, false, 2);
-        QVERIFY(!f.wires[muted.wire(PortInfo::block(2), PortInfo::output(1))]);
+        QVERIFY(!f.wires[muted.wire(PortInfo::blockOut(2, 1), PortInfo::output(1))]);
         QVERIFY(!f.heard[1]);
         QVERIFY(f.wires.last());
     }
@@ -324,8 +343,13 @@ private slots:
             QVERIFY(b.bounds.contains(b.box(i)));
         // The wire to the Amp passes nothing on its row, so it is straight;
         // the one back to the branch's start goes round.
-        const QPainterPath amp = b.path(slap.wires[slap.wire(PortInfo::block(2), PortInfo::output(1))]);
-        QCOMPARE(amp.pointAtPercent(0.5).y(), b.block[2].y());
+        const QPainterPath amp = b.path(slap.wires[slap.wire(PortInfo::blockOut(2, 1), PortInfo::output(1))]);
+        QVERIFY(std::fabs(amp.pointAtPercent(0.5).y() - b.block[2].y()) < 9);
+        // Act's two outputs: two dots on its right, 1-2 above 3-4, on its edge.
+        const QPointF o1 = b.outPoint(PortInfo::block(2)), o2 = b.outPoint(PortInfo::blockOut(2, 1));
+        QVERIFY(o1.y() < b.block[2].y() && o2.y() > b.block[2].y());
+        QVERIFY(o1.x() > b.block[2].x() && o1.x() <= b.box(2).right() && std::fabs(o1.x() - o2.x()) < 0.01);
+        QCOMPARE(b.outPoint(PortInfo::block(3)).y(), b.block[3].y());
         const QPainterPath down = b.path(slap.wires[slap.wire(PortInfo::block(2), PortInfo::block(3))]);
         QVERIFY(down.boundingRect().right() > b.box(2).right());
         // A key is low on the left.
@@ -1074,7 +1098,8 @@ private slots:
             QTest::mouseRelease(v, Qt::LeftButton, {}, to.toPoint());
         };
 
-        // A tap on a wire selects it; its level fader moves it.
+        // A tap on a wire selects it; its level fader moves the output it
+        // carries: the Gain Stage's first.
         const int gw = slap.wire(PortInfo::block(0), PortInfo::block(1));
         tapAt(b.path(slap.wires[gw]).pointAtPercent(0.5));
         QCOMPARE(v->selectedWire(), gw);
@@ -1086,24 +1111,26 @@ private slots:
         QVERIFY(!v->hitRect("wire pan").isEmpty());
         QVERIFY(!v->hitRect("insert").isEmpty());
         drag(level.center(), QPointF(level.right() - 2, level.center().y()));
-        QJsonObject wire = link.last("wire");
-        QCOMPARE(wire.value("chain").toInt(), 1);
-        QCOMPARE(wire.value("from").toInt(), 0);
-        QCOMPARE(wire.value("to").toInt(), 1);
-        QVERIFY(wire.value("level_db").toDouble() > 10);
+        QJsonObject set = link.last("output");
+        QCOMPARE(set.value("chain").toInt(), 1);
+        QCOMPARE(set.value("from").toInt(), 0);
+        QCOMPARE(set.value("out").toInt(-1), 0);
+        QVERIFY(!set.contains("to"));
+        QVERIFY(set.value("level_db").toDouble() > 10);
         shot(v, "routing-wire");
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
-        QCOMPARE(link.last("wire").value("level_db").toDouble(), 0.0);
+        QCOMPARE(link.last("output").value("level_db").toDouble(), 0.0);
         QTest::keyClick(&w, Qt::Key_Y, Qt::ControlModifier);
-        QVERIFY(link.last("wire").value("level_db").toDouble() > 10);
+        QVERIFY(link.last("output").value("level_db").toDouble() > 10);
         // Pan from the middle; mute keeps the level.
         v->grab();
         const QRectF pan = v->hitRect("wire pan");
         drag(pan.center(), QPointF(pan.left() + 2, pan.center().y()));
-        QCOMPARE(link.last("wire").value("pan").toDouble(), -100.0);
+        QCOMPARE(link.last("output").value("pan").toDouble(), -100.0);
         v->grab();
         click(v, v->hitRect("wire mute"));
-        QVERIFY(link.last("wire").value("muted").toBool());
+        QVERIFY(link.last("output").value("muted").toBool());
+        QJsonObject wire;
         // Drawn as a jump: only how it looks, undone like the rest.
         v->grab();
         click(v, v->hitRect("wire jump"));
@@ -1250,7 +1277,6 @@ private slots:
             fb.from = PortInfo::block(2);
             fb.to = PortInfo::block(1);
             fb.feedback = true;
-            fb.levelDb = -12;
             shown->wires << fb;
             v->grab();
             shot(v, "routing-feedback");
@@ -1259,20 +1285,20 @@ private slots:
         s.settings.feedbackWires = false;
 
         // Delete takes the selected wire away; undo puts it back as it was.
-        const int aw = slap.wire(PortInfo::block(2), PortInfo::output(1));
+        const int aw = slap.wire(PortInfo::blockOut(2, 1), PortInfo::output(1));
         tapAt(Board(*s.chain(1), 2).path(slap.wires[aw]).pointAtPercent(0.5));
         QCOMPARE(v->selectedWire(), aw);
         shot(v, "routing-thick-wire");
         QTest::keyClick(&w, Qt::Key_Delete);
         QCOMPARE(link.last("unwire").value("from").toInt(), 2);
+        QCOMPARE(link.last("unwire").value("out").toInt(), 1);
         QCOMPARE(link.last("unwire").value("to").toString(), QString("out2"));
         QCOMPARE(v->selectedWire(), -1);
         QTest::keyClick(&w, Qt::Key_Z, Qt::ControlModifier);
         wire = link.last("wire");
         QCOMPARE(wire.value("from").toInt(), 2);
-        QCOMPARE(wire.value("level_db").toDouble(), -3.0);
-        QCOMPARE(wire.value("width").toDouble(), 50.0);
-        QCOMPARE(wire.value("pan").toDouble(), -30.0);
+        QCOMPARE(wire.value("out").toInt(), 1);
+        QVERIFY(!wire.contains("level_db"));
 
         // A plug-in dragged goes where it was let go; undo moves it back.
         v->grab();
@@ -2100,7 +2126,7 @@ private slots:
         click(v, v->hitRect("block 2"));
         v->grab();
         click(v, v->hitRect("eject"));
-        QVERIFY(s.chain(1)->wire(PortInfo::block(2), PortInfo::output(1)) < 0);
+        QVERIFY(s.chain(1)->wire(PortInfo::blockOut(2, 1), PortInfo::output(1)) < 0);
         const Board ejected(*s.chain(1), 2);
         QCOMPARE(ejected.output[0], was.output[0]);
         QCOMPARE(ejected.output[1], was.output[1]);
@@ -2277,27 +2303,71 @@ private slots:
         s.undo();
         QVERIFY(!s.perf.levels.outputs.value(0).limiter);
 
-        // Chain: its own input, and its wires into the outputs.
+        // Chain: its own input, then a card for every output of the input
+        // and of each plug-in.
         v->grab();
         click(v, v->hitRect("io tab chain"));
         v->grab();
         QVERIFY(!v->hitRect("io in 0 fader").isEmpty());
-        int wiresShown = 0;
-        for (int i = 0; i < s.chain(1)->wires.size(); ++i)
-            wiresShown += !v->hitRect(QString("io wire %1 fader").arg(i)).isEmpty();
-        QVERIFY(wiresShown >= 2);
+        for (const char* id : {"io out in 0 fader", "io out 0 0 fader", "io out 2 0 fader", "io out 2 1 fader", "io out 0 0 add",
+                               "io out 0 0 width", "io out 0 0 pan", "io out 0 0 menu", "io out 0 0 mute", "io out 0 0 auto"})
+            QVERIFY2(!v->hitRect(id).isEmpty(), id);
+        QVERIFY(v->hitRect("io out 2 2 fader").isEmpty());
         shot(v, "gain-stage-chain");
-        // Every wire leaving a plug-in is one of its outputs: its card sets
-        // the wire's level, mute and mono.
-        const int first = s.chain(1)->wire(PortInfo::input(), PortInfo::block(0));
-        QVERIFY(first >= 0);
-        click(v, v->hitRect(QString("io wire %1 mono").arg(first)));
-        QJsonObject wired = link.last("wire");
-        QCOMPARE(wired.value("width").toDouble(-1), 0.0);
-        QCOMPARE(wired.value("from").toString(), QString("in"));
+        auto slide = [v](const QRectF& r, double f) {
+            const QPointF at(r.left() + r.width() * f, r.center().y());
+            QTest::mousePress(v, Qt::LeftButton, {}, r.center().toPoint());
+            QTest::mouseMove(v, ((r.center() + at) / 2).toPoint());
+            QTest::mouseMove(v, at.toPoint());
+            QTest::mouseRelease(v, Qt::LeftButton, {}, at.toPoint());
+        };
+        // The input's output: width, pan and mute, for every wire from it.
+        slide(v->hitRect("io out in 0 width"), 0.0);
+        QJsonObject set = link.last("output");
+        QCOMPARE(set.value("width").toDouble(-1), 0.0);
+        QCOMPARE(set.value("from").toString(), QString("in"));
+        QCOMPARE(set.value("out").toInt(-1), 0);
+        s.undo();
+        QCOMPARE(link.last("output").value("width").toDouble(-1), 100.0);
         v->grab();
-        click(v, v->hitRect(QString("io wire %1 mute").arg(first)));
-        QVERIFY(link.last("wire").value("muted").toBool());
+        slide(v->hitRect("io out in 0 pan"), 1.0);
+        QCOMPARE(link.last("output").value("pan").toDouble(), 100.0);
+        v->grab();
+        click(v, v->hitRect("io out in 0 mute"));
+        QVERIFY(link.last("output").value("muted").toBool());
+        // + adds an output; right-click (or hold) it for several.
+        v->grab();
+        click(v, v->hitRect("io out 0 0 add"));
+        QJsonObject outs = link.last("outputs");
+        QCOMPARE(outs.value("from").toInt(-1), 0);
+        QCOMPARE(outs.value("count").toInt(), 2);
+        s.undo();
+        QCOMPARE(link.last("outputs").value("outputs").toArray().size(), 1);
+        v->grab();
+        QTest::mouseClick(v, Qt::RightButton, {}, v->hitRect("io out 0 0 add").center().toPoint());
+        QCOMPARE(v->menuItems().size(), 7);
+        QCOMPARE(v->menuItems().first(), QString("1 more output"));
+        v->pickMenu(2);
+        QCOMPARE(link.last("outputs").value("count").toInt(), 4);
+        // The … menu: Drive link is coming; an output goes with its wires.
+        v->grab();
+        click(v, v->hitRect("io out 0 0 menu"));
+        QCOMPARE(v->menuItems(), (QStringList{"Add several outputs…", "Remove output 1-2", "Drive link"}));
+        const int asks = link.sent.size();
+        v->pickMenu(1); // it has only one
+        v->pickMenu(2);
+        QCOMPARE(link.sent.size(), asks);
+        QVERIFY(v->deselect()); // the menu
+        v->grab();
+        click(v, v->hitRect("io out 2 1 menu"));
+        v->pickMenu(1);
+        QJsonObject gone = link.last("output");
+        QVERIFY(gone.value("remove").toBool());
+        QCOMPARE(gone.value("from").toInt(-1), 2);
+        QCOMPARE(gone.value("out").toInt(-1), 1);
+        s.undo();
+        QCOMPARE(link.last("outputs").value("outputs").toArray().size(), 2);
+        QCOMPARE(link.last("wires").value("wires").toArray().size(), s.chain(1)->wires.size());
         // Auto on a plug-in's output: Match by default, here the target.
         QVERIFY(s.perf.levels.wireMatch);
         v->grab();
@@ -2307,39 +2377,39 @@ private slots:
         s.undo();
         QCOMPARE(link.last("level").value("auto").toObject().value("match").toBool(false), true);
         v->grab();
-        const int amp = s.chain(1)->wire(PortInfo::block(0), PortInfo::block(1));
-        QVERIFY(amp >= 0);
-        click(v, v->hitRect(QString("io wire %1 auto").arg(amp)));
+        click(v, v->hitRect("io out 0 0 auto"));
         const QJsonObject asked = link.last("auto");
         QCOMPARE(asked.value("chain").toInt(-1), 1);
         QCOMPARE(asked.value("from").toInt(-1), 0);
-        QCOMPARE(asked.value("to").toInt(-1), 1);
-        const QString key = s.autoKey(1, s.chain(1)->wires[amp]);
+        QCOMPARE(asked.value("out").toInt(-1), 0);
+        const QString key = AppState::autoKey(1, PortInfo::block(0));
         QVERIFY(s.autoNow.contains(key));
-        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"to", 1}, {"state", "listening"}, {"seconds", 1.5}, {"of", 5}});
+        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"out", 0}, {"state", "listening"}, {"seconds", 1.5}, {"of", 5}});
         QVERIFY(s.autoNow.value(key).listening);
         v->grab();
         shot(v, "gain-stage-chain-auto");
-        // Done: the engine set the wire (its wire event) and it is undone
-        // like a fader.
-        emit link.event("wire", QJsonObject{{"chain", 1}, {"wire", QJsonObject{{"from", 0}, {"to", 1}, {"level_db", -7.5}}}});
-        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"to", 1}, {"state", "done"}, {"match", true}, {"level_db", -4.5},
+        // Done: the engine set the output (its output event) and it is
+        // undone like a fader.
+        emit link.event("output", QJsonObject{{"chain", 1}, {"output", QJsonObject{{"from", 0}, {"out", 0}, {"level_db", -7.5}, {"width", 100},
+                                                                               {"pan", 0}, {"muted", false}}}});
+        emit link.event("auto", QJsonObject{{"chain", 1}, {"from", 0}, {"out", 0}, {"state", "done"}, {"match", true}, {"level_db", -4.5},
                                             {"fed_db", -12}, {"from_db", 0}, {"to_db", -7.5}});
         QVERIFY(!s.autoNow.contains(key));
-        QCOMPARE(s.chain(1)->wires[amp].levelDb, -7.5);
+        QCOMPARE(s.chain(1)->gainsOf(PortInfo::block(0)).levelDb, -7.5);
         s.undo();
-        const QJsonObject back = link.last("wire");
+        const QJsonObject back = link.last("output");
         QCOMPARE(back.value("level_db").toDouble(-1), 0.0);
         QCOMPARE(back.value("from").toInt(-1), 0);
-        QCOMPARE(back.value("to").toInt(-1), 1);
+        QCOMPARE(back.value("out").toInt(-1), 0);
         // A plug-in's own panel lists its outputs; one tapped selects its wire.
         v->grab();
-        click(v, v->hitRect("block 0"));
+        click(v, v->hitRect("block 2"));
         v->grab();
-        const int out = s.chain(1)->wire(PortInfo::block(0), PortInfo::block(1));
-        QVERIFY(!v->hitRect(QString("output %1").arg(out)).isEmpty());
-        click(v, v->hitRect(QString("output %1").arg(out)));
+        QVERIFY(!v->hitRect("output 0").isEmpty() && !v->hitRect("output 1").isEmpty() && !v->hitRect("output add").isEmpty());
+        shot(v, "block-outputs");
+        click(v, v->hitRect("output 1"));
         v->grab();
+        QCOMPARE(v->selectedWire(), s.chain(1)->wire(PortInfo::blockOut(2, 1), PortInfo::output(1)));
         QVERIFY(!v->hitRect("wire level").isEmpty());
 
         // An output box is that output's card.
@@ -2445,11 +2515,11 @@ private slots:
         QVERIFY(!ask({{"cmd", "bypass"}, {"chain", 1}, {"slot", 2}, {"mode", "loud"}}).value("ok").toBool());
         // Loose wires: kept with the chain and sent back, changing nothing heard.
         QJsonObject loose = ask({{"cmd", "wires"}, {"chain", 1},
-                                 {"loose", QJsonArray{QJsonObject{{"from", 0}, {"x", 10}, {"y", 20}, {"level_db", -6}},
+                                 {"loose", QJsonArray{QJsonObject{{"from", 0}, {"x", 10}, {"y", 20}},
                                                       QJsonObject{{"to", "FOH"}, {"x", 300}, {"y", 20}}}}});
         QVERIFY2(loose.value("ok").toBool(), qPrintable(loose.value("error").toString()));
         QCOMPARE(s.perf.chains[1].loose.size(), 2);
-        QCOMPARE(s.perf.chains[1].loose[0].levelDb, -6.0);
+        QCOMPARE(s.perf.chains[1].loose[0].port, PortInfo::block(0));
         QCOMPARE(s.perf.chains[1].loose[1].port, PortInfo::output(0));
         QVERIFY(!ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{QJsonObject{{"from", 0}, {"to", 1}}}}}).value("ok").toBool());
         QVERIFY(ask({{"cmd", "wires"}, {"chain", 1}, {"loose", QJsonArray{}}}).value("ok").toBool());
@@ -2506,11 +2576,17 @@ private slots:
         QVERIFY(s.perf.chains[1].wire(PortInfo::block(0), PortInfo::block(trim)) >= 0);
         QVERIFY(s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1)) >= 0);
         QVERIFY(s.perf.chains[1].wire(PortInfo::block(0), PortInfo::block(1)) < 0);
-        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"to", 1}, {"level_db", -6}, {"pan", -50}});
-        QVERIFY(r.value("ok").toBool());
-        QCOMPARE(r.value("wire").toObject().value("level_db").toDouble(), -6.0);
-        const ChainInfo& live = s.perf.chains[1];
-        QCOMPARE(live.wires[live.wire(PortInfo::block(trim), PortInfo::block(1))].pan, -50.0);
+        // A wire has no level: the output it leaves has.
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"to", 1}, {"level_db", -6}});
+        QVERIFY(!r.value("ok").toBool());
+        QVERIFY2(r.value("error").toString().contains("output"), qPrintable(r.value("error").toString()));
+        r = ask({{"cmd", "output"}, {"chain", 1}, {"from", trim}, {"level_db", -6}, {"pan", -50}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(r.value("output").toObject().value("level_db").toDouble(), -6.0);
+        QCOMPARE(r.value("output").toObject().value("out").toInt(-1), 0);
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::block(trim)).pan, -50.0);
+        QVERIFY(!ask({{"cmd", "output"}, {"chain", 1}, {"from", trim}, {"out", 1}, {"level_db", 0}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "output"}, {"chain", 1}, {"from", "FOH"}, {"level_db", 0}}).value("ok").toBool());
         r = ask({{"cmd", "remove"}, {"chain", 1}, {"slot", trim}, {"token", "test"}});
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QCOMPARE(s.perf.chains[1].numPlugins(), had);
@@ -2519,12 +2595,12 @@ private slots:
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QCOMPARE(r.value("slot").toInt(), trim);
         QCOMPARE(s.perf.chains[1].numPlugins(), had + 1);
-        QCOMPARE(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1))].pan, -50.0);
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::block(trim)).pan, -50.0); // its output came back with it
         r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", 1}, {"to", 0}});
         QVERIFY(!r.value("ok").toBool());
         QVERIFY2(r.value("error").toString().contains("loop"), qPrintable(r.value("error").toString()));
         // As a feedback wire it plays, and is saved as one; into itself too.
-        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", 1}, {"to", 0}, {"feedback", true}, {"level_db", -12}});
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", 1}, {"to", 0}, {"feedback", true}});
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QTRY_VERIFY(s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0)) >= 0);
         QVERIFY(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0))].feedback);
@@ -2537,8 +2613,33 @@ private slots:
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QVERIFY(r.value("wire").toObject().value("jump").toBool());
         QTRY_VERIFY(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1))].jump);
-        QCOMPARE(s.perf.chains[1].wires[s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1))].levelDb, -6.0);
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::block(trim)).levelDb, -6.0);
         QTRY_VERIFY(s.perf.chains[1].wire(PortInfo::block(1), PortInfo::block(0)) < 0);
+        // Outputs 3-4 and 5-6 on Trim, 5-6 wired to FOH at a level of its
+        // own. 3-4 taken out, 5-6 is 3-4; then down to one, its wire goes.
+        r = ask({{"cmd", "outputs"}, {"chain", 1}, {"from", trim}, {"count", 3}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.chains[1].numOuts(PortInfo::block(trim)), 3);
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::block(trim)).levelDb, -6.0);
+        r = ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"out", 2}, {"to", "FOH"}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QVERIFY(!ask({{"cmd", "wire"}, {"chain", 1}, {"from", trim}, {"out", 3}, {"to", "FOH"}}).value("ok").toBool());
+        r = ask({{"cmd", "output"}, {"chain", 1}, {"from", trim}, {"out", 2}, {"level_db", -9}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::blockOut(trim, 2)).levelDb, -9.0);
+        QVERIFY(s.perf.chains[1].wire(PortInfo::blockOut(trim, 2), PortInfo::output(0)) >= 0);
+        r = ask({{"cmd", "output"}, {"chain", 1}, {"from", trim}, {"out", 1}, {"remove", true}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.chains[1].numOuts(PortInfo::block(trim)), 2);
+        QCOMPARE(s.perf.chains[1].gainsOf(PortInfo::blockOut(trim, 1)).levelDb, -9.0);
+        QVERIFY(s.perf.chains[1].wire(PortInfo::blockOut(trim, 1), PortInfo::output(0)) >= 0);
+        QVERIFY(s.perf.chains[1].wire(PortInfo::block(trim), PortInfo::block(1)) >= 0);
+        r = ask({{"cmd", "outputs"}, {"chain", 1}, {"from", trim}, {"count", 1}});
+        QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
+        QCOMPARE(s.perf.chains[1].numOuts(PortInfo::block(trim)), 1);
+        QVERIFY(s.perf.chains[1].wire(PortInfo::blockOut(trim, 1), PortInfo::output(0)) < 0);
+        QVERIFY(!ask({{"cmd", "output"}, {"chain", 1}, {"from", trim}, {"remove", true}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "outputs"}, {"chain", 1}, {"from", trim}, {"count", 9}}).value("ok").toBool());
         r = ask({{"cmd", "place"}, {"chain", 1}, {"slot", trim}, {"x", 500}, {"y", 300}});
         QVERIFY(r.value("ok").toBool());
         QCOMPARE(s.perf.chains[1].plugin(trim)->at, QPointF(500, 300));
@@ -2565,6 +2666,7 @@ private slots:
         QCOMPARE(s.chain(copy)->name, QString("Slap 2"));
         QCOMPARE(s.chain(copy)->numPlugins(), s.chain(1)->numPlugins());
         QCOMPARE(s.chain(copy)->wires.size(), s.chain(1)->wires.size());
+        QCOMPARE(s.chain(copy)->gainsOf(PortInfo::block(trim)), s.chain(1)->gainsOf(PortInfo::block(trim)));
         QCOMPARE(s.chain(copy)->pedal, 0); // Slap keeps its own
         QCOMPARE(s.chain(1)->pedal, 7);
         // A pedal given to it is taken from the chain that had it.
@@ -2699,19 +2801,18 @@ private slots:
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QCOMPARE(s.perf.levels.wireAuto.seconds, 1.0);
         QVERIFY(s.perf.levels.wireMatch);
-        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", "in"}, {"to", 0}});
+        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", "in"}});
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QCOMPARE(r.value("auto").toObject().value("match").toBool(true), false);
         QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty(), 5000);
         QVERIFY2(done.value("state").toString() == "done", qPrintable(done.value("error").toString()));
         QVERIFY2(std::fabs(done.value("to_db").toDouble() - 8) < 0.2, qPrintable(QString::number(done.value("to_db").toDouble())));
-        const int fromIn = punk.wire(PortInfo::input(), PortInfo::block(0));
-        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[fromIn].levelDb, done.value("to_db").toDouble(), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].gainsOf(PortInfo::input()).levelDb, done.value("to_db").toDouble(), 3000);
 
         // The drive's output, matched to what it is fed (RMS).
         done = {};
         QVERIFY(ask({{"cmd", "level"}, {"wires", true}, {"auto", QJsonObject{{"measure", "rms"}}}}).value("ok").toBool());
-        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", 2}, {"to", 3}});
+        r = ask({{"cmd", "auto"}, {"chain", 0}, {"from", 2}});
         QVERIFY2(r.value("ok").toBool(), qPrintable(r.value("error").toString()));
         QVERIFY(r.value("auto").toObject().value("match").toBool());
         QTRY_VERIFY_WITH_TIMEOUT(!done.isEmpty(), 5000);
@@ -2719,15 +2820,14 @@ private slots:
         const double heard = done.value("level_db").toDouble(), fed = done.value("fed_db").toDouble(), to = done.value("to_db").toDouble();
         QVERIFY2(std::fabs(fed - (-15)) < 0.5, qPrintable(QString::number(fed))); // -20 dB peak, +8: -15 dB RMS
         QVERIFY2(heard > fed + 1 && std::fabs(to - (fed - heard)) < 0.15, qPrintable(QString("%1 %2 %3").arg(heard).arg(fed).arg(to)));
-        const int drive = punk.wire(PortInfo::block(2), PortInfo::block(3));
-        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[drive].levelDb, to, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].gainsOf(PortInfo::block(2)).levelDb, to, 3000);
         // Undone like a fader.
         s.undo();
-        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].wires[drive].levelDb, 0.0, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(s.perf.chains[0].gainsOf(PortInfo::block(2)).levelDb, 0.0, 3000);
 
-        // A chain that is not playing cannot be listened to; nor a wire that is not there.
-        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 4}, {"from", "in"}, {"to", 0}}).value("ok").toBool());
-        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 0}, {"from", 0}, {"to", 3}}).value("ok").toBool());
+        // A chain that is not playing cannot be listened to; nor an output that is not there.
+        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 4}, {"from", "in"}}).value("ok").toBool());
+        QVERIFY(!ask({{"cmd", "auto"}, {"chain", 0}, {"from", 0}, {"out", 1}}).value("ok").toBool());
         link.request({{"cmd", "quit"}});
         QTRY_COMPARE_WITH_TIMEOUT(engine.state(), QProcess::NotRunning, 5000);
     }

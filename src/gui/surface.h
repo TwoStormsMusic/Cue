@@ -12,6 +12,7 @@
 #include <QColor>
 #include <QRectF>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 
@@ -39,6 +40,9 @@ protected:
 
     using Drag = std::function<void(QPointF pos, bool done)>;
     void hit(const QString& id, const QRectF& r, std::function<void()> tap, Drag drag = {});
+    // What a right-click on the last hit called id does, or a touch held on
+    // it for half a second: a menu, where a tap does something else.
+    void hold(const QString& id, std::function<void()> menu);
     bool isPressed(const QString& id) const { return pressed_ == id; }
 
     void mousePressEvent(QMouseEvent* e) override;
@@ -86,9 +90,12 @@ private:
         QRectF r;
         std::function<void()> tap;
         Drag drag;
+        std::function<void()> held;
     };
     QVector<Hit> hits_;
     QString pressed_;
+    QTimer holdTimer_;
+    QPointF pressAt_;
     Drag dragging_;
     QPointF lastPos_;
     bool pressedInside_ = false;

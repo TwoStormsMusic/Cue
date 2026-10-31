@@ -45,16 +45,19 @@ struct PluginSpec {
     // Where the routing board draws it, once it has been put somewhere.
     bool placed = false;
     double x = 0, y = 0;
+    // Its outputs (channels 1-2, 3-4...): each carries what it plays, with
+    // its own level, width, pan and mute, which every wire leaving it has.
+    std::vector<WireGains> outs = {WireGains{}};
     std::string text, where;         // as written, for messages
 };
 
-// A wire of a chain: from the chain's input or a block, to a block (its
-// input or its key) or an output, with what it does to the signal. Blocks
-// are numbered from 0 in the order of the chain's blocks; outputs are the
-// performance's, in its order.
+// A wire of a chain: from one of the outputs of the chain's input or of a
+// block (from.out), to a block (its input or its key) or an output. It
+// carries what that output does to the signal; it has no gains of its own.
+// Blocks are numbered from 0 in the order of the chain's blocks; outputs
+// are the performance's, in its order.
 struct WireSpec {
     Port from, to;
-    WireGains gains;
     std::string where;
     bool feedback = false; // heard a block late, so it may close a loop (see Wire)
     bool jump = false;     // only how the board draws it: out at its source, in at its end, by a letter
@@ -64,12 +67,11 @@ struct WireSpec {
 
 // A wire left attached to nothing at one end, where a plug-in was pulled
 // out of it: the board draws it, ready to be plugged into something again,
-// and it carries nothing. Its gains are kept for when it is.
+// and it carries nothing.
 struct LooseSpec {
     Port port;        // the end still attached
     bool from = true; // true: it leaves port, so its loose end wants an input; false: it arrives at port
     double x = 0, y = 0; // the loose end, in board units
-    WireGains gains;
     bool feedback = false;
 };
 
@@ -115,6 +117,8 @@ struct ChainSpec {
     std::vector<PluginSpec> blocks;
     std::vector<WireSpec> wires;
     std::vector<LooseSpec> loose; // wires attached at one end only
+    // The outputs of its input, as a block's (see PluginSpec::outs).
+    std::vector<WireGains> inputOuts = {WireGains{}};
     // Where the board draws its input, and each output (by number).
     BoardPlace inputAt;
     std::vector<BoardPlace> outputsAt;
@@ -126,6 +130,14 @@ struct ChainSpec {
     std::vector<TapSpec> out;
     std::string where;
 };
+
+// The outputs a wire can leave from: the chain input's or a block's;
+// nullptr for a port that has none.
+std::vector<WireGains>* outsOf(ChainSpec& c, const Port& from);
+const std::vector<WireGains>* outsOf(const ChainSpec& c, const Port& from);
+// What a wire leaving from does: its output's gains (as they start, if it
+// has no such output).
+WireGains gainsOf(const ChainSpec& c, const Port& from);
 
 // A preset: which chain plays, and what happens when it is selected.
 struct PresetSpec {

@@ -79,7 +79,8 @@ an editor: it is drawn between blocks, never on the audio thread, and
 closing one changes nothing about what is heard. **Play this chain** plays the chain shown.
 
 The chain view is also where a chain is wired. A plug-in's inputs are the
-dots on its left, its outputs the dots on its right, and the small triangle
+dots on its left, its outputs the dots on its right (one for each of its
+outputs, 1-2 at the top, then 3-4 and on), and the small triangle
 low on its left is its key (side-chain input), for the plug-ins that have
 one. Drag a block to move it; it stays where you put it. Drag from a dot to
 another to draw a wire: from the input or a plug-in's output, to a plug-in
@@ -89,11 +90,13 @@ the dots a wire may join light up: never the plug-in's own input or key, nor
 one whose sound already comes through it (a loop). With **Feedback wires**
 on in Settings, those are offered too and make feedback wires, drawn
 purple: what goes back is heard one block late (1.3 ms at 64 frames) and
-held to +6 dBFS, so turn it down on the wire to keep it from building up. Tap a wire to select it (orange): the panel gives its
+held to +6 dBFS, so turn its output down to keep it from building up. Tap a
+wire to select it (orange). A wire has no level of its own: it carries one
+output of its plug-in (or of the input), and the panel gives that output's
 **level** (silent to +12 dB, 0 dB at the tick), **width** (100% is stereo
 as it comes, 0% folds left and right to mono) and **pan** (a balance: it
 turns one side down, never moves sound across), in that order; a double tap
-on a fader sets it back. **Mute**, **Insert** and **Delete** are under them,
+on a fader sets it back. Every wire from that output follows them. **Mute**, **Insert** and **Delete** are under them,
 and **Jump Cut**: the wire then leaves its plug-in as a short stub to a
 letter and comes in at the other end from the same letter, with no line
 between. A long chain can so run left to right on one row and go on left
@@ -123,15 +126,21 @@ gain so what it heard reaches the target; tap it again to stop. The box on
 the board shows the gain or level under the name, and **muted**. Tap an
 output box for that output's card.
 
-A plug-in's **outputs** are the wires that leave it: draw another wire from
-its right-hand dot for another output. The Chain tab shows each plug-in (and
-the chain's input) in board order with a card for each of its outputs: where
-it goes, its level (tap to type one), a meter after the level, a fader,
-**Mute**, **Mono** (the wire's width at 0 %) and **Auto**. They are the
-wire's own settings, the same as tapping the wire, so a Neural DSP plug-in's
-output is set like any other, after the plug-in. A plug-in's own panel
-lists its outputs too, each with its meter and level; tap one to select
-its wire. Auto's row above the cards sets it for every output: **Match**
+Every plug-in, and the chain's input, has **outputs**, as the TwoStorms
+plug-ins do: 1-2 to start, and up to 15-16. The Chain tab shows each
+plug-in (and the chain's input) in board order with a card for each of its
+outputs, laid out like a TwoStorms output card: **+** (another output: a new
+dot on the board; hold it or right-click it to add several at once), its
+**width** and **pan** (drag them; a double tap sets one back) and **…**
+(remove that output with its wires; Drive link is coming), then which
+output it is and where its wires go, its level (tap to type one), a meter
+after the level (the loudest of its wires), a fader, **Mute** and **Auto**.
+They are the same as tapping one of its wires, so a Neural DSP plug-in's
+output is set like any other, after the plug-in. For two different levels
+from one plug-in, give it a second output and wire from that dot. A
+plug-in's own panel lists its outputs too, each with where it goes, its
+meter and its level, and **+ Add**; tap one to select its wire. Auto's row
+above the cards sets it for every output: **Match**
 sets the level so the plug-in plays as loud as it is fed (Act's Match),
 **Target** brings it to the target; then what it measures and how long it
 listens. Tap a card's **Auto** while the chain plays (from the chain's
@@ -145,8 +154,9 @@ To move several plug-ins at once, Shift-click them (or turn on **Select**,
 beside **+ Plug-in**, and tap them), or Shift-drag (with **Select** on, drag)
 across open space: what the box touches joins the selection. Drag any of
 them and they all move, as one change to undo.
-A wire whose level, width or pan is changed is drawn thick, with a tag
-saying what is changed (Settings can hide the tags). The **+** on the
+A wire whose output has its level, width or pan changed is drawn thick,
+with a tag saying what is changed, and which output it carries (3-4) when
+its plug-in has more than one (Settings can hide the tags). The **+** on the
 selected wire, or **Insert**, puts a plug-in on it: the blocks after it make
 room. **+ Plug-in** adds one to the board unwired. Both offer your
 favourite plug-ins, those the performance already has and the built-ins
@@ -157,7 +167,7 @@ joined around it. **Eject** takes it off its wires the same way, as you
 would unplug a pedal, and keeps it on the board, moved just above them. Drag a
 plug-in so its input or output dot comes near a loose end and it goes onto
 it, and stays there unless you keep dragging it away; let go there and the
-wire plugs into it, with the level, width and pan it had. Or drag a loose
+wire plugs into it, carrying the output it left, as that output is now. Or drag a loose
 end onto a dot. Tap a loose wire to select it; **Remove** (or Delete)
 throws it away. A plug-in with no wires dragged over a wire lights the
 wire: let go and it goes onto it, as **Insert** does.
@@ -226,7 +236,7 @@ Chains), CPU and margin in ms or as % of what a block allows, the size of
 everything, the tuner while muted, full screen, what the stage view's header shows (**Stage shows**: CPU,
 margin, xruns, the sound card and the controller, each on or off; xruns and
 a controller that is not found show whatever is chosen), whether the routing
-board tags the wires whose level, width or pan is changed, **Feedback
+board tags the wires whose output is changed, **Feedback
 wires** (off: no wire may lead back to its own plug-in or an earlier one),
 and **Take the sound card** (on: an engine the app starts takes the card
 from PipeWire, or closes REAPER if REAPER has it; off: it stops with "busy"

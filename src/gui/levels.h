@@ -47,6 +47,15 @@ inline QString levelText(double db) {
     return QString("%1%2 dB").arg(r > 0 ? "+" : r < 0 ? "−" : "").arg(std::fabs(r), 0, 'f', 1);
 }
 
+// The panel says L30; the wire's tag, 30L.
+inline QString panText(double pan, bool tag) {
+    const long v = std::lround(std::fabs(pan));
+    if (v == 0)
+        return "C";
+    const QString side = pan < 0 ? "L" : "R";
+    return tag ? QString::number(v) + side : side + QString::number(v);
+}
+
 // What was typed for a level: a number of dB, or off.
 inline bool typedLevel(QString text, double& db) {
     text = text.trimmed().toLower().replace("−", "-").replace("db", "").trimmed();

@@ -17,20 +17,29 @@ namespace cue {
 enum class OutputMix { Left, Right, Sum };
 
 // One end of a wire: the chain's input, a block, or one of the chain's
-// outputs. A wire leaves a block from its output and arrives at its input,
-// or at its side-chain input (its key).
+// outputs. A wire leaves a block from one of its outputs and arrives at its
+// input, or at its side-chain input (its key). A block's outputs (and the
+// chain input's) all carry what it plays; each has its own gains, which
+// every wire leaving it has.
 struct Port {
     enum class Kind : uint8_t { Input, Block, Output };
     Kind kind = Kind::Input;
     int index = 0;    // the block's slot, or the output's number
     bool key = false; // a block's side-chain input
+    uint8_t out = 0;  // where a wire leaves: which of the block's (or the input's) outputs
 
-    static Port input() { return {}; }
+    static Port input(int out = 0) { return {Kind::Input, 0, false, static_cast<uint8_t>(out)}; }
     static Port block(int slot, bool key = false) { return {Kind::Block, slot, key}; }
+    static Port blockOut(int slot, int out) { return {Kind::Block, slot, false, static_cast<uint8_t>(out)}; }
     static Port output(int o) { return {Kind::Output, o, false}; }
-    bool operator==(const Port& o) const { return kind == o.kind && index == o.index && key == o.key; }
+    bool operator==(const Port& o) const { return kind == o.kind && index == o.index && key == o.key && out == o.out; }
     bool operator!=(const Port& o) const { return !(*this == o); }
+    // The same block (or input, or output), whichever of its ends.
+    bool same(const Port& o) const { return kind == o.kind && (kind == Kind::Input || index == o.index); }
 };
+
+// The most outputs a block (or a chain's input) has: channels 1-2 to 15-16.
+constexpr int kMaxOuts = 8;
 
 // At this level or below a wire passes nothing.
 constexpr float kWireOffDb = -96.0f;

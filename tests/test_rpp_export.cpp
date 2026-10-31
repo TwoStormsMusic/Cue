@@ -495,8 +495,9 @@ TEST(rpp_export_lays_board_wires_out_as_lines) {
     if (!loaded)
         return;
     ChainSpec& punk = c.scenes[0].chains[0];
-    punk.wires.push_back({Port::block(0), Port::block(6), {}, ""});
-    punk.wires.push_back({Port::input(), Port::output(1), {-6.0f, 1.0f, 0.0f, false}, ""});
+    punk.wires.push_back({Port::block(0), Port::block(6), ""});
+    punk.inputOuts = {WireGains{}, WireGains{-6.0f}};
+    punk.wires.push_back({Port::input(1), Port::output(1), ""});
     RppExport exp;
     CHECK_MSG(exportRpp(c, exp, &err, dir), "%s", err.c_str());
     CHECK(exp.plugins == 8);

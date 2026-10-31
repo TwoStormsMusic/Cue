@@ -160,8 +160,10 @@ void asLines(ChainSpec& c, size_t outputs, const std::string& where, std::vector
             say("the loop wire from " + name(w.from) + " is not in the REAPER project");
             continue;
         }
-        if (!w.gains.neutral())
-            say("the level, width or pan on the wire from " + name(w.from) + " is not in the REAPER project");
+        if (!gainsOf(c, w.from).neutral())
+            say("the level, width or pan on the output of " + name(w.from) + " is not in the REAPER project");
+        if (w.from.out > 0)
+            say("the second and later outputs of " + name(w.from) + " are one output in the REAPER project");
         if (w.to.kind == Port::Kind::Output) {
             if (outs.size() <= static_cast<size_t>(w.to.index))
                 outs.resize(w.to.index + 1);

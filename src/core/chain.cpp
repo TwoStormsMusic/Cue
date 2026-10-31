@@ -141,6 +141,8 @@ bool Chain::checkWires(const std::vector<Wire>& wires, const std::vector<bool>& 
             return fail("a wire cannot end at the input");
         if (w.from.kind == Port::Kind::Block && (w.from.index < 0 || w.from.index >= n || w.from.key))
             return fail("a wire starts at a plug-in the chain does not have");
+        if (w.from.out >= kMaxOuts || w.to.out != 0)
+            return fail("a wire leaves one of the first " + std::to_string(kMaxOuts) + " outputs");
         if (w.to.kind == Port::Kind::Block && (w.to.index < 0 || w.to.index >= n))
             return fail("a wire ends at a plug-in the chain does not have");
         if (w.to.kind == Port::Kind::Block && w.to.key && !keys[w.to.index])
@@ -946,14 +948,25 @@ Chain::Plan* Chain::swap(bool processing, uint32_t fadeFrames, bool* stale) {
             }
             b.stale = true;
         }
-        // The wires both play go on as they were.
+        // The wires both play go on as they were; one the edit gives other
+        // gains (its output's, renumbered) fades to them from where it is.
         for (auto& w : next->wires)
             for (const auto& o : old->wires)
                 if (o.id == w.id) {
-                    std::copy(o.from, o.from + 4, w.from);
-                    std::copy(o.to, o.to + 4, w.to);
-                    w.t = o.t;
-                    w.plain = o.plain;
+                    if (std::equal(o.to, o.to + 4, w.to)) {
+                        std::copy(o.from, o.from + 4, w.from);
+                        w.t = o.t;
+                        w.plain = o.plain;
+                    } else {
+                        const float k = o.t.value();
+                        for (int i = 0; i < 4; ++i)
+                            w.from[i] = o.from[i] + k * (o.to[i] - o.from[i]);
+                        w.t.set(0.0f);
+                        w.t.linearTo(1.0f, fadeFrames);
+                        if (w.t.done())
+                            std::copy(w.to, w.to + 4, w.from);
+                        w.plain = w.t.done() && identity(w.to);
+                    }
                     break;
                 }
     }

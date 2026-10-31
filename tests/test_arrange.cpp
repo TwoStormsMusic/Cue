@@ -7,11 +7,13 @@
 #include "app/arrange.h"
 #include "app/build.h"
 #include "app/cuefile.h"
+#include "app/edit.h"
 #include "host/clap_processor.h"
 #include "midi/eurekaprom.h"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
@@ -374,4 +376,55 @@ TEST(arrange_renames_and_places_the_inputs_and_outputs) {
     CHECK(back.inputAt.placed && back.inputAt.x == -20 && back.inputAt.y == 40.3);
     CHECK(back.outputsAt.size() == 2 && !back.outputsAt[0].placed && back.outputsAt[1].placed && back.outputsAt[1].x == 300);
     CHECK_MSG(wireList(back, c.outputs) == "in>0 0>Front 0>Amp", "%s", wireList(back, c.outputs).c_str());
+}
+
+TEST(outputs_split_a_plug_ins_signal_each_at_a_level_of_its_own) {
+    Live t;
+    Engine& engine = *t.rig.engine;
+    // An edit puts in a new config: the chain as it is now, each time.
+    auto one = [&]() -> const ChainSpec& { return t.config.scenes.at(0).chains.at(0); };
+    const int id = one().id;
+    Player play(engine);
+    CHECK(play.hears(0.25f));
+    const float half = 20.0f * std::log10(0.5f);
+
+    // Its one output, at half: both wires leaving it follow.
+    WireGains g;
+    g.levelDb = half;
+    CHECK_MSG(setOutput(*t.live, id, Port::block(0), g, &t.err), "%s", t.err.c_str());
+    CHECK(play.hears(0.125f));
+    CHECK(one().blocks[0].outs.size() == 1 && one().blocks[0].outs[0].levelDb == half);
+
+    // A second output, as it was, wired to FOH too: FOH hears both.
+    CHECK_MSG(setOutputs(*t.live, id, Port::block(0), {g, WireGains{}}, &t.err), "%s", t.err.c_str());
+    CHECK(play.hears(0.125f));
+    CHECK(!setWire(*t.live, id, {Port::blockOut(0, 2), Port::output(0), ""}, &t.err));
+    CHECK_MSG(setWire(*t.live, id, {Port::blockOut(0, 1), Port::output(0), ""}, &t.err), "%s", t.err.c_str());
+    CHECK(play.hears(0.375f));
+    CHECK_MSG(wireList(one(), t.config.outputs) == "in>0 0>FOH(-6.0206dB w100 p0) 0>Amp(-6.0206dB w100 p0) 0@1>FOH",
+              "%s", wireList(one(), t.config.outputs).c_str());
+
+    // The first goes, with its wires; the second is the first now.
+    CHECK_MSG(removeOutput(*t.live, id, Port::block(0), &t.err), "%s", t.err.c_str());
+    CHECK(play.hears(0.25f));
+    CHECK_MSG(wireList(one(), t.config.outputs) == "in>0 0>FOH", "%s", wireList(one(), t.config.outputs).c_str());
+    CHECK(!removeOutput(*t.live, id, Port::block(0), &t.err) && t.err.find("one output") != std::string::npos);
+
+    // Fewer outputs: the wires of those it no longer has go.
+    CHECK(setOutputs(*t.live, id, Port::block(0), {WireGains{}, WireGains{}}, &t.err));
+    CHECK(setWire(*t.live, id, {Port::blockOut(0, 1), Port::output(1), ""}, &t.err));
+    CHECK(setOutputs(*t.live, id, Port::block(0), {WireGains{}}, &t.err));
+    CHECK_MSG(wireList(one(), t.config.outputs) == "in>0 0>FOH", "%s", wireList(one(), t.config.outputs).c_str());
+    CHECK(!setOutputs(*t.live, id, Port::block(0), {}, &t.err));
+    CHECK(!setOutputs(*t.live, id, Port::block(0), std::vector<WireGains>(kMaxOuts + 1), &t.err));
+
+    // The chain's input has outputs too: muted, nothing comes through.
+    WireGains off;
+    off.muted = true;
+    CHECK_MSG(setOutput(*t.live, id, Port::input(), off, &t.err), "%s", t.err.c_str());
+    CHECK(play.hears(0.0f));
+    CHECK(one().inputOuts.size() == 1 && one().inputOuts[0].muted);
+    CHECK(setOutput(*t.live, id, Port::input(), WireGains{}, &t.err));
+    CHECK(play.hears(0.25f));
+    CHECK(!setOutput(*t.live, id, Port::output(0), WireGains{}, &t.err));
 }

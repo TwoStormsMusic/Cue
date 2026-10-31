@@ -261,12 +261,12 @@ bool buildRig(Config& config, Rig& rig, std::string* error, size_t spareChains) 
             if (!chainSidechains(cs, labels, feeds, error))
                 return false;
             for (auto [slot, source] : feeds) {
-                cs.wires.push_back({Port::block(static_cast<int>(source)), Port::block(static_cast<int>(slot), true), {}, cs.blocks[slot].where});
+                cs.wires.push_back({Port::block(static_cast<int>(source)), Port::block(static_cast<int>(slot), true), cs.blocks[slot].where});
                 cs.blocks[slot].sidechain.clear();
             }
             for (const WireSpec& w : cs.wires) {
                 std::string why;
-                if (!chain->connect(w.from, w.to, w.gains, &why, w.feedback)) {
+                if (!chain->connect(w.from, w.to, gainsOf(cs, w.from), &why, w.feedback)) {
                     *error = (w.where.empty() ? cs.where : w.where) + ": chain '" + cs.name + "': " + why;
                     return false;
                 }

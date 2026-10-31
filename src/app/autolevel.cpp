@@ -120,7 +120,7 @@ double AutoRun::gainDb() const {
     const double lv = levelDb(), to = match_ ? fedDb() : spec_.targetDb;
     if (lv <= kNothingDb || to <= kNothingDb)
         return 0;
-    // A wire's level goes from silence to +24 dB; it is not a calibration.
+    // An output's level goes from silence to +24 dB; it is not a calibration.
     if (block_)
         return std::clamp<double>(to - lv, -60, 24);
     return std::clamp<double>(to - lv, kLevelFloorDb + 1, kLevelMaxDb);

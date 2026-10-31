@@ -55,15 +55,33 @@ void WireInfo::readJump(const QJsonObject& wj) {
     jumpIn = point("jump_in", {-34, 0});
 }
 
+OutputInfo OutputInfo::fromJson(const QJsonObject& j) {
+    OutputInfo o;
+    o.levelDb = j.value("level_db").toDouble(0);
+    o.width = j.value("width").toDouble(100);
+    o.pan = j.value("pan").toDouble(0);
+    o.muted = j.value("muted").toBool();
+    return o;
+}
+
+QJsonObject OutputInfo::json() const { return {{"level_db", levelDb}, {"width", width}, {"pan", pan}, {"muted", muted}}; }
+
+QJsonObject outputRequest(int chain, const PortInfo& from, const OutputInfo& gains) {
+    QJsonObject r = gains.json();
+    r["cmd"] = "output";
+    r["chain"] = chain;
+    r["from"] = from.json({});
+    r["out"] = from.out;
+    return r;
+}
+
 QJsonObject WireInfo::request(int chain, const QStringList& outputs, const QString& cmd) const {
     QJsonObject r{{"cmd", cmd}, {"chain", chain}, {"from", from.json(outputs)}, {"to", to.json(outputs)}};
+    if (from.out)
+        r["out"] = from.out;
     if (to.key)
         r["key"] = true;
     if (cmd == "wire") {
-        r["level_db"] = levelDb;
-        r["width"] = width;
-        r["pan"] = pan;
-        r["muted"] = muted;
         if (feedback)
             r["feedback"] = true;
         r["jump"] = jump;
@@ -79,14 +97,8 @@ QJsonObject LooseInfo::json(const QStringList& outputs) const {
     QJsonObject r{{from ? "from" : "to", port.json(outputs)}, {"x", at.x()}, {"y", at.y()}};
     if (!from && port.key)
         r["key"] = true;
-    if (levelDb != 0)
-        r["level_db"] = levelDb;
-    if (width != 100)
-        r["width"] = width;
-    if (pan != 0)
-        r["pan"] = pan;
-    if (muted)
-        r["muted"] = true;
+    if (from && port.out)
+        r["out"] = port.out;
     if (feedback)
         r["feedback"] = true;
     return r;
@@ -96,10 +108,6 @@ WireInfo LooseInfo::plugged(const PortInfo& other) const {
     WireInfo w;
     w.from = from ? port : other;
     w.to = from ? other : port;
-    w.levelDb = levelDb;
-    w.width = width;
-    w.pan = pan;
-    w.muted = muted;
     w.feedback = feedback;
     return w;
 }
@@ -109,15 +117,39 @@ LooseInfo LooseInfo::of(const WireInfo& w, bool keepFrom, QPointF at) {
     l.port = keepFrom ? w.from : w.to;
     l.from = keepFrom;
     l.at = at;
-    l.levelDb = w.levelDb;
-    l.width = w.width;
-    l.pan = w.pan;
-    l.muted = w.muted;
     l.feedback = w.feedback;
     return l;
 }
 
 const PluginInfo* ChainInfo::plugin(int slot) const { return slot >= 0 && slot < blocks.size() ? &blocks[slot] : nullptr; }
+
+const QVector<OutputInfo>* ChainInfo::outsOf(const PortInfo& from) const {
+    if (from.kind == PortInfo::Kind::Input)
+        return &inputOuts;
+    if (from.kind == PortInfo::Kind::Block && !from.key && from.index >= 0 && from.index < blocks.size())
+        return &blocks[from.index].outs;
+    return nullptr;
+}
+
+QVector<OutputInfo>* ChainInfo::outsOf(const PortInfo& from) { return const_cast<QVector<OutputInfo>*>(std::as_const(*this).outsOf(from)); }
+
+int ChainInfo::numOuts(const PortInfo& from) const {
+    const QVector<OutputInfo>* outs = outsOf(from);
+    return outs ? outs->size() : 0;
+}
+
+OutputInfo ChainInfo::gainsOf(const PortInfo& from) const {
+    const QVector<OutputInfo>* outs = outsOf(from);
+    return outs && from.out >= 0 && from.out < outs->size() ? (*outs)[from.out] : OutputInfo{};
+}
+
+QVector<int> ChainInfo::wiresFrom(const PortInfo& from) const {
+    QVector<int> out;
+    for (int i = 0; i < wires.size(); ++i)
+        if (wires[i].from.same(from) && wires[i].from.out == from.out)
+            out << i;
+    return out;
+}
 
 int ChainInfo::wire(const PortInfo& from, const PortInfo& to) const {
     for (int i = 0; i < wires.size(); ++i)
@@ -163,7 +195,10 @@ Flow flowOf(const ChainInfo& c, const std::function<bool(int)>& bypassed, bool i
     f.heard.fill(false, numOutputs);
     auto isBlock = [n](const PortInfo& p) { return p.kind == PortInfo::Kind::Block && p.index >= 0 && p.index < n; };
     auto silences = [&](int slot) { return c.blocks[slot].muteOnBypass && bypassed && bypassed(slot); };
-    auto passes = [](const WireInfo& w) { return !w.muted && w.levelDb > -96; };
+    auto passes = [&](const WireInfo& w) {
+        const OutputInfo g = c.gainsOf(w.from);
+        return !g.muted && g.levelDb > -96;
+    };
     // What a pass finds stays found, so n passes settle it, loops or not.
     // Fed: the input reaches its main input (whatever the gains); sounding:
     // sound comes out of it.
@@ -291,7 +326,21 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 p.hasKey = pj.value("has_key").toBool();
                 p.placed = pj.contains("x") || pj.contains("y");
                 p.at = QPointF(pj.value("x").toDouble(), pj.value("y").toDouble());
+                if (pj.contains("outputs")) {
+                    p.outs.clear();
+                    for (const QJsonValue& ov : pj.value("outputs").toArray())
+                        p.outs << OutputInfo::fromJson(ov.toObject());
+                    if (p.outs.isEmpty())
+                        p.outs << OutputInfo{};
+                }
                 c.blocks << p;
+            }
+            if (cj.contains("input_outputs")) {
+                c.inputOuts.clear();
+                for (const QJsonValue& ov : cj.value("input_outputs").toArray())
+                    c.inputOuts << OutputInfo::fromJson(ov.toObject());
+                if (c.inputOuts.isEmpty())
+                    c.inputOuts << OutputInfo{};
             }
             // A wire's ends: a block by number, the input by name, an output by name.
             auto port = [&](const QJsonValue& v, bool from, bool key, PortInfo& out) {
@@ -312,10 +361,7 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 WireInfo w;
                 if (!port(wj.value("from"), true, false, w.from) || !port(wj.value("to"), false, wj.value("key").toBool(), w.to))
                     continue;
-                w.levelDb = wj.value("level_db").toDouble(0);
-                w.width = wj.value("width").toDouble(100);
-                w.pan = wj.value("pan").toDouble(0);
-                w.muted = wj.value("muted").toBool();
+                w.from.out = wj.value("out").toInt(0);
                 w.feedback = wj.value("feedback").toBool();
                 w.readJump(wj);
                 c.wires << w;
@@ -327,10 +373,8 @@ Performance Performance::fromJson(const QJsonObject& j) {
                 if (!port(lj.value(l.from ? "from" : "to"), l.from, lj.value("key").toBool(), l.port))
                     continue;
                 l.at = QPointF(lj.value("x").toDouble(), lj.value("y").toDouble());
-                l.levelDb = lj.value("level_db").toDouble(0);
-                l.width = lj.value("width").toDouble(100);
-                l.pan = lj.value("pan").toDouble(0);
-                l.muted = lj.value("muted").toBool();
+                if (l.from)
+                    l.port.out = lj.value("out").toInt(0);
                 l.feedback = lj.value("feedback").toBool();
                 c.loose << l;
             }

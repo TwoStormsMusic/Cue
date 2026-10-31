@@ -18,6 +18,23 @@ namespace cue::gui {
 
 // One plug-in of a chain, from performance.json: a block. slot is its
 // place in the chain's list of blocks, from 0, as the engine numbers them.
+// One output of a plug-in or of a chain's input: channels 1-2, 3-4... Each
+// has its level (-96 dB and below is silent), width in % (0 = mono), a
+// balance, -100 (left) to 100, and mute; every wire leaving it carries it so.
+struct OutputInfo {
+    double levelDb = 0, width = 100, pan = 0;
+    bool muted = false;
+    bool neutral() const { return levelDb == 0 && width == 100 && pan == 0 && !muted; }
+    bool operator==(const OutputInfo& o) const { return levelDb == o.levelDb && width == o.width && pan == o.pan && muted == o.muted; }
+    bool operator!=(const OutputInfo& o) const { return !(*this == o); }
+    static OutputInfo fromJson(const QJsonObject& j);
+    // level_db, width, pan and muted, as the output request takes them.
+    QJsonObject json() const;
+    // What it is called: its channels, "1-2", "3-4"...
+    static QString name(int out) { return QString("%1-%2").arg(2 * out + 1).arg(2 * out + 2); }
+};
+constexpr int kMaxOuts = 8; // as the engine has: channels 1-2 to 15-16
+
 struct PluginInfo {
     int slot = 0;
     QString label, format, path, id;
@@ -27,42 +44,52 @@ struct PluginInfo {
     bool hasKey = false;   // it has a side-chain input to wire into
     bool placed = false;   // the routing board draws it where it was put...
     QPointF at;            // ...its centre, in board units
+    QVector<OutputInfo> outs{OutputInfo{}};
 };
 
-// An end of a wire: the chain's input, a plug-in (its input, or its key)
-// or one of the performance's outputs.
+// An end of a wire: the chain's input or a plug-in (where a wire starts,
+// one of its outputs; where it ends, its input or its key) or one of the
+// performance's outputs.
 struct PortInfo {
     enum class Kind { Input, Block, Output };
     Kind kind = Kind::Input;
     int index = 0; // the plug-in's slot, or the output's number
     bool key = false;
-    static PortInfo input() { return {}; }
-    static PortInfo block(int slot, bool key = false) { return {Kind::Block, slot, key}; }
-    static PortInfo output(int o) { return {Kind::Output, o, false}; }
-    bool operator==(const PortInfo& o) const { return kind == o.kind && index == o.index && key == o.key; }
+    int out = 0; // which output of the input or plug-in a wire leaves, from 0
+    static PortInfo input(int out = 0) { return {Kind::Input, 0, false, out}; }
+    static PortInfo block(int slot, bool key = false) { return {Kind::Block, slot, key, 0}; }
+    static PortInfo blockOut(int slot, int out) { return {Kind::Block, slot, false, out}; }
+    static PortInfo output(int o) { return {Kind::Output, o, false, 0}; }
+    bool operator==(const PortInfo& o) const { return kind == o.kind && index == o.index && key == o.key && out == o.out; }
     bool operator!=(const PortInfo& o) const { return !(*this == o); }
+    // The same input or plug-in, whichever of its outputs.
+    bool same(const PortInfo& o) const { return kind == o.kind && (kind == Kind::Input || index == o.index); }
+    PortInfo withOut(int o) const {
+        PortInfo p = *this;
+        p.out = o;
+        return p;
+    }
     // As a request names it: a slot, "in", or the output by number (out1,
     // out2...), which stays when outputs are renamed, so undo still finds it.
     QJsonValue json(const QStringList& outputs) const;
 };
 
-// A wire and what it does to the sound: its level (-96 dB and below is
-// silent), width in % (0 = mono), then a balance, -100 (left) to 100.
+// A wire: it carries one output of the input or a plug-in (from.out) as
+// that output has it, to a plug-in or an output. It has no gains of its own.
 struct WireInfo {
     PortInfo from, to;
-    double levelDb = 0, width = 100, pan = 0;
-    bool muted = false;
     bool feedback = false; // heard a block late, so it may lead back to its own plug-in
     bool jump = false;     // drawn as a jump cut: out at its source and in at its end, marked by a letter
     QPointF jumpOut{34, 0}, jumpIn{-34, 0}; // ...where the letters are, from the ports, in board units
-    bool neutral() const { return levelDb == 0 && width == 100 && pan == 0 && !muted; }
     // jump, jump_out and jump_in, as the engine sends them.
     void readJump(const QJsonObject& wj);
-    bool same(const WireInfo& o) const { return levelDb == o.levelDb && width == o.width && pan == o.pan && muted == o.muted && jump == o.jump &&
-                                               jumpOut == o.jumpOut && jumpIn == o.jumpIn; }
-    // The request that makes it so: {"cmd": "wire", "chain", "from", "to", ...}.
+    bool same(const WireInfo& o) const { return jump == o.jump && jumpOut == o.jumpOut && jumpIn == o.jumpIn; }
+    // The request that makes it so: {"cmd": "wire", "chain", "from", "out", "to", ...}.
     QJsonObject request(int chain, const QStringList& outputs, const QString& cmd = "wire") const;
 };
+
+// The request that sets one output: {"cmd": "output", "chain", "from", "out", gains}.
+QJsonObject outputRequest(int chain, const PortInfo& from, const OutputInfo& gains);
 
 // A wire attached at one end only, left where a plug-in was pulled out:
 // it carries nothing until its loose end is plugged into something. from:
@@ -71,8 +98,7 @@ struct LooseInfo {
     PortInfo port;
     bool from = true;
     QPointF at; // the loose end, in board units
-    double levelDb = 0, width = 100, pan = 0;
-    bool muted = false, feedback = false;
+    bool feedback = false;
     // As the wires request lists it.
     QJsonObject json(const QStringList& outputs) const;
     // The wire it makes, plugged into other; and the loose one a wire leaves
@@ -92,6 +118,15 @@ struct ChainInfo {
     QVector<PluginInfo> blocks;
     QVector<WireInfo> wires;
     QVector<LooseInfo> loose;
+    QVector<OutputInfo> inputOuts{OutputInfo{}}; // the input's outputs
+    // The outputs of the input or a plug-in (none for anything else), and
+    // the one a wire from there leaves (as it starts if there is none).
+    const QVector<OutputInfo>* outsOf(const PortInfo& from) const;
+    QVector<OutputInfo>* outsOf(const PortInfo& from);
+    int numOuts(const PortInfo& from) const;
+    OutputInfo gainsOf(const PortInfo& from) const;
+    // The wires leaving that output, by their place in wires.
+    QVector<int> wiresFrom(const PortInfo& from) const;
     // Where the board draws its input and each output (by number), once
     // they are put somewhere.
     std::optional<QPointF> inputAt;

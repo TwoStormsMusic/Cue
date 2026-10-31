@@ -95,11 +95,14 @@ public:
     // (the fields of a level request); Auto started or stopped.
     void setLevel(bool input, int index, const QJsonObject& fields, std::function<void(const QJsonObject&)> then = {});
     void runAuto(bool input, int index, bool cancel);
-    // ...and on a block's output, the wire from it: its key, and Auto
-    // started or stopped. Its settings are the same for every wire.
-    static QString autoKey(int chain, const QJsonValue& from, const QJsonValue& to, bool key);
-    QString autoKey(int chain, const WireInfo& w) const;
-    void runAuto(int chain, const WireInfo& w, bool cancel);
+    // ...and on an output of a plug-in or the chain's input (from, with
+    // its out): its key, and Auto started or stopped. Its settings are the
+    // same for every output.
+    static QString autoKey(int chain, const QJsonValue& from, int out);
+    static QString autoKey(int chain, const PortInfo& from) { return autoKey(chain, from.json({}), from.out); }
+    void runAuto(int chain, const PortInfo& from, bool cancel);
+    // What an output is called: "Delay 1-2", or the input's "Bass 3-4".
+    QString outputName(const ChainInfo& c, const PortInfo& from) const;
     void setWireAuto(const AutoInfo& to, bool match, std::function<void(const QJsonObject&)> then = {});
 
     // Asks the engine for a change to the routing (add, remove, restore,
@@ -144,6 +147,7 @@ private:
     // What a change's answer (or an event) says the performance is now.
     void follow(const QJsonObject& request, const QJsonObject& reply);
     void setWire(int chain, const QJsonObject& wire);
+    void setOutput(int chain, const QJsonObject& output);
     void setLevels(const QJsonObject& io);
 
     void takeBack(QVector<Edit>& from, QVector<Edit>& to, bool undoing);

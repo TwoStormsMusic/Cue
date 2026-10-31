@@ -728,6 +728,21 @@ std::string expandPath(std::string p) {
     return p;
 }
 
+std::vector<WireGains>* outsOf(ChainSpec& c, const Port& from) {
+    if (from.kind == Port::Kind::Input)
+        return &c.inputOuts;
+    if (from.kind == Port::Kind::Block && !from.key && from.index >= 0 && static_cast<size_t>(from.index) < c.blocks.size())
+        return &c.blocks[from.index].outs;
+    return nullptr;
+}
+
+const std::vector<WireGains>* outsOf(const ChainSpec& c, const Port& from) { return outsOf(const_cast<ChainSpec&>(c), from); }
+
+WireGains gainsOf(const ChainSpec& c, const Port& from) {
+    const std::vector<WireGains>* outs = outsOf(c, from);
+    return outs && from.out < outs->size() ? (*outs)[from.out] : WireGains{};
+}
+
 bool pluginFromText(const std::string& text, PluginSpec& spec, std::string* error) {
     spec = PluginSpec{};
     spec.where = "the new plug-in";
@@ -754,11 +769,12 @@ std::string wireList(const ChainSpec& chain, const std::vector<std::string>& out
     for (const WireSpec& w : chain.wires) {
         if (!s.empty())
             s += ' ';
-        s += end(w.from) + ">" + end(w.to);
-        if (!w.gains.neutral()) {
+        s += end(w.from) + (w.from.out ? "@" + std::to_string(w.from.out) : "") + ">" + end(w.to);
+        const WireGains g = gainsOf(chain, w.from);
+        if (!g.neutral()) {
             char buf[80];
-            std::snprintf(buf, sizeof buf, "(%gdB w%g p%g%s)", w.gains.levelDb, std::round(w.gains.width * 1000) / 10, std::round(w.gains.pan * 1000) / 10,
-                          w.gains.muted ? " muted" : "");
+            std::snprintf(buf, sizeof buf, "(%gdB w%g p%g%s)", g.levelDb, std::round(g.width * 1000) / 10, std::round(g.pan * 1000) / 10,
+                          g.muted ? " muted" : "");
             s += buf;
         }
     }
@@ -792,11 +808,11 @@ void linesToWires(ChainSpec& c) {
     };
     for (size_t l = 0; l < n; ++l)
         for (size_t k = 0; k < count[l]; ++k)
-            c.wires.push_back({at(l, k), Port::block(static_cast<int>(first[l] + k)), {}, c.blocks[first[l] + k].where});
+            c.wires.push_back({at(l, k), Port::block(static_cast<int>(first[l] + k)), c.blocks[first[l] + k].where});
     for (size_t o = 0; o < c.out.size(); ++o) {
         const TapSpec& t = c.out[o];
         const size_t line = t.line >= 0 && static_cast<size_t>(t.line) < n ? static_cast<size_t>(t.line) : 0;
-        c.wires.push_back({at(line, std::min(t.after, count[line])), Port::output(static_cast<int>(o)), {}, t.where.empty() ? c.where : t.where});
+        c.wires.push_back({at(line, std::min(t.after, count[line])), Port::output(static_cast<int>(o)), t.where.empty() ? c.where : t.where});
     }
     c.lines.clear();
     c.out.clear();
@@ -984,6 +1000,15 @@ bool finishConfig(Config& config, std::string* error) {
                             *error = (w.where.empty() ? c.where : w.where) + ": chain '" + c.name + "': a wire joins a plug-in or output it does not have";
                             return false;
                         }
+                // Each wire leaves an output its source has.
+                for (const WireSpec& w : c.wires) {
+                    const std::vector<WireGains>* outs = outsOf(c, w.from);
+                    if (outs && w.from.out >= outs->size()) {
+                        *error = (w.where.empty() ? c.where : w.where) + ": chain '" + c.name + "': a wire leaves output " +
+                                 std::to_string(w.from.out + 1) + ", which its plug-in or input does not have";
+                        return false;
+                    }
+                }
                 for (auto& p : c.blocks)
                     if (!p.bypassModeSet)
                         p.muteOnBypass = config.muteOnBypass;

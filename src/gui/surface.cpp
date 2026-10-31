@@ -1,6 +1,7 @@
 #include "gui/surface.h"
 
 #include <QFile>
+#include <QLineF>
 #include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
@@ -13,6 +14,21 @@ namespace cue::gui {
 Surface::Surface(AppState& state, QWidget* parent) : QWidget(parent), s(state) {
     setAttribute(Qt::WA_OpaquePaintEvent);
     setMouseTracking(false);
+    // A touch held still on what has a menu opens it, and taps nothing.
+    holdTimer_.setSingleShot(true);
+    holdTimer_.setInterval(500);
+    connect(&holdTimer_, &QTimer::timeout, this, [this] {
+        if (pressed_.isEmpty() || !pressedInside_ || dragging_)
+            return;
+        for (int i = hits_.size() - 1; i >= 0; --i)
+            if (hits_[i].id == pressed_ && hits_[i].held) {
+                const auto menu = hits_[i].held;
+                pressed_.clear();
+                menu();
+                update();
+                return;
+            }
+    });
 }
 
 QRectF Surface::hitRect(const QString& id) const {
@@ -30,7 +46,15 @@ QStringList Surface::hitIds() const {
 }
 
 void Surface::hit(const QString& id, const QRectF& r, std::function<void()> tap, Drag drag) {
-    hits_.append({id, r, std::move(tap), std::move(drag)});
+    hits_.append({id, r, std::move(tap), std::move(drag), {}});
+}
+
+void Surface::hold(const QString& id, std::function<void()> menu) {
+    for (int i = hits_.size() - 1; i >= 0; --i)
+        if (hits_[i].id == id) {
+            hits_[i].held = std::move(menu);
+            return;
+        }
 }
 
 void Surface::paintEvent(QPaintEvent*) {
@@ -93,8 +117,19 @@ void Surface::offline(QPainter& p) {
 }
 
 void Surface::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton)
+    if (e->button() == Qt::LeftButton) {
         pointerPress(e->position());
+    } else if (e->button() == Qt::RightButton && pressed_.isEmpty()) {
+        // What is on top there: its menu, if it has one.
+        for (int i = hits_.size() - 1; i >= 0; --i)
+            if (hits_[i].r.contains(e->position())) {
+                if (const auto menu = hits_[i].held) {
+                    menu();
+                    update();
+                }
+                return;
+            }
+    }
 }
 
 void Surface::mouseMoveEvent(QMouseEvent* e) { pointerMove(e->position()); }
@@ -112,7 +147,12 @@ void Surface::pointerPress(QPointF pos) {
             continue;
         pressed_ = hits_[i].id;
         pressedInside_ = true;
+        pressAt_ = pos;
         dragging_ = hits_[i].drag;
+        if (hits_[i].held && !dragging_)
+            holdTimer_.start();
+        else
+            holdTimer_.stop();
         if (dragging_)
             dragging_(pos, false);
         update();
@@ -124,6 +164,8 @@ void Surface::pointerMove(QPointF pos) {
     if (pressed_.isEmpty())
         return;
     lastPos_ = pos;
+    if (QLineF(pos, pressAt_).length() > 10)
+        holdTimer_.stop();
     if (dragging_) {
         dragging_(pos, false);
         return;
@@ -137,6 +179,7 @@ void Surface::pointerMove(QPointF pos) {
 }
 
 void Surface::pointerRelease(QPointF pos) {
+    holdTimer_.stop();
     if (pressed_.isEmpty())
         return;
     const QString id = std::exchange(pressed_, {});
@@ -155,6 +198,7 @@ void Surface::pointerRelease(QPointF pos) {
 }
 
 void Surface::pointerCancel() {
+    holdTimer_.stop();
     if (pressed_.isEmpty())
         return;
     pressed_.clear();

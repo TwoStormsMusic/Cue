@@ -520,6 +520,20 @@ Known (2026-10-29, for later): in the `.RPP` the converter writes, pedals turn e
 7. **Without the M2.** `bin/cue run configs/app-demo.ini --audio none --tone -20`, then the app: meters move and Auto works on a tone.
 8. **Kept.** **Save**, quit, open again: Auto's row is as you left it.
 
+## 26. Output cards on every plug-in (0.10.0)
+
+`bin/cue-app --version` should say 0.10.0. Steps 24 and 25 still apply, but a wire no longer has a level of its own: step 25's cards are now outputs.
+
+1. **Cards.** Tap the input box, **Chain**: under **OUTPUTS IN THIS CHAIN**, every plug-in (and the input) in board order, each with one card, **1-2**, laid out like a TwoStorms output card: **+**, a **W 100%** bar, a **Pan C** bar and **…** on top; then 1-2, where its wires go and its level; a meter, a fader, **Mute** and **Auto**.
+2. **Width and pan.** Drag a card's **W** bar left: the sound narrows to mono at 0 %. Drag **Pan** left: the right side gets quieter. Double-tap either: back to 100 % and centre. **Undo** works for each.
+3. **Another output.** Tap **+** on your drive's card: a **3-4** card appears under it, and the drive gets a second dot on the board, under the first. Draw a wire from the new dot to Amp (remove the old one to Amp first): set 3-4's level to −6 dB. Only the Amp gets quieter; FOH stays as it was. The wire's tag says 3-4.
+4. **Several at once.** Right-click **+** (on a touch screen, hold it): a menu offers 1 to 6 more outputs. Pick one: that many cards appear. **Undo** takes them back.
+5. **… menu.** Tap **…** on 3-4: **Remove output 3-4** takes it and its wire away; **Undo** puts both back. On a plug-in with one output, Remove is greyed. **Drive link** is listed as coming.
+6. **A wire is its output.** Tap a wire: its panel says **Carries output 1-2**, and its level, width and pan are that output's. Two wires from one dot move together.
+7. **Block panel.** Tap a plug-in: **OUTPUTS** lists 1-2, 3-4..., each with where it goes, a meter and its level, and **+ Add**.
+8. **Auto.** As step 25, on an output card's **Auto**: it sets that output's level.
+9. **Kept.** **Save**, quit, open again: the outputs, their levels, width and pan, and which output each wire leaves are as you left them.
+
 ## What passes
 
 | Check | Pass when |

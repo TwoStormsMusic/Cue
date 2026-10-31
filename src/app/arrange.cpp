@@ -80,7 +80,7 @@ bool isWarmChoice(const std::string& warm) { return warm.empty() || same(warm, "
 // A chain with nothing in it: its input wired to every output.
 void emptyChain(const Config& config, ChainSpec& cs, PresetSpec& ps) {
     for (size_t o = 0; o < config.outputs.size(); ++o)
-        cs.wires.push_back({Port::input(), Port::output(static_cast<int>(o)), {}, ""});
+        cs.wires.push_back({Port::input(), Port::output(static_cast<int>(o)), ""});
     ps.warm = config.warm;
 }
 
@@ -153,7 +153,7 @@ bool arrange(LiveRig& live, Config next, Fills& fills, const std::vector<int>& e
             edit.added.push_back({std::move(f.processors[i]), ps.bypassed, ps.muteOnBypass});
         }
         for (const WireSpec& w : cs->wires)
-            edit.wires.push_back({w.from, w.to, w.gains, 0, w.feedback});
+            edit.wires.push_back({w.from, w.to, gainsOf(*cs, w.from), 0, w.feedback});
         if (!engine.prepareEdit(f.id, edit, prepared[e++], error))
             return false;
     }
