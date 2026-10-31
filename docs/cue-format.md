@@ -31,8 +31,8 @@ A `.cue` file is a zip:
 
 ```json
 {
-  "cue": 1,
-  "saved_by": "Cue 0.4.0",
+  "cue": 2,
+  "saved_by": "Cue 0.7.0",
   "name": "Friday",
   "inputs": ["Bass"],
   "outputs": ["FOH", "Amp"],
@@ -40,22 +40,32 @@ A `.cue` file is a zip:
   "switching": {"preroll_ms": 50, "crossfade_ms": 20, "tail_cap_ms": 10000, "tail_hold_ms": 300,
                 "tail_quiet_db": -90, "bypass_fade_ms": 10, "mute_fade_ms": 10, "reset_tails_on_warm": true},
   "controller": {"profile": "eurekaprom", "channel": 1, "forward": true},
+  "tuner": {"input": "Bass", "reference": 440, "range": "bass", "tolerance": 2, "names": "sharps"},
+  "levels": {"inputs": {"Bass": {"gain_db": 4.5, "auto": {"measure": "rms", "target_db": -18, "seconds": 5}}},
+             "outputs": {"FOH": {"level_db": -3, "limiter": {"on": true, "ceiling_db": -1, "release_ms": 100}},
+                         "Amp": {"muted": true}},
+             "wires": {"auto": {"measure": "lufs", "target_db": -18, "seconds": 5, "match": true}}},
   "scenes": [{
     "name": "Covers", "display": "CV", "pedal": 2,
     "chains": [{
       "name": "Punk", "display": "PU", "pedal": 6, "program": 4,
       "on_select": ["group Start", "Wah = Off"],
       "warm": "next",
-      "lines": [
-        {"plugins": [
-          {"format": "clap", "path": "~/.clap/TwoStorms Gain Stage.clap", "id": "com.twostorms.gainstage",
-           "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru", "midi": true,
-           "params": {"54": 1}, "state": "states/01 Covers/01 Punk/01 Gain Stage.clapstate"},
-          {"format": "vst3", "path": "~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "...": "..."}
-        ]},
-        {"name": "FOH", "from": "", "after": 2, "plugins": ["..."]}
+      "blocks": [
+        {"format": "clap", "path": "~/.clap/TwoStorms Gain Stage.clap", "id": "com.twostorms.gainstage",
+         "label": "Gain Stage", "bypassed": false, "bypass_mode": "thru", "midi": true,
+         "params": {"54": 1}, "state": "states/01 Covers/01 Punk/01 Gain Stage.clapstate", "x": 196, "y": 109},
+        {"format": "vst3", "path": "~/.vst3/yabridge/Neural DSP/Darkglass Ultra.vst3", "...": "..."},
+        {"format": "clap", "path": "~/.clap/TwoStorms IR Loader.clap", "...": "...",
+         "outputs": [{}, {"level_db": -3, "width": 50, "pan": -30}]}
       ],
-      "outputs": {"FOH": {"line": "FOH", "after": 1}, "Amp": {"line": "", "after": 2}}
+      "wires": [
+        {"from": "Bass", "to": 0},
+        {"from": 0, "to": 1},
+        {"from": 1, "to": 2},
+        {"from": 2, "to": "FOH"},
+        {"from": 2, "out": 1, "to": "Amp"}
+      ]
     }]
   }],
   "controls": [{"name": "Wah", "type": "discrete", "values": ["Off", "Auto", "Pedal"], "default": 0, "wrap": true,
@@ -72,17 +82,59 @@ A `.cue` file is a zip:
   switching to it is instant: `next` (the next chain), `none`, or the name of
   a chain of the same scene. `chain Punk` and `preset Punk` both select it in
   actions and conditions.
-- **Lines** are the main line first, then branches: each branch takes a copy
-  of the line named in `from` (`""` is the main line) after that many of its
-  plug-ins. **outputs** says where each of the performance's outputs is taken,
-  by line and number of plug-ins before it; an output a chain leaves out takes
-  the end of the main line.
+- **Blocks and wires.** `blocks` are the chain's plug-ins, numbered from 0
+  in the order listed; `wires` join them. A wire comes `from` the chain's
+  input (by its name, or `in`) or a block's output (its number), and goes
+  `to` a block's input, its side-chain input with `"key": true`, or an
+  output (by name). `out` says which of its source's outputs it leaves: 0
+  (1-2, when left out), 1 (3-4) and on. An output can feed any number of
+  wires, and wires into one input are summed. A loop is refused as the file
+  loads.
+- **Outputs.** Every block, and the chain's input, has one output (1-2) or
+  more, up to 8 (15-16): `outputs` on a block, `input_outputs` on the chain,
+  left out when there is one as it starts. Each has a `level_db` (0 when
+  left out; -96 or less is off), a `width` (100 % when left out; 0 folds to
+  mono, up to 200), a `pan` (a balance, -100 left to 100 right, 0 when left
+  out), and `muted`. Width comes before pan. Every wire leaving an output
+  carries it so: a wire has none of these of its own.
+  A block that the input does not reach, or no output hears, is loaded but
+  not processed. `x` and `y` are where the app's routing board draws a
+  block the user put somewhere; a block without them is laid out from its
+  wires.
+- **Loose wires.** `loose` (left out when there are none) lists wires
+  attached at one end only, left where a plug-in was pulled out of them:
+  each has `from` (with its `out`) or `to` (as a wire's), `key`, `x` and `y`
+  (where its loose end lies on the board) and `feedback`, kept for when it
+  is plugged in again. They carry nothing.
+- **Board.** `board` (left out until something is put there) says where the
+  routing board draws the chain's `input` and its `outputs` (by name), each
+  `{"x": ..., "y": ...}`; what is missing is laid out from the wires.
+- **Format 1** files (Cue 0.4 to 0.6) have `lines` and `outputs` instead: the
+  main line first, then branches, each taking a copy of the line named in
+  `from` (`""` is the main line) after that many of its plug-ins, and each
+  output taken from a line after a number of its plug-ins. They still open,
+  as the blocks and wires they describe, and are saved as format 2.
 - **input** is the performance input a chain plays. It is written only when
   the performance has more than one; without it, a chain plays the first.
 - **Plug-ins** are found by `path`. Paths under your home folder are written
   with `~`, so they work for another user name. `label` is what the mappings
   call the plug-in. `params` are set after the state, by parameter id
   (`cue params` lists them).
+  `shown` is the parameters the app shows under the selected block, by id
+  in the order picked there; without it the app shows the first eight.
+- **levels** are the performance's, the same whichever chain plays (the
+  app's Gain Stage sets them): each input's `gain_db` before every chain
+  (its calibration), each output's `level_db`, `muted` and `limiter` after
+  every chain is mixed, by name, and the settings Auto uses on each
+  (`measure`: peak, rms or lufs; `target_db`; `seconds`). `wires` holds the
+  settings of Auto on the plug-ins' outputs, the
+  same in every chain, with `match` (true: as loud as the plug-in is fed;
+  false: to the target). Only what is not as it starts is written: 0 dB, not
+  muted, the limiter off with a -1 dB ceiling and 100 ms release, Auto on
+  peak to -12 dB over 5 s, matching on the wires. -100 dB is silence. Levels for an input or output the performance does not have are
+  left out, with a warning.
+- **tuner** is the built-in tuner: the input it listens to and its settings,
+  as `[tuner]` in [config.md](config.md).
 - The mapping strings (`on_select`, controls, triggers, groups, `fcb`) are the
   language of [config.md](config.md), unchanged.
 - `cue` is the format's version. A file from a newer Cue is refused with a
@@ -116,8 +168,9 @@ needs them.
 ```
 
 `inputs` and `outputs` give the sound card channel (from 1) of each name a
-performance uses. An input or output the rig does not list takes the channel
-of its place (the second output plays on channel 2), and `cue check` says
-which names it could not find. Two outputs cannot share a channel. Every
+performance uses. An input or output the rig does not list (one renamed in
+the app, say) takes the channel of its place (the second output plays on
+channel 2), or the first channel no other has, and `cue check` says which
+names it could not find. Two outputs cannot share a channel. Every
 setting can be left out; what is missing keeps its default (`[audio]` and
 `[midi]` in [config.md](config.md) describe each one).

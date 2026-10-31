@@ -8,18 +8,29 @@
 //   cue.test.key    plays its side-chain input (a second stereo port), times
 //                   "Gain"; registers a 20 ms timer and counts its calls
 //
+// cue.test.gain also has an editor: a plain X11 window it fills with a
+// colour, which registers its own screen connection with the host, so the
+// host's editor windows can be tested without an outside plug-in.
+//
 // They also record how the host drives them (reset, start/stop processing,
 // process outside start/stop) in a few exported counters, so tests can check
 // the host follows the CLAP threading and lifecycle rules.
 
 #include <clap/clap.h>
 
+#ifdef CUE_TEST_X11
+#include <X11/Xlib.h>
+#endif
+
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -31,6 +42,8 @@ struct Stats {
     std::atomic<long> resets{0}, starts{0}, stops{0}, processWhileStopped{0}, processCalls{0};
     std::atomic<long> midiEvents{0}, lastCc{-1}, lastCcValue{-1};
     std::atomic<long> timerCalls{0};
+    std::atomic<long> editorDraws{0}, editorFdCalls{0};
+    std::atomic<int> editorOpen{0};
 };
 Stats g_stats;
 
@@ -45,6 +58,14 @@ struct Plugin {
     size_t pos = 0;
     float burnAcc = 0.0f;
     clap_id timer = CLAP_INVALID_ID;
+#ifdef CUE_TEST_X11
+    // The editor: a connection of its own, as a real plug-in has.
+    Display* display = nullptr;
+    ::Window window = 0;
+    clap_id guiTimer = CLAP_INVALID_ID;
+    unsigned width = 320, height = 240;
+    bool shown = false;
+#endif
 };
 
 Plugin* self(const clap_plugin_t* p) { return static_cast<Plugin*>(p->plugin_data); }
@@ -144,7 +165,38 @@ void applyEvents(Plugin* s, const clap_input_events_t* in) {
     if (s->kind == Kind::Crash && s->param >= 0.5)
         std::raise(SIGSEGV);
 }
-void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*) { applyEvents(self(p), in); }
+// A knob turned in the editor (cue_test_turn): the gain plug-in says so on
+// the next process or flush, with or without a gesture around it.
+std::atomic<bool> g_turnPending{false};
+std::atomic<double> g_turnValue{0};
+std::atomic<bool> g_turnGesture{true};
+std::atomic<Plugin*> g_lastGain{nullptr};
+
+void emitTurn(Plugin* s, const clap_output_events_t* out) {
+    if (s->kind != Kind::Gain || !out || !g_turnPending.exchange(false))
+        return;
+    const double v = g_turnValue.load();
+    const bool gesture = g_turnGesture.load();
+    s->param = v;
+    clap_event_param_gesture_t g{};
+    g.header = {sizeof g, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_GESTURE_BEGIN, 0};
+    g.param_id = 0;
+    if (gesture)
+        out->try_push(out, &g.header);
+    clap_event_param_value_t e{};
+    e.header = {sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0};
+    e.param_id = 0;
+    e.value = v;
+    out->try_push(out, &e.header);
+    g.header.type = CLAP_EVENT_PARAM_GESTURE_END;
+    if (gesture)
+        out->try_push(out, &g.header);
+}
+
+void paramsFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t* out) {
+    applyEvents(self(p), in);
+    emitTurn(self(p), out);
+}
 const clap_plugin_params_t kParams = {paramsCount, paramsInfo, paramsValue, paramsToText, paramsFromText, paramsFlush};
 
 // ---- state: the parameter as 8 bytes
@@ -177,6 +229,10 @@ bool notesGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_note_port
 }
 const clap_plugin_note_ports_t kNotes = {notesCount, notesGet};
 
+#ifdef CUE_TEST_X11
+void guiDraw(Plugin* s);
+#endif
+
 // ---- tail (delay only)
 
 uint32_t tailGet(const clap_plugin_t* p) {
@@ -188,13 +244,143 @@ const clap_plugin_tail_t kTail = {tailGet};
 
 // ---- timer (key only)
 
-void onTimer(const clap_plugin_t*, clap_id) { g_stats.timerCalls++; }
+void onTimer(const clap_plugin_t* p, clap_id id) {
+    g_stats.timerCalls++;
+#ifdef CUE_TEST_X11
+    Plugin* s = self(p);
+    if (id == s->guiTimer && s->guiTimer != CLAP_INVALID_ID)
+        guiDraw(s);
+#else
+    (void)p;
+    (void)id;
+#endif
+}
 const clap_plugin_timer_support_t kTimer = {onTimer};
+
+#ifdef CUE_TEST_X11
+// What the host calls when the plug-in's own connection has something.
+void onPosixFd(const clap_plugin_t* p, int fd, clap_posix_fd_flags_t) {
+    Plugin* s = self(p);
+    g_stats.editorFdCalls++;
+    if (!s->display || fd != ConnectionNumber(s->display))
+        return;
+    while (XPending(s->display)) {
+        XEvent e;
+        XNextEvent(s->display, &e);
+        if (e.type == Expose)
+            guiDraw(s);
+    }
+}
+const clap_plugin_posix_fd_support_t kPosixFd = {onPosixFd};
+#endif
+
+// ---- editor (gain only, when built with X11)
+
+#ifdef CUE_TEST_X11
+void guiDraw(Plugin* s) {
+    if (!s->display || !s->window || !s->shown)
+        return;
+    GC gc = XCreateGC(s->display, s->window, 0, nullptr);
+    XSetForeground(s->display, gc, static_cast<unsigned long>(s->param * 0x7f) << 16 | 0x2200ff);
+    XFillRectangle(s->display, s->window, gc, 0, 0, s->width, s->height);
+    XFreeGC(s->display, gc);
+    XFlush(s->display);
+    g_stats.editorDraws++;
+}
+
+bool guiIsApiSupported(const clap_plugin_t*, const char* api, bool floating) {
+    return !floating && !std::strcmp(api, CLAP_WINDOW_API_X11);
+}
+bool guiGetPreferredApi(const clap_plugin_t*, const char** api, bool* floating) {
+    *api = CLAP_WINDOW_API_X11;
+    *floating = false;
+    return true;
+}
+bool guiCreate(const clap_plugin_t* p, const char* api, bool floating) {
+    Plugin* s = self(p);
+    if (floating || std::strcmp(api, CLAP_WINDOW_API_X11))
+        return false;
+    s->display = XOpenDisplay(nullptr);
+    return s->display != nullptr;
+}
+void guiDestroy(const clap_plugin_t* p) {
+    Plugin* s = self(p);
+    const auto* fds = static_cast<const clap_host_posix_fd_support_t*>(s->host->get_extension(s->host, CLAP_EXT_POSIX_FD_SUPPORT));
+    const auto* timers = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT));
+    if (s->display && fds)
+        fds->unregister_fd(s->host, ConnectionNumber(s->display));
+    if (s->guiTimer != CLAP_INVALID_ID && timers)
+        timers->unregister_timer(s->host, s->guiTimer);
+    s->guiTimer = CLAP_INVALID_ID;
+    if (s->window)
+        XDestroyWindow(s->display, s->window);
+    if (s->display)
+        XCloseDisplay(s->display);
+    s->window = 0;
+    s->display = nullptr;
+    s->shown = false;
+    g_stats.editorOpen--;
+}
+bool guiSetScale(const clap_plugin_t*, double) { return false; }
+bool guiGetSize(const clap_plugin_t* p, uint32_t* w, uint32_t* h) {
+    *w = self(p)->width;
+    *h = self(p)->height;
+    return true;
+}
+bool guiCanResize(const clap_plugin_t*) { return true; }
+bool guiGetResizeHints(const clap_plugin_t*, clap_gui_resize_hints_t*) { return false; }
+bool guiAdjustSize(const clap_plugin_t*, uint32_t*, uint32_t*) { return true; }
+bool guiSetSize(const clap_plugin_t* p, uint32_t w, uint32_t h) {
+    Plugin* s = self(p);
+    s->width = w;
+    s->height = h;
+    if (s->display && s->window)
+        XResizeWindow(s->display, s->window, w, h);
+    guiDraw(s);
+    return true;
+}
+bool guiSetParent(const clap_plugin_t* p, const clap_window_t* window) {
+    Plugin* s = self(p);
+    if (!s->display || !window || std::strcmp(window->api, CLAP_WINDOW_API_X11))
+        return false;
+    const int screen = DefaultScreen(s->display);
+    s->window = XCreateSimpleWindow(s->display, static_cast<::Window>(window->x11), 0, 0, s->width, s->height, 0, 0,
+                                    BlackPixel(s->display, screen));
+    if (!s->window)
+        return false;
+    XSelectInput(s->display, s->window, ExposureMask | StructureNotifyMask);
+    XMapWindow(s->display, s->window);
+    XFlush(s->display);
+    if (const auto* fds = static_cast<const clap_host_posix_fd_support_t*>(s->host->get_extension(s->host, CLAP_EXT_POSIX_FD_SUPPORT)))
+        fds->register_fd(s->host, ConnectionNumber(s->display), CLAP_POSIX_FD_READ);
+    if (const auto* timers = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
+        timers->register_timer(s->host, 16, &s->guiTimer);
+    g_stats.editorOpen++;
+    return true;
+}
+bool guiSetTransient(const clap_plugin_t*, const clap_window_t*) { return false; }
+void guiSuggestTitle(const clap_plugin_t*, const char*) {}
+bool guiShow(const clap_plugin_t* p) {
+    Plugin* s = self(p);
+    s->shown = true;
+    guiDraw(s);
+    return true;
+}
+bool guiHide(const clap_plugin_t* p) {
+    self(p)->shown = false;
+    return true;
+}
+const clap_plugin_gui_t kGui = {guiIsApiSupported, guiGetPreferredApi, guiCreate,       guiDestroy,   guiSetScale,
+                                guiGetSize,        guiCanResize,       guiGetResizeHints, guiAdjustSize, guiSetSize,
+                                guiSetParent,      guiSetTransient,    guiSuggestTitle, guiShow,      guiHide};
+#endif
 
 // ---- plugin
 
 bool init(const clap_plugin_t* p) {
     Plugin* s = self(p);
+    if (s->kind == Kind::Gain)
+        g_lastGain = s;
     if (s->kind == Kind::Key)
         if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
             t->register_timer(s->host, 20, &s->timer);
@@ -206,6 +392,8 @@ void destroy(const clap_plugin_t* p) {
         if (auto* t = static_cast<const clap_host_timer_support_t*>(s->host->get_extension(s->host, CLAP_EXT_TIMER_SUPPORT)))
             t->unregister_timer(s->host, s->timer);
     g_stats.instances--;
+    Plugin* last = s;
+    g_lastGain.compare_exchange_strong(last, nullptr);
     delete s;
 }
 bool activate(const clap_plugin_t* p, double sr, uint32_t, uint32_t) {
@@ -241,6 +429,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proc) 
     if (!s->processing)
         g_stats.processWhileStopped++;
     applyEvents(s, proc->in_events);
+    emitTurn(s, proc->out_events);
     if (proc->audio_inputs_count < 1 || proc->audio_outputs_count < 1)
         return CLAP_PROCESS_ERROR;
     float* const* in = proc->audio_inputs[0].data32;
@@ -307,8 +496,14 @@ const void* getExtension(const clap_plugin_t* p, const char* id) {
         return &kTail;
     if (!std::strcmp(id, CLAP_EXT_NOTE_PORTS) && self(p)->kind == Kind::Pedal)
         return &kNotes;
-    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) && self(p)->kind == Kind::Key)
+    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) && (self(p)->kind == Kind::Key || self(p)->kind == Kind::Gain))
         return &kTimer;
+#ifdef CUE_TEST_X11
+    if (!std::strcmp(id, CLAP_EXT_GUI) && self(p)->kind == Kind::Gain)
+        return &kGui;
+    if (!std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) && self(p)->kind == Kind::Gain)
+        return &kPosixFd;
+#endif
     return nullptr;
 }
 void onMainThread(const clap_plugin_t*) {}
@@ -317,7 +512,14 @@ void onMainThread(const clap_plugin_t*) {}
 
 uint32_t factoryCount(const clap_plugin_factory_t*) { return kNumDescs; }
 const clap_plugin_descriptor_t* factoryDesc(const clap_plugin_factory_t*, uint32_t i) { return i < kNumDescs ? kDescs[i] : nullptr; }
+// For the scanner's tests: a copy of this file named scan-crash-open falls
+// over as it is opened, scan-hang-open never answers, and scan-crash-make
+// falls over as a plug-in is made.
+std::string g_file;
+
 const clap_plugin_t* factoryCreate(const clap_plugin_factory_t*, const clap_host_t* host, const char* id) {
+    if (g_file.find("scan-crash-make") != std::string::npos)
+        std::abort();
     for (uint32_t i = 0; i < kNumDescs; ++i) {
         if (std::strcmp(id, kDescs[i]->id) != 0)
             continue;
@@ -337,7 +539,14 @@ const clap_plugin_t* factoryCreate(const clap_plugin_factory_t*, const clap_host
 }
 const clap_plugin_factory_t kFactory = {factoryCount, factoryDesc, factoryCreate};
 
-bool entryInit(const char*) { return true; }
+bool entryInit(const char* path) {
+    g_file = path ? path : "";
+    if (g_file.find("scan-crash-open") != std::string::npos)
+        std::abort();
+    while (g_file.find("scan-hang-open") != std::string::npos)
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    return true;
+}
 void entryDeinit() {}
 const void* entryFactory(const char* id) { return !std::strcmp(id, CLAP_PLUGIN_FACTORY_ID) ? &kFactory : nullptr; }
 
@@ -345,6 +554,17 @@ const void* entryFactory(const char* id) { return !std::strcmp(id, CLAP_PLUGIN_F
 
 extern "C" {
 extern CLAP_EXPORT const clap_plugin_entry_t clap_entry = {CLAP_VERSION_INIT, entryInit, entryDeinit, entryFactory};
+
+// The last gain plug-in made has its knob turned, as if in its editor: it
+// asks the host for a flush, and says so then or with its next block.
+CLAP_EXPORT void cue_test_turn(double value, int gesture) {
+    g_turnValue = value;
+    g_turnGesture = gesture != 0;
+    g_turnPending = true;
+    if (Plugin* s = g_lastGain.load())
+        if (auto* params = static_cast<const clap_host_params_t*>(s->host->get_extension(s->host, CLAP_EXT_PARAMS)))
+            params->request_flush(s->host);
+}
 
 // Lifecycle counters for the host tests (not part of CLAP).
 CLAP_EXPORT long cue_test_stat(const char* name) {
@@ -358,6 +578,9 @@ CLAP_EXPORT long cue_test_stat(const char* name) {
     if (!std::strcmp(name, "last_cc")) return g_stats.lastCc;
     if (!std::strcmp(name, "last_cc_value")) return g_stats.lastCcValue;
     if (!std::strcmp(name, "timer_calls")) return g_stats.timerCalls;
+    if (!std::strcmp(name, "editor_draws")) return g_stats.editorDraws;
+    if (!std::strcmp(name, "editor_fd_calls")) return g_stats.editorFdCalls;
+    if (!std::strcmp(name, "editor_open")) return g_stats.editorOpen;
     return -1;
 }
 }

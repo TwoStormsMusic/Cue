@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -178,7 +179,17 @@ public:
         info.flags = ParameterInfo::kCanAutomate;
         return kResultOk;
     }
-    tresult PLUGIN_API getParamStringByValue(ParamID, ParamValue, String128) override { return kNotImplemented; }
+    tresult PLUGIN_API getParamStringByValue(ParamID id, ParamValue v, String128 out) override {
+        if (id != 0)
+            return kInvalidArgument;
+        char text[32];
+        std::snprintf(text, sizeof text, "%.0f %%", v * 100);
+        int i = 0;
+        for (; text[i] && i < 127; ++i)
+            out[i] = static_cast<char16_t>(text[i]);
+        out[i] = 0;
+        return kResultOk;
+    }
     tresult PLUGIN_API getParamValueByString(ParamID, TChar*, ParamValue&) override { return kNotImplemented; }
     ParamValue PLUGIN_API normalizedParamToPlain(ParamID, ParamValue v) override { return v; }
     ParamValue PLUGIN_API plainParamToNormalized(ParamID, ParamValue v) override { return v; }

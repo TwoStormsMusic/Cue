@@ -185,6 +185,7 @@ struct Show::Impl {
         int pedal;
         bool hasFollow = false;
         Input follow;
+        std::string followText;
         double drivenValue = std::numeric_limits<double>::quiet_NaN(); // last value sent to drives
     };
 
@@ -252,7 +253,6 @@ struct Show::Impl {
     };
 
     ShowOutput& out;
-    mutable std::mutex mutex;
     Config config;
     std::vector<ShowPlugin> plugins;
     std::vector<Control> controls;
@@ -324,7 +324,7 @@ struct Show::Impl {
         int chainIndex = -1;
         if (!chainName.empty()) {
             for (size_t i = 0; i < chainNames.size(); ++i)
-                if (same(chainNames[i], chainName))
+                if (!chainNames[i].empty() && same(chainNames[i], chainName))
                     chainIndex = static_cast<int>(i);
             if (chainIndex < 0) {
                 *error = "no chain named " + chainName;
@@ -886,7 +886,15 @@ struct Show::Impl {
             out.switchTo(p.chain);
         }
         runActions(p.actions);
-        int warm = p.warm;
+        warmFor(index);
+    }
+
+    // The chain kept warm while a preset plays: its own choice, or the next
+    // preset's that plays another chain.
+    void warmFor(int index) {
+        if (index < 0 || index >= static_cast<int>(presets.size()))
+            return;
+        int warm = presets[index].warm;
         if (warm == kWarmNext) {
             // The next preset that plays another chain.
             warm = -1;
@@ -1060,8 +1068,16 @@ struct Show::Impl {
             sc.program = ss.program;
             sc.firstPreset = static_cast<int>(presets.size());
             sc.numPresets = static_cast<int>(ss.presets.size());
-            for (const auto& c : ss.chains)
-                chainNames.push_back(c.name);
+            // By the engine's number for each chain: the rig's, or its
+            // place in the performance before the rig has numbered it.
+            std::vector<int> ids;
+            for (size_t c = 0; c < ss.chains.size(); ++c) {
+                const int id = ss.chains[c].id >= 0 ? ss.chains[c].id : chainBase + static_cast<int>(c);
+                ids.push_back(id);
+                if (static_cast<int>(chainNames.size()) <= id)
+                    chainNames.resize(id + 1);
+                chainNames[id] = ss.chains[c].name;
+            }
             for (const auto& ps : ss.presets) {
                 Preset p;
                 p.name = ps.name;
@@ -1073,9 +1089,9 @@ struct Show::Impl {
                 p.warm = same(warm, "none") ? kWarmNone : kWarmNext;
                 for (size_t c = 0; c < ss.chains.size(); ++c) {
                     if (same(ss.chains[c].name, ps.chain))
-                        p.chain = chainBase + static_cast<int>(c);
+                        p.chain = ids[c];
                     if (same(ss.chains[c].name, warm) && !same(warm, "next") && !same(warm, "none"))
-                        p.warm = chainBase + static_cast<int>(c);
+                        p.warm = ids[c];
                 }
                 presets.push_back(p);
             }
@@ -1096,6 +1112,7 @@ struct Show::Impl {
                     return false;
                 }
                 k.hasFollow = true;
+                k.followText = cs.follows.text;
             }
             controls.push_back(k);
         }
@@ -1323,23 +1340,65 @@ Show::Show(ShowOutput& out) : d_(std::make_unique<Impl>(out)) {}
 Show::~Show() = default;
 
 bool Show::load(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->load(config, plugins, error);
 }
 
+bool Show::reload(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error, const std::function<bool(std::string*)>& apply) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto next = std::make_unique<Impl>(d_->out);
+    if (!next->load(config, plugins, error))
+        return false;
+    if (apply && !apply(error))
+        return false;
+    const Impl& was = *d_;
+    next->preset = was.preset;
+    next->scene = was.scene;
+    next->activeChain = was.activeChain;
+    next->warmChain = was.warmChain;
+    next->manualMute = was.manualMute;
+    next->sentMute = was.sentMute;
+    std::copy(std::begin(was.sentLeds), std::end(was.sentLeds), std::begin(next->sentLeds));
+    next->sentDisplay = was.sentDisplay;
+    for (auto& k : next->controls)
+        for (const auto& old : was.controls)
+            if (same(k.name, old.name))
+                k.value = std::clamp(old.value, std::min(k.min, k.max), std::max(k.min, k.max));
+    // The preset playing is the one that plays the same chain, wherever
+    // chains added, moved or taken out have put it.
+    const bool stays = next->preset >= 0 && next->preset < static_cast<int>(next->presets.size()) &&
+                      next->presets[next->preset].chain == was.activeChain;
+    for (size_t i = 0; i < next->presets.size() && !stays; ++i)
+        if (was.preset >= 0 && next->presets[i].chain == was.activeChain) {
+            next->preset = static_cast<int>(i);
+            next->scene = next->presets[i].scene;
+            break;
+        }
+    if (next->preset >= static_cast<int>(next->presets.size()))
+        next->preset = next->presets.empty() ? -1 : 0;
+    if (next->scene >= static_cast<int>(next->scenes.size()))
+        next->scene = next->scenes.empty() ? -1 : 0;
+    d_ = std::move(next);
+    // Which chain is warm may have changed with it.
+    if (d_->warmChain != -2)
+        d_->warmFor(d_->preset);
+    d_->refresh();
+    return true;
+}
+
 std::vector<std::string> Show::warnings() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->warnings;
 }
 
 void Show::start() {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(0);
     d_->refresh();
 }
 
 void Show::onMidi(const MidiMessage& m) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl& d = *d_;
     bool isPedal = false;
     Event e{Input::Kind::CC, m.data1, m.data2, m.channel()};
@@ -1372,7 +1431,7 @@ void Show::onMidi(const MidiMessage& m) {
 }
 
 bool Show::onKey(char key) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl& d = *d_;
     bool used = false;
     for (const auto& t : d.triggers)
@@ -1384,19 +1443,19 @@ bool Show::onKey(char key) {
 }
 
 void Show::selectPreset(int index) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(index);
     d_->refresh();
 }
 
 void Show::stepPreset(int delta) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     d_->select(Impl::wrapIndex(d_->preset + delta, static_cast<int>(d_->presets.size())));
     d_->refresh();
 }
 
 bool Show::run(const std::string& action, std::string* error) {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     Impl::Action a;
     if (!d_->parseAction({action, "command"}, a, error))
         return false;
@@ -1405,45 +1464,50 @@ bool Show::run(const std::string& action, std::string* error) {
     return true;
 }
 
+int Show::presetChain(int index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return index >= 0 && index < static_cast<int>(d_->presets.size()) ? d_->presets[index].chain : -1;
+}
+
 int Show::preset() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->preset;
 }
 
 int Show::scene() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->scene;
 }
 
 size_t Show::numPresets() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->presets.size();
 }
 
 std::string Show::presetName(int index) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return index >= 0 && index < static_cast<int>(d_->presets.size()) ? d_->presets[index].name : "";
 }
 
 double Show::value(const std::string& control) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     const int c = d_->findControl(control);
     return c < 0 ? std::numeric_limits<double>::quiet_NaN() : d_->controls[c].value;
 }
 
 std::string Show::valueText(const std::string& control) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     const int c = d_->findControl(control);
     return c < 0 ? "" : Impl::text(d_->controls[c]);
 }
 
 std::string Show::sceneName(int index) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return index >= 0 && index < static_cast<int>(d_->scenes.size()) ? d_->scenes[index].name : "";
 }
 
 std::vector<std::string> Show::controlNames() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> out;
     for (const auto& c : d_->controls)
         out.push_back(c.name);
@@ -1451,28 +1515,49 @@ std::vector<std::string> Show::controlNames() const {
 }
 
 bool Show::muted() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->currentMute();
 }
 
 bool Show::led(int pedal) const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->ledFor(pedal);
 }
 
 std::string Show::display() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     return d_->displayFor();
 }
 
 std::string Show::status() const {
-    std::lock_guard<std::mutex> lock(d_->mutex);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::string s = d_->preset >= 0 ? d_->presets[d_->preset].name : "-";
     if (d_->currentMute())
         s += " (muted)";
     for (const auto& k : d_->controls)
         s += "  " + k.name + ": " + Impl::text(k);
     return s;
+}
+
+std::vector<Show::ParamTie> Show::ties(int chain, size_t slot) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ParamTie> out;
+    auto names = [&](const std::vector<int>& plugins) {
+        for (int p : plugins)
+            if (d_->plugins[p].chain == chain && d_->plugins[p].slot == slot)
+                return true;
+        return false;
+    };
+    for (const auto& d : d_->drives)
+        if (names(d.plugins)) {
+            const auto& k = d_->controls[d.control];
+            out.push_back({d.paramId, k.name, k.followText, "", k.pedal});
+        }
+    for (const auto& t : d_->triggers)
+        for (const auto& a : t.actions)
+            if (a.type == Impl::Action::Type::Param && names(a.plugins))
+                out.push_back({a.paramId, "", "", t.name, 0});
+    return out;
 }
 
 } // namespace cue

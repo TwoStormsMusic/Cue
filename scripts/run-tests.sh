@@ -7,10 +7,17 @@ export CUE_TEST_CLAP="$here/plugins/Cue Test Plugins.clap"
 export CUE_TEST_VST3="$here/plugins/Cue Test.vst3"
 export CUE_TEST_VST3_SO="$here/plugins/Cue Test.vst3/Contents/x86_64-linux/Cue Test.so"
 export CUE_CONFIGS="$here/configs"
+export CUE_BIN="$here/bin/cue"
 
 status=0
 echo "== unit tests"
 "$here/bin/cue_tests" || status=1
+
+if [ -x "$here/bin/cue_app_tests" ]; then
+    echo
+    echo "== app tests (drawn offscreen, against bin/cue run --audio none)"
+    CUE_BIN="$here/bin/cue" QT_QPA_PLATFORM=offscreen "$here/bin/cue_app_tests" || status=1
+fi
 
 echo
 echo "== bench: built-in blocks, 15 s"

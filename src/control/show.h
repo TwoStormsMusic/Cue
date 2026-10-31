@@ -8,7 +8,9 @@
 #include "app/config.h"
 #include "midi/alsa_midi.h"
 
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -16,7 +18,7 @@ namespace cue {
 
 // A loaded plug-in as the show sees it.
 struct ShowPlugin {
-    int chain = 0;     // engine chain index: chains are numbered scene by scene, in config order
+    int chain = 0;     // engine chain: its ChainSpec::id (scene by scene, in config order, before the rig numbers them)
     size_t slot = 0;   // engine slot in the chain: line by line, in config order
     std::string label; // its `name =`, or the plug-in's own name
     bool midi = false; // takes MIDI, and the config lets it
@@ -46,6 +48,15 @@ public:
 
     // Compiles the mappings. Errors and warnings name the config line.
     bool load(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error);
+    // The same while it plays, after a change to the performance (a plug-in
+    // or a chain added or removed): the chain playing, the controls and mute
+    // carry on as they are, and the preset and scene are the ones that play
+    // that chain now. apply runs under the show's lock once the new performance
+    // compiles, so nothing the show sends crosses the change; if it returns
+    // false (with why) the show stays as it was. Then everything the
+    // mappings say is sent again where it differs.
+    bool reload(const Config& config, const std::vector<ShowPlugin>& plugins, std::string* error,
+                const std::function<bool(std::string*)>& apply = nullptr);
     std::vector<std::string> warnings() const;
 
     // Selects the first preset and sets every LED and the display.
@@ -60,6 +71,8 @@ public:
     bool run(const std::string& action, std::string* error);
 
     int preset() const;
+    // The engine chain a preset plays, or -1.
+    int presetChain(int index) const;
     int scene() const;
     size_t numPresets() const;
     std::string presetName(int index) const;
@@ -74,9 +87,19 @@ public:
     // One line for the status display.
     std::string status() const;
 
+    // What moves a plug-in's parameters from outside: a control's drive
+    // (with what it follows and its pedal) or a trigger's param action.
+    struct ParamTie {
+        uint32_t param = 0;
+        std::string control, follows, trigger;
+        int pedal = 0;
+    };
+    std::vector<ParamTie> ties(int chain, size_t slot) const;
+
     struct Impl;
 
 private:
+    mutable std::mutex mutex_;
     std::unique_ptr<Impl> d_;
 };
 

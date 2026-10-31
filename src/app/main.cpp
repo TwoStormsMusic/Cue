@@ -12,23 +12,32 @@
 //   cue scan <file.clap|.vst3>   list the plug-ins in a CLAP file or VST3 bundle
 //   cue params <file>[#id]       list a plug-in's parameters and their ids
 //   cue import-rpp <file.rpp>    make a config from a REAPER project
+//   cue export-rpp <file.cue>    write a performance (or config) as a REAPER project
 //   cue midi-monitor             print incoming MIDI, decoded for EurekaPROM
 //   cue fcb-test [--channel N]   walk the FCB1010 LEDs and display
 
+#include "app/arrange.h"
+#include "app/autolevel.h"
 #include "app/build.h"
 #include "app/config.h"
+#include "app/convert.h"
 #include "app/cpu.h"
 #include "app/cuefile.h"
 #include "app/service.h"
 #include "app/doctor.h"
+#include "app/edit.h"
 #include "app/rpp.h"
+#include "app/scan.h"
 #include "control/show.h"
 #include "audio/alsa_backend.h"
+#include "audio/take_device.h"
 #include "core/engine.h"
 #include "host/clap_processor.h"
+#include "host/editor_host.h"
 #include "host/vst3_processor.h"
 #include "midi/alsa_midi.h"
 #include "midi/eurekaprom.h"
+#include "tuner/tuner.h"
 
 #include <alsa/asoundlib.h>
 #include <pthread.h>
@@ -45,10 +54,13 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -118,7 +130,9 @@ struct Window {
         }
     }
     double avgUs() const { return cycles ? ns / 1000.0 / cycles : 0.0; }
-    double chainAvgUs(size_t i) const { return chainBlocks[i] ? chainNs[i] / 1000.0 / chainBlocks[i] : 0.0; }
+    // A chain added since the window began has nothing in it yet.
+    double chainAvgUs(size_t i) const { return i < chainBlocks.size() && chainBlocks[i] ? chainNs[i] / 1000.0 / chainBlocks[i] : 0.0; }
+    double chainMaxUs(size_t i) const { return i < chainMaxNs.size() ? chainMaxNs[i] / 1000.0 : 0.0; }
 };
 
 // Takes a sample: the counters' growth since the last one, and the peaks
@@ -152,6 +166,53 @@ private:
     std::vector<std::pair<uint64_t, uint64_t>> last_;
 };
 
+// The peak of each input and output since the main thread last took it, for
+// the app's meters. The audio thread only raises a peak; the main thread
+// takes it and leaves zero.
+class Meters {
+public:
+    Meters(size_t inputs, size_t outputs) : inputs_(inputs), outputs_(outputs), peaks_(new std::atomic<float>[inputs + outputs]) {
+        for (size_t c = 0; c < inputs + outputs; ++c)
+            peaks_[c].store(0.0f, std::memory_order_relaxed);
+    }
+    // Audio thread.
+    void measure(const float* const* ins, const float* const* outs, uint32_t frames) {
+        for (size_t c = 0; c < inputs_ + outputs_; ++c) {
+            const float* x = c < inputs_ ? ins[c] : outs[c - inputs_];
+            float peak = 0.0f;
+            for (uint32_t i = 0; i < frames; ++i)
+                peak = std::max(peak, std::fabs(x[i]));
+            if (peak > peaks_[c].load(std::memory_order_relaxed))
+                peaks_[c].store(peak, std::memory_order_relaxed);
+        }
+    }
+    // Main thread: {"inputs": [{"name", "peak_db"}], "outputs": [{"name",
+    // "peak_db", "limit_db"}]}, -120 for silence. An input as the chains hear
+    // it, after its gain; an output as it goes out, with how far its limiter
+    // turned it down.
+    Json take(const Config& config, Engine& engine) {
+        Json j = {{"inputs", Json::array()}, {"outputs", Json::array()}};
+        for (size_t c = 0; c < inputs_ + outputs_; ++c) {
+            const bool in = c < inputs_;
+            float peak = peaks_[c].exchange(0.0f, std::memory_order_relaxed);
+            if (in && c < config.inputLevels.size()) {
+                const float g = config.inputLevels[c].gainDb;
+                peak = g <= kLevelFloorDb ? 0.0f : peak * std::pow(10.0f, g / 20.0f);
+            }
+            const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
+            Json m = {{"name", in ? config.inputs[c] : config.outputs[c - inputs_]}, {"peak_db", std::round(db * 10) / 10}};
+            if (!in)
+                m["limit_db"] = std::round(engine.takeLimiterDb(c - inputs_) * 10) / 10;
+            j[in ? "inputs" : "outputs"].push_back(m);
+        }
+        return j;
+    }
+
+private:
+    const size_t inputs_, outputs_;
+    std::unique_ptr<std::atomic<float>[]> peaks_;
+};
+
 // The chains that are running, with their cost over the window.
 std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
     std::string s;
@@ -161,13 +222,108 @@ std::string chainStatus(Engine& engine, const Rig& rig, const Window& w) {
         if (state == ChainState::Idle)
             continue;
         std::snprintf(buf, sizeof buf, "%s%s %s %.0f/%.0fus", s.empty() ? "" : "  ", rig.chainNames[i].c_str(), toString(state), w.chainAvgUs(i),
-                      w.chainMaxNs[i] / 1000.0);
+                      w.chainMaxUs(i));
         s += buf;
     }
     return s;
 }
 
 // What a status event says: the numbers of one sample and what the show is doing.
+// The tuner event: the reading and what it is measured against.
+Json tunerJson(const TunerReading& r, const TunerSettings& s, const std::string& input) {
+    Json j;
+    j["input"] = input;
+    j["signal"] = r.signal;
+    j["level_db"] = std::round(r.levelDb * 10) / 10;
+    j["note"] = r.note ? Json(r.name) : Json(nullptr);
+    j["octave"] = r.octave;
+    j["midi"] = r.midi;
+    j["cents"] = std::round(r.cents * 10) / 10;
+    j["hz"] = std::round(r.hz * 100) / 100;
+    j["held"] = r.held;
+    j["in_tune"] = r.inTune;
+    j["reference"] = s.reference;
+    j["range"] = tunerRangeName(s.range);
+    j["tolerance"] = s.tolerance;
+    j["names"] = s.flats ? "flats" : "sharps";
+    return j;
+}
+
+// The performance's levels, every input and output in order.
+Json autoJson(const AutoSpec& a) { return {{"measure", measureName(a.measure)}, {"target_db", a.targetDb}, {"seconds", a.seconds}}; }
+
+Json ioJson(const Config& config) {
+    Json j = {{"inputs", Json::array()}, {"outputs", Json::array()}};
+    for (size_t i = 0; i < config.inputs.size() && i < config.inputLevels.size(); ++i) {
+        const InputLevel& l = config.inputLevels[i];
+        j["inputs"].push_back({{"name", config.inputs[i]}, {"gain_db", l.gainDb}, {"auto", autoJson(l.autoSpec)}});
+    }
+    for (size_t o = 0; o < config.outputs.size() && o < config.outputLevels.size(); ++o) {
+        const OutputLevel& l = config.outputLevels[o];
+        j["outputs"].push_back({{"name", config.outputs[o]},
+                                {"level_db", l.levelDb},
+                                {"muted", l.muted},
+                                {"limiter", {{"on", l.limiter}, {"ceiling_db", l.ceilingDb}, {"release_ms", l.releaseMs}}},
+                                {"auto", autoJson(l.autoSpec)}});
+    }
+    Json wa = autoJson(config.wireAuto.spec);
+    wa["match"] = config.wireAuto.match;
+    j["wires"] = {{"auto", wa}};
+    return j;
+}
+
+// A wire as the app is told it: the wire, not the whole performance. from
+// and to as the request named them.
+Json wireJson(const Json& from, const Json& to, const WireSpec& w) {
+    Json wj = {{"from", from}, {"to", to}, {"jump", w.jump}};
+    if (w.from.out)
+        wj["out"] = w.from.out;
+    if (w.jumpOut.size() == 2)
+        wj["jump_out"] = w.jumpOut;
+    if (w.jumpIn.size() == 2)
+        wj["jump_in"] = w.jumpIn;
+    if (w.to.key)
+        wj["key"] = true;
+    return wj;
+}
+
+// An output's gains, as the app is told them: level_db, width and pan in
+// per cent, muted.
+Json gainsJson(const WireGains& g) {
+    return {{"level_db", g.levelDb}, {"width", std::round(g.width * 1000) / 10}, {"pan", std::round(g.pan * 1000) / 10}, {"muted", g.muted}};
+}
+
+// ...and from a request, over those it has; false with why if out of range.
+bool readGains(const Json& j, WireGains& g, std::string* error) {
+    g.levelDb = std::max(j.value("level_db", g.levelDb), -1000.0f);
+    g.width = j.value("width", g.width * 100.0f) / 100.0f;
+    g.pan = j.value("pan", g.pan * 100.0f) / 100.0f;
+    g.muted = j.value("muted", g.muted);
+    if (!(g.levelDb <= 24) || !(g.width >= 0 && g.width <= 2) || !(g.pan >= -1 && g.pan <= 1)) {
+        *error = "an output's level is up to +24 dB, its width 0 to 200 % and its pan -100 to 100";
+        return false;
+    }
+    return true;
+}
+
+// Auto's settings from a request, onto a; false with why if one is out of range.
+bool readAuto(const Json& j, AutoSpec& a, std::string* why) {
+    if (j.contains("measure")) {
+        const int m = measureOf(j.at("measure").get<std::string>());
+        if (m < 0)
+            return *why = "auto measure is peak, rms or lufs", false;
+        a.measure = static_cast<AutoSpec::Measure>(m);
+    }
+    const float target = j.value("target_db", a.targetDb), seconds = j.value("seconds", a.seconds);
+    if (target < -60 || target > 0)
+        return *why = "auto target_db is -60 to 0", false;
+    if (seconds < 1 || seconds > 60)
+        return *why = "auto seconds is 1 to 60", false;
+    a.targetDb = target;
+    a.seconds = seconds;
+    return true;
+}
+
 Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& show, const Config& config) {
     const double periodNs = 1e9 * config.audio.period / config.audio.rate;
     Json j;
@@ -177,7 +333,7 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
     j["buffer_ms"] = periodNs / 1e6 * config.audio.periods;
     const int preset = show.preset(), scene = show.scene();
     j["scene"] = {{"index", scene}, {"name", show.sceneName(scene)}};
-    j["selected"] = {{"index", preset}, {"name", show.presetName(preset)}};
+    j["selected"] = {{"index", preset}, {"name", show.presetName(preset)}, {"chain", show.presetChain(preset)}};
     j["muted"] = show.muted();
     j["display"] = show.display();
     Json leds = Json::array();
@@ -193,42 +349,200 @@ Json statusJson(const Window& w, Engine& engine, const Rig& rig, const Show& sho
         chains.push_back({{"name", rig.chainNames[i]},
                           {"state", toString(static_cast<ChainState>(engine.stats(i).state.load()))},
                           {"avg_us", w.chainAvgUs(i)},
-                          {"max_us", w.chainMaxNs[i] / 1000.0}});
+                          {"max_us", w.chainMaxUs(i)},
+                          {"bypassed", Json::array()}});
+    for (size_t k = 0; k < rig.plugins.size(); ++k)
+        if (rig.bypassedNow[k].load(std::memory_order_relaxed))
+            chains[rig.plugins[k].chain]["bypassed"].push_back(rig.plugins[k].slot);
+    // A playing chain's wires: each one's peak after its output's gains, in the
+    // order the performance lists them.
+    for (const SceneSpec& scene : config.scenes)
+        for (const ChainSpec& cs : scene.chains) {
+            if (cs.id < 0 || static_cast<size_t>(cs.id) >= engine.numChains() ||
+                static_cast<ChainState>(engine.stats(cs.id).state.load()) == ChainState::Idle)
+                continue;
+            Chain& chain = engine.chain(cs.id);
+            Json peaks = Json::array();
+            for (const WireSpec& ws : cs.wires) {
+                float peak = 0.0f;
+                for (const Wire& w : chain.wires())
+                    if (w.from == ws.from && w.to == ws.to)
+                        peak = chain.takeWirePeak(w.id);
+                const double db = peak > 1e-6f ? std::max(-120.0, 20 * std::log10(static_cast<double>(peak))) : -120.0;
+                peaks.push_back(std::round(db * 10) / 10);
+            }
+            chains[cs.id]["wire_peaks"] = peaks;
+        }
     j["chains"] = chains;
+    return j;
+}
+
+// The config's plug-in at an engine chain and slot: chains are numbered scene
+// by scene, slots in the order of the chain's blocks.
+PluginSpec* specAt(Config& config, int chain, size_t slot) {
+    ChainSpec* cs = chainSpec(config, chain);
+    return cs && slot < cs->blocks.size() ? &cs->blocks[slot] : nullptr;
+}
+
+// Whether the app's DISPLAY is the engine's (":0" and ":0.0" are the same).
+bool sameScreen(std::string theirs) {
+    const char* env = std::getenv("DISPLAY");
+    if (!env || theirs.empty())
+        return false;
+    std::string ours = env;
+    for (std::string* d : {&ours, &theirs}) {
+        const size_t colon = d->rfind(':'), dot = d->rfind('.');
+        if (dot != std::string::npos && colon != std::string::npos && dot > colon)
+            d->erase(dot);
+    }
+    return ours == theirs;
+}
+
+// A wire's end in a request: a plug-in by slot (from 0); "in" or the
+// chain's input by name, where a wire starts; an output by name, or out1,
+// out2..., where it ends. key: the plug-in's side-chain input.
+bool portOf(const Json& j, bool from, bool key, const Config& config, const ChainSpec& cs, Port& out, std::string* error) {
+    if (j.is_number_integer()) {
+        const long n = j.get<long>();
+        if (n < 0 || static_cast<size_t>(n) >= cs.blocks.size()) {
+            *error = "chain " + cs.name + " has no plug-in " + std::to_string(n + 1);
+            return false;
+        }
+        out = Port::block(static_cast<int>(n), !from && key);
+        return true;
+    }
+    const std::string name = j.is_string() ? lower(j.get<std::string>()) : "";
+    if (from) {
+        if (name == "in" || name == lower(config.inputs.at(cs.inputIndex))) {
+            out = Port::input();
+            return true;
+        }
+        *error = "a wire starts at the chain's input (" + config.inputs.at(cs.inputIndex) + ") or a plug-in";
+        return false;
+    }
+    for (size_t o = 0; o < config.outputs.size(); ++o)
+        if (name == lower(config.outputs[o]) || name == "out" + std::to_string(o + 1)) {
+            out = Port::output(static_cast<int>(o));
+            return true;
+        }
+    *error = "a wire ends at a plug-in or one of the outputs (" + [&] {
+        std::string all;
+        for (const auto& o : config.outputs)
+            all += (all.empty() ? "" : ", ") + o;
+        return all;
+    }() + ")";
+    return false;
+}
+
+// Which output of its source a wire in a request leaves: out, from 0.
+bool outOf(const Json& req, Port& from, std::string* error) {
+    const int o = req.value("out", 0);
+    if (o < 0 || o >= kMaxOuts) {
+        *error = "out is 0 to " + std::to_string(kMaxOuts - 1) + ": channels 1-2 to " + std::to_string(2 * kMaxOuts - 1) + "-" + std::to_string(2 * kMaxOuts);
+        return false;
+    }
+    from.out = static_cast<uint8_t>(o);
+    return true;
+}
+
+// A wire from a request: its ends (and which output of its source it
+// leaves), over what the wire there has. It has no gains: its output does.
+bool wireOf(const Json& req, const Config& config, const ChainSpec& cs, WireSpec& w, std::string* error) {
+    if (!portOf(req.at("from"), true, false, config, cs, w.from, error) || !outOf(req, w.from, error) ||
+        !portOf(req.at("to"), false, req.value("key", false), config, cs, w.to, error))
+        return false;
+    for (const char* key : {"level_db", "width", "pan", "muted"})
+        if (req.contains(key)) {
+            *error = std::string("a wire has no ") + key + " of its own: the output it leaves has (see the output command)";
+            return false;
+        }
+    for (const WireSpec& had : cs.wires)
+        if (had.from == w.from && had.to == w.to) {
+            w.feedback = had.feedback;
+            w.jump = had.jump;
+            w.jumpOut = had.jumpOut;
+            w.jumpIn = had.jumpIn;
+        }
+    w.feedback = req.value("feedback", w.feedback);
+    w.jump = req.value("jump", w.jump);
+    for (auto [key, at] : {std::pair{"jump_out", &w.jumpOut}, std::pair{"jump_in", &w.jumpIn}})
+        if (req.contains(key) && req.at(key).is_array() && req.at(key).size() == 2)
+            *at = req.at(key).get<std::vector<double>>();
+    w.where = "the app";
+    return true;
+}
+
+// A loose wire as the app sends it: "from" (and its out) or "to" (the end
+// still attached), and where its other end is.
+bool looseOf(const Json& req, const Config& config, const ChainSpec& cs, LooseSpec& l, std::string* error) {
+    l.from = req.contains("from");
+    if (l.from == req.contains("to")) {
+        *error = "a loose wire has one end: from, or to";
+        return false;
+    }
+    if (!portOf(req.at(l.from ? "from" : "to"), l.from, req.value("key", false), config, cs, l.port, error))
+        return false;
+    if (l.from && !outOf(req, l.port, error))
+        return false;
+    l.x = req.value("x", 0.0);
+    l.y = req.value("y", 0.0);
+    l.feedback = req.value("feedback", false);
+    return true;
+}
+
+// A plug-in for the app: what it is, whether it is bypassed, and its
+// parameters with their values now.
+Json pluginJson(const Rig& rig, int k, const PluginSpec& ps, const std::vector<Show::ParamTie>& ties, const EditorHost* editors = nullptr) {
+    const RigPlugin& rp = rig.plugins[k];
+    Processor* p = rp.processor;
+    Json j;
+    j["chain"] = rp.chain;
+    j["slot"] = rp.slot;
+    j["label"] = rp.label;
+    j["name"] = p->name();
+    j["format"] = ps.kind;
+    j["bypassed"] = rig.bypassedNow[k].load(std::memory_order_relaxed);
+    j["editor"] = p->hasEditor();
+    j["editor_open"] = editors && editors->isOpen(*p);
+    Json params = Json::array();
+    for (const ParamInfo& info : p->params()) {
+        Json q = {{"id", info.id}, {"name", info.name}, {"module", info.module}, {"min", info.min}, {"max", info.max},
+                  {"default", info.def}, {"steps", info.steps}};
+        double value = info.def;
+        const bool known = p->paramValue(info.id, value);
+        q["value"] = known ? Json(value) : Json(nullptr);
+        q["text"] = known ? p->paramText(info.id, value) : "";
+        // What moves it from the pedals or MIDI: the app always shows these.
+        Json tied = Json::array();
+        for (const Show::ParamTie& t : ties)
+            if (t.param == info.id) {
+                Json tj;
+                if (!t.control.empty())
+                    tj = {{"control", t.control}, {"follows", t.follows}, {"pedal", t.pedal}};
+                else
+                    tj = {{"trigger", t.trigger}};
+                tied.push_back(tj);
+            }
+        if (!tied.empty())
+            q["tied"] = tied;
+        params.push_back(q);
+    }
+    j["params"] = params;
+    if (ps.shownSet)
+        j["shown"] = ps.shown;
     return j;
 }
 
 // Each plug-in's state as it is now, for saving what is playing. On the main thread.
 void captureStates(const Rig& rig, Config& config) {
-    size_t k = 0;
+    int c = 0;
     for (auto& scene : config.scenes)
-        for (auto& chain : scene.chains)
-            for (auto& line : chain.lines)
-                for (auto& ps : line.plugins) {
-                    Processor* p = rig.plugins.at(k++).processor;
-                    bool ok = true;
-                    if (ps.kind == "clap") {
-                        std::vector<uint8_t> state;
-                        ok = static_cast<ClapProcessor*>(p)->saveState(state);
-                        if (ok) {
-                            ps.state = std::move(state);
-                            ps.controllerState.clear();
-                        }
-                    } else if (ps.kind == "vst3") {
-                        std::vector<uint8_t> state, controller;
-                        ok = static_cast<Vst3Processor*>(p)->saveState(state, controller);
-                        if (ok) {
-                            ps.state = std::move(state);
-                            ps.controllerState = std::move(controller);
-                        }
-                    } else {
-                        continue;
-                    }
-                    if (ok)
-                        ps.embeddedState = true;
-                    else
-                        std::fprintf(stderr, "warning: %s did not give its state; saving the one it was loaded with\n", p->name().c_str());
-                }
+        for (auto& chain : scene.chains) {
+            const int index = c++;
+            for (size_t slot = 0; slot < chain.blocks.size(); ++slot)
+                if (const int k = rig.find(index, slot); k >= 0)
+                    captureState(*rig.plugins[k].processor, chain.blocks[slot]);
+        }
 }
 
 // Where an xrun came from: when, how late and slow the block before it
@@ -303,19 +617,65 @@ bool load(const std::string& path, Config& config) {
     return true;
 }
 
+std::unique_ptr<PluginScanner> makeScanner();
+Json pluginsJson(const PluginScanner& scanner);
+Json scanProgressJson(const PluginScanner& scanner);
+
+// Empty chains the engine keeps ready for chains added while it plays: it
+// never adds one once it runs. A chain taken out leaves its own spare.
+constexpr size_t kSpareChains = 64;
+
+// What removals took out, by the token the app gave, so an undo can put it
+// back. Past 100, the oldest go first.
+template <typename T>
+struct Kept {
+    std::map<std::string, T> items;
+    std::deque<std::string> order;
+    void keep(const std::string& token, T item) {
+        if (token.empty())
+            return;
+        if (!items.count(token))
+            order.push_back(token);
+        items[token] = std::move(item);
+        if (order.size() > 100) {
+            items.erase(order.front());
+            order.pop_front();
+        }
+    }
+    const T* find(const std::string& token) const {
+        const auto it = items.find(token);
+        return it == items.end() ? nullptr : &it->second;
+    }
+};
+
+// A message from the show about something the app made has no file line
+// to start with.
+std::string tidy(std::string why) {
+    while (why.rfind(": ", 0) == 0)
+        why.erase(0, 2);
+    return why;
+}
+
 struct RunOptions {
     bool noAudio = false;   // --audio none: no sound card, the engine on a timer
+    double toneDb = -1000;  // ...hearing a tone at this level (--tone DB) instead of silence
     std::string socket;     // --socket PATH; empty: the default
     bool noSocket = false;  // --socket none
+    bool takeDevice = true; // the sound card is taken from what else has it; --leave-device: not
 };
 
 int cmdRun(const std::string& path, const RunOptions& opts) {
     Config config;
     if (!load(path, config))
         return 2;
-    Rig rig;
     std::string err;
-    if (!buildRig(config, rig, &err)) {
+    // Each chain with a preset of its own, as a .cue has them, so chains can
+    // be added, moved and taken out while it plays. An INI config whose
+    // presets share a chain plays as it is.
+    if (Config arranged = config; presetsToChains(arranged, &err))
+        config = std::move(arranged);
+    Rig rig;
+    if (!buildRig(config, rig, &err, kSpareChains)) {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
@@ -326,10 +686,21 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
 
     std::unique_ptr<AudioBackend> audio;
     if (opts.noAudio)
-        audio = std::make_unique<NullBackend>();
+        audio = std::make_unique<NullBackend>(opts.toneDb);
     else
         audio = std::make_unique<AlsaBackend>();
-    if (!audio->open(config.audio, &err)) {
+    // Kept for as long as Cue plays, so a sound server does not take the card back.
+    DeviceClaim claim;
+    std::vector<std::string> audioNotes;
+    const bool take = opts.takeDevice && !opts.noAudio;
+    if (take)
+        claim.reserve(config.audio.device, audioNotes);
+    bool opened = audio->open(config.audio, &err);
+    if (!opened && take)
+        opened = claim.takeFrom(config.audio.device, [&] { return audio->open(config.audio, &err); }, audioNotes);
+    for (const auto& n : audioNotes)
+        std::printf("audio: %s\n", n.c_str());
+    if (!opened) {
         std::fprintf(stderr, "audio: %s\n", err.c_str());
         return 1;
     }
@@ -348,9 +719,10 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     AlsaMidi midi;
     std::thread midiThread;
     std::atomic<bool> midiRun{true};
+    int midiPorts = 0;
     if (config.midi.enabled) {
         if (midi.open("Cue", &err)) {
-            const int ins = midi.connectInputFrom(config.midi.in);
+            const int ins = midiPorts = midi.connectInputFrom(config.midi.in);
             const int outs = config.midi.out.empty() ? 0 : midi.connectOutputTo(config.midi.out);
             std::printf("midi: input from %d port(s) matching '%s', output to %d port(s) matching '%s', profile %s\n", ins,
                         config.midi.in.c_str(), outs, config.midi.out.c_str(), config.midi.profile.c_str());
@@ -369,18 +741,90 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
     }
 
+    // The built-in tuner hears its input before any plug-in.
+    Tuner tuner(config.audio.rate);
+    tuner.setSettings(config.tuner.settings);
+    const size_t tunerInput = config.tuner.inputIndex;
+
+    Meters meters(config.inputs.size(), config.outputs.size());
+    Json levels = meters.take(config, engine);
+
     std::atomic<bool> marked{false};
     audio->start([&](const float* const* ins, float* const* outs, uint32_t frames) {
         if (!marked.load(std::memory_order_relaxed)) {
             markClapAudioThread();
             marked.store(true, std::memory_order_relaxed);
         }
+        tuner.write(ins[tunerInput], frames);
         engine.process(ins, outs, frames);
+        meters.measure(ins, outs, frames);
     }, &err);
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
     show.start();
+
+    // The windows plug-in editors open in, on the computer's own screen.
+    EditorHost editors;
+    // Changes to the chains while they play.
+    LiveRig live{config, rig, show, &editors};
+    // The plug-ins on this machine, scanned when the app asks.
+    auto scanner = makeScanner();
+    Kept<Removed> removedPlugins;
+    Kept<RemovedChain> removedChains;
+    Kept<RemovedScene> removedScenes;
+    // Auto, running on inputs and outputs: at most one on each.
+    std::vector<AutoRun> autoRuns;
+    auto autoEvent = [](const AutoRun& run, const char* state) {
+        Json j = {{run.input() ? "input" : "output", run.index()}, {"state", state}, {"seconds", std::round(run.seconds() * 10) / 10},
+                  {"of", run.spec().seconds}};
+        return j;
+    };
+    // ...and on one of a plug-in's outputs (or the chain input's): at most
+    // one in each chain, which measures the plug-in (or the input) as it plays.
+    struct WireRun {
+        int chain;
+        Json from; // as the request named it
+        Port port; // the output
+        int probe;
+        AutoRun run;
+    };
+    std::vector<WireRun> wireRuns;
+    auto wireEvent = [](const WireRun& w, const char* state) {
+        Json j = {{"chain", w.chain}, {"from", w.from}, {"out", w.port.out}, {"state", state}, {"seconds", std::round(w.run.seconds() * 10) / 10},
+                  {"of", w.run.spec().seconds}, {"match", w.run.match()}};
+        return j;
+    };
+    auto stopProbe = [&](int chain) {
+        if (chain >= 0 && static_cast<size_t>(chain) < engine.numChains())
+            engine.chain(chain).probe(Chain::kProbeNone);
+    };
+    // The performance as the app sees it: the file's, each chain's number
+    // (its index, which stays while it plays), and which plug-ins have a
+    // side-chain input to wire into.
+    auto livePerformance = [&](Json& out, std::string* why) {
+        std::string text;
+        if (!performanceText(config, text, why))
+            return false;
+        out = Json::parse(text);
+        out["io"] = ioJson(config);
+        Json& scenes = out.at("scenes");
+        for (size_t s = 0; s < scenes.size() && s < config.scenes.size(); ++s)
+            for (Json& chain : scenes[s].at("chains")) {
+                const std::string name = chain.value("name", std::string());
+                int id = -1;
+                for (const ChainSpec& cs : config.scenes[s].chains)
+                    if (lower(cs.name) == lower(name))
+                        id = cs.id;
+                chain["index"] = id;
+                int slot = 0;
+                for (Json& block : chain.at("blocks")) {
+                    if (Processor* p = rig.at(id, slot++); p && p->hasSidechain())
+                        block["has_key"] = true;
+                }
+            }
+        return true;
+    };
 
     // The control socket: the app and cue ctl.
     Service service;
@@ -388,6 +832,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     auto status = [&] {
         Json j = statusJson(lastSample, engine, rig, show, config);
         j["xruns"] = audio->stats().xruns.load();
+        j["levels"] = levels;
         return j;
     };
     std::string savePath = isCueFile(path) ? path : "";
@@ -403,13 +848,134 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             reply["performance"] = config.performance;
             reply["file"] = path;
             reply["audio"] = audio->describe();
+            reply["audio_settings"] = {{"device", opts.noAudio ? "none" : config.audio.device},
+                                       {"rate", config.audio.rate},
+                                       {"period", config.audio.period},
+                                       {"periods", config.audio.periods}};
+            reply["audio_notes"] = audioNotes;
+            reply["midi"] = {{"enabled", config.midi.enabled}, {"in", config.midi.in}, {"profile", config.midi.profile}, {"ports", midiPorts}};
         } else if (cmd == "status") {
             reply["status"] = status();
         } else if (cmd == "performance") {
-            std::string text;
-            if (!performanceText(config, text, &err))
+            Json now;
+            if (!livePerformance(now, &err))
                 return refuse(err);
-            reply["performance"] = Json::parse(text);
+            reply["performance"] = now;
+        } else if (cmd == "level" && req.contains("wires")) {
+            // Auto's settings for every block's outputs.
+            WireAuto wa = config.wireAuto;
+            std::string why;
+            if (req.contains("auto")) {
+                if (!readAuto(req.at("auto"), wa.spec, &why))
+                    return refuse(why);
+                wa.match = req.at("auto").value("match", wa.match);
+            }
+            config.wireAuto = wa;
+            reply["io"] = ioJson(config);
+            service.publish("io", reply["io"]);
+        } else if (cmd == "auto" && req.contains("chain")) {
+            // Auto on one output of a plug-in, or of the chain's input.
+            const int chain = req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs || chain < 0 || static_cast<size_t>(chain) >= engine.numChains())
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            Port from;
+            std::string why;
+            if (!portOf(req.at("from"), true, false, config, *cs, from, &why) || !outOf(req, from, &why))
+                return refuse(why);
+            const std::vector<WireGains>* outs = outsOf(*cs, from);
+            if (!req.value("cancel", false) && (!outs || from.out >= outs->size()))
+                return refuse("it has no output " + std::to_string(from.out + 1));
+            for (const WireRun& r : wireRuns)
+                if (r.chain == chain && service.subscribed("auto"))
+                    service.publish("auto", wireEvent(r, "cancelled"));
+            wireRuns.erase(std::remove_if(wireRuns.begin(), wireRuns.end(), [&](const WireRun& r) { return r.chain == chain; }), wireRuns.end());
+            stopProbe(chain);
+            if (!req.value("cancel", false)) {
+                if (static_cast<ChainState>(engine.stats(chain).state.load()) == ChainState::Idle)
+                    return refuse("Auto listens to the chain as it plays: play it first");
+                // From the chain's input there is nothing to match: to the target.
+                const bool fromInput = from.kind == Port::Kind::Input;
+                const int probe = fromInput ? Chain::kProbeInput : from.index;
+                engine.chain(chain).probe(probe);
+                wireRuns.push_back({chain, req.at("from"), from, probe, AutoRun(config.wireAuto.spec, config.audio.rate, config.wireAuto.match && !fromInput)});
+                reply["auto"] = wireEvent(wireRuns.back(), "waiting");
+            }
+        } else if (cmd == "level" || cmd == "auto") {
+            // An input's gain or an output's level, mute and limiter, the
+            // same whichever scene plays; or Auto, on one of them.
+            const bool in = req.contains("input");
+            if (in == req.contains("output"))
+                return refuse(cmd + " needs input or output (its number, from 0)");
+            const long index = req.at(in ? "input" : "output").get<long>();
+            if (index < 0 || static_cast<size_t>(index) >= (in ? config.inputLevels.size() : config.outputLevels.size()))
+                return refuse(std::string("there is no such ") + (in ? "input" : "output"));
+            const size_t k = static_cast<size_t>(index);
+            InputLevel inLevel = in ? config.inputLevels[k] : InputLevel{};
+            OutputLevel outLevel = in ? OutputLevel{} : config.outputLevels[k];
+            AutoSpec& spec = in ? inLevel.autoSpec : outLevel.autoSpec;
+            std::string why;
+            if (req.contains("auto") && !readAuto(req.at("auto"), spec, &why))
+                return refuse(why);
+            auto db = [&](const char* key, float now, float lowest, float highest, float& out) {
+                const float v = req.value(key, now);
+                if (std::isnan(v) || v < lowest || v > highest) {
+                    why = std::string(key) + " is " + std::to_string(static_cast<int>(lowest)) + " to " + std::to_string(static_cast<int>(highest));
+                    return false;
+                }
+                out = std::max(v, kLevelFloorDb);
+                return true;
+            };
+            if (cmd == "level") {
+                if (in && !db("gain_db", inLevel.gainDb, -1000, kLevelMaxDb, inLevel.gainDb))
+                    return refuse(why);
+                if (!in) {
+                    if (!db("level_db", outLevel.levelDb, -1000, kLevelMaxDb, outLevel.levelDb))
+                        return refuse(why);
+                    outLevel.muted = req.value("muted", outLevel.muted);
+                    if (req.contains("limiter")) {
+                        const Json& l = req.at("limiter");
+                        outLevel.limiter = l.value("on", outLevel.limiter);
+                        const float ceiling = l.value("ceiling_db", outLevel.ceilingDb), release = l.value("release_ms", outLevel.releaseMs);
+                        if (ceiling < -60 || ceiling > 0)
+                            return refuse("limiter ceiling_db is -60 to 0");
+                        if (release < 1 || release > 5000)
+                            return refuse("limiter release_ms is 1 to 5000");
+                        outLevel.ceilingDb = ceiling;
+                        outLevel.releaseMs = release;
+                    }
+                }
+            }
+            if (in) {
+                config.inputLevels[k] = inLevel;
+                postInputLevel(engine, config, k);
+            } else {
+                config.outputLevels[k] = outLevel;
+                postOutputLevel(engine, config, k);
+            }
+            if (cmd == "auto") {
+                const auto same = [&](const AutoRun& r) { return r.input() == in && r.index() == k; };
+                for (const AutoRun& r : autoRuns)
+                    if (same(r) && service.subscribed("auto"))
+                        service.publish("auto", autoEvent(r, "cancelled"));
+                autoRuns.erase(std::remove_if(autoRuns.begin(), autoRuns.end(), same), autoRuns.end());
+                if (!req.value("cancel", false)) {
+                    if (k >= LevelBin::kMax)
+                        return refuse("Auto measures the first " + std::to_string(LevelBin::kMax) + " inputs and outputs");
+                    if (autoRuns.empty()) {
+                        LevelBin stale;
+                        while (engine.nextLevelBin(stale)) {
+                        }
+                        engine.measure(true);
+                    }
+                    autoRuns.emplace_back(in, k, spec, config.audio.rate);
+                    reply["auto"] = autoEvent(autoRuns.back(), "waiting");
+                } else if (autoRuns.empty()) {
+                    engine.measure(false);
+                }
+            }
+            reply["io"] = ioJson(config);
+            service.publish("io", reply["io"]);
         } else if (cmd == "select") {
             int index = -1;
             if (req.contains("step")) {
@@ -418,6 +984,15 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 index = req.at("index").get<int>();
                 if (index < 0 || index >= static_cast<int>(show.numPresets()))
                     return refuse("there is no chain number " + std::to_string(index + 1));
+                show.selectPreset(index);
+            } else if (req.contains("chain") && req.at("chain").is_number_integer()) {
+                // By the chain's own number, as performance lists it.
+                const int chain = req.at("chain").get<int>();
+                for (int i = 0; i < static_cast<int>(show.numPresets()) && index < 0; ++i)
+                    if (show.presetChain(i) == chain)
+                        index = i;
+                if (index < 0)
+                    return refuse("there is no chain number " + std::to_string(chain + 1));
                 show.selectPreset(index);
             } else {
                 const std::string name = req.value("chain", "");
@@ -428,7 +1003,7 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                     return refuse("no chain named '" + name + "'");
                 show.selectPreset(index);
             }
-            reply["selected"] = {{"index", show.preset()}, {"name", show.presetName(show.preset())}};
+            reply["selected"] = {{"index", show.preset()}, {"name", show.presetName(show.preset())}, {"chain", show.presetChain(show.preset())}};
         } else if (cmd == "do") {
             if (!show.run(req.at("action").get<std::string>(), &err))
                 return refuse(err);
@@ -447,10 +1022,421 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
             reply["path"] = to;
             reply["warnings"] = warnings;
             std::printf("\nsaved %s\n", to.c_str());
+        } else if (cmd == "tuner") {
+            TunerSettings t = config.tuner.settings;
+            t.reference = req.value("reference", t.reference);
+            if (t.reference < 415 || t.reference > 466)
+                throw std::runtime_error("the reference is 415 to 466 Hz");
+            if (req.contains("range")) {
+                const int range = tunerRange(req.at("range").get<std::string>());
+                if (range < 0)
+                    throw std::runtime_error("the range is guitar, bass, vocals or any");
+                t.range = range;
+            }
+            t.tolerance = req.value("tolerance", t.tolerance);
+            if (t.tolerance <= 0 || t.tolerance > 10)
+                throw std::runtime_error("the tolerance is above 0 and at most 10 cents");
+            if (req.contains("names"))
+                t.flats = req.at("names").get<std::string>() == "flats";
+            config.tuner.settings = t;
+            tuner.setSettings(t);
+            reply["tuner"] = tunerJson(tuner.reading(), t, config.inputs.at(tunerInput));
+        } else if (cmd == "plugin" || cmd == "bypass" || cmd == "param" || cmd == "editor" || cmd == "shown") {
+            const int chain = req.at("chain").get<int>();
+            const size_t slot = req.at("slot").get<size_t>();
+            const int k = rig.find(chain, slot);
+            PluginSpec* ps = specAt(config, chain, slot);
+            if (k < 0 || !ps)
+                return refuse("there is no plug-in " + std::to_string(slot + 1) + " in chain number " + std::to_string(chain + 1));
+            Processor* p = rig.plugins[k].processor;
+            if (cmd == "bypass") {
+                // Saved with the performance, like a change made in the file.
+                // "bypassed" switches it; "mode" (thru or mute) is what it
+                // passes on while bypassed.
+                if (!req.contains("bypassed") && !req.contains("mode"))
+                    return refuse("bypass needs bypassed or mode");
+                if (req.contains("mode")) {
+                    const std::string mode = req.at("mode").get<std::string>();
+                    if (mode != "thru" && mode != "mute")
+                        return refuse("a bypass mode is thru or mute");
+                    ps->muteOnBypass = mode == "mute";
+                    rig.engine->setMuteOnBypass(chain, slot, ps->muteOnBypass);
+                }
+                if (req.contains("bypassed")) {
+                    const bool bypassed = req.at("bypassed").get<bool>();
+                    output.setBypass(chain, slot, bypassed);
+                    ps->bypassed = bypassed;
+                }
+                if (req.contains("mode")) {
+                    // Everyone watching sees what it now does.
+                    std::string why;
+                    Json now;
+                    if (livePerformance(now, &why)) {
+                        reply["performance"] = now;
+                        service.publish("performance", now);
+                    }
+                }
+            } else if (cmd == "param") {
+                // "param", not "id": a request's "id" is its number on the socket.
+                const uint32_t id = req.at("param").get<uint32_t>();
+                double value = 0;
+                if (req.contains("text")) {
+                    // Typed: as the plug-in reads it, else a plain number
+                    // (a VST3 plug-in's in %, as the app shows it).
+                    const std::string typed = req.at("text").get<std::string>();
+                    if (!p->paramFromText(id, typed, value)) {
+                        char* end = nullptr;
+                        const double n = std::strtod(typed.c_str(), &end);
+                        if (end == typed.c_str())
+                            return refuse(p->name() + " cannot read '" + typed + "' as a value");
+                        const bool vst3 = dynamic_cast<Vst3Processor*>(p) != nullptr;
+                        value = vst3 ? n / 100.0 : n;
+                    }
+                    for (const ParamInfo& info : p->params())
+                        if (info.id == id)
+                            value = std::clamp(value, info.min, info.max);
+                } else {
+                    value = req.at("value").get<double>();
+                }
+                if (!p->setParam(id, value))
+                    return refuse(p->name() + " did not take the change (too many at once)");
+                // The plug-in's state keeps it; a param line in the file
+                // would set it back when the performance loads, so it follows.
+                for (auto& [pid, v] : ps->params)
+                    if (pid == id)
+                        v = value;
+                reply["text"] = p->paramText(id, value);
+                reply["value"] = value;
+                return;
+            } else if (cmd == "editor") {
+                // The plug-in's own window, on the computer's screen, not the
+                // app's: the app may be on another machine.
+                const bool wanted = req.value("open", true);
+                if (!wanted) {
+                    editors.close(*p);
+                } else {
+                    const std::string title = rig.plugins[k].label + " — " + rig.chainNames.at(chain);
+                    // The app's window, when the app is on this screen: the
+                    // editor stays over it.
+                    unsigned long above = 0;
+                    if (req.contains("above") && sameScreen(req.value("display", std::string())))
+                        above = req.at("above").get<unsigned long>();
+                    std::string why;
+                    if (!editors.open(*p, title, &why, above))
+                        return refuse(why);
+                }
+            } else if (cmd == "shown") {
+                // The parameters the app shows for it, in its order: kept for the next save.
+                ps->shown = req.at("params").get<std::vector<uint32_t>>();
+                ps->shownSet = true;
+            }
+            reply["plugin"] = pluginJson(rig, k, *ps, show.ties(chain, slot), &editors);
+        } else if (cmd == "output" || cmd == "outputs") {
+            // A plug-in's (or the chain input's) outputs: one's level,
+            // width, pan and mute, or taking it out; or all of them at once,
+            // or how many there are.
+            const int chain = req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs)
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            std::string why;
+            Port from;
+            if (!portOf(req.at("from"), true, false, config, *cs, from, &why))
+                return refuse(why);
+            const std::vector<WireGains>* outs = outsOf(*cs, from);
+            if (!outs)
+                return refuse("only a plug-in or the chain's input has outputs");
+            const Json fromJ = from.kind == Port::Kind::Input ? Json("in") : Json(from.index);
+            if (cmd == "output") {
+                if (!outOf(req, from, &why))
+                    return refuse(why);
+                if (from.out >= outs->size())
+                    return refuse("it has " + std::to_string(outs->size()) + " output(s), numbered from 0");
+                if (req.value("remove", false)) {
+                    if (!removeOutput(live, chain, from, &why))
+                        return refuse(why);
+                } else {
+                    WireGains g = (*outs)[from.out];
+                    if (!readGains(req, g, &why) || !setOutput(live, chain, from, g, &why))
+                        return refuse(why);
+                    Json oj = gainsJson(g);
+                    oj["from"] = fromJ;
+                    oj["out"] = from.out;
+                    reply["output"] = oj;
+                    service.publish("output", {{"chain", chain}, {"output", oj}});
+                    return;
+                }
+            } else {
+                std::vector<WireGains> now = *outs;
+                if (req.contains("outputs")) {
+                    const Json& list = req.at("outputs");
+                    if (!list.is_array() || list.empty() || list.size() > static_cast<size_t>(kMaxOuts))
+                        return refuse("outputs is a list of 1 to " + std::to_string(kMaxOuts));
+                    now.assign(list.size(), WireGains{});
+                    for (size_t o = 0; o < list.size(); ++o)
+                        if (!readGains(list[o], now[o], &why))
+                            return refuse(why);
+                } else if (req.contains("count")) {
+                    const int n = req.at("count").get<int>();
+                    if (n < 1 || n > kMaxOuts)
+                        return refuse("count is 1 to " + std::to_string(kMaxOuts));
+                    now.resize(static_cast<size_t>(n));
+                } else {
+                    return refuse("outputs needs outputs or count");
+                }
+                if (!setOutputs(live, chain, from, now, &why))
+                    return refuse(why);
+            }
+            Json perf;
+            if (livePerformance(perf, &why)) {
+                reply["performance"] = perf;
+                service.publish("performance", perf);
+            }
+        } else if (cmd == "add" || cmd == "remove" || cmd == "restore" || cmd == "wire" || cmd == "unwire" || cmd == "wires" || cmd == "place") {
+            // restore: the chain is the one it was taken out of.
+            const std::string token = req.value("token", std::string());
+            const Removed* taken = removedPlugins.find(token);
+            if (cmd == "restore" && !taken)
+                return refuse("nothing taken out is kept as '" + token + "'");
+            const int chain = cmd == "restore" ? taken->chain : req.at("chain").get<int>();
+            ChainSpec* cs = chainSpec(config, chain);
+            if (!cs)
+                return refuse("there is no chain number " + std::to_string(chain + 1));
+            std::string why;
+            if (cmd == "add") {
+                // As a plugin line has it, or by its parts.
+                PluginSpec spec;
+                const Json& pj = req.at("plugin");
+                if (pj.is_string()) {
+                    if (!pluginFromText(pj.get<std::string>(), spec, &why))
+                        return refuse(why);
+                } else {
+                    std::string text = pj.value("format", std::string("clap")) + ":";
+                    if (pj.contains("args")) {
+                        for (const auto& a : pj.at("args"))
+                            text += a.get<std::string>() + " ";
+                    } else {
+                        text += pj.value("path", std::string()) + (pj.contains("id") ? "#" + pj.at("id").get<std::string>() : "");
+                    }
+                    if (!pluginFromText(text, spec, &why))
+                        return refuse(why);
+                }
+                spec.label = req.value("label", spec.label);
+                spec.bypassed = req.value("bypassed", false);
+                spec.muteOnBypass = config.muteOnBypass;
+                if (req.contains("x") || req.contains("y")) {
+                    spec.placed = true;
+                    spec.x = req.value("x", 0.0);
+                    spec.y = req.value("y", 0.0);
+                }
+                WireSpec on;
+                const bool onWire = req.contains("on");
+                if (onWire && !wireOf(req.at("on"), config, *cs, on, &why))
+                    return refuse(why);
+                size_t slot = 0;
+                if (!addPlugin(live, chain, spec, onWire ? &on : nullptr, &slot, &why))
+                    return refuse(why);
+                reply["slot"] = slot;
+            } else if (cmd == "remove") {
+                Removed removed;
+                if (!removePlugin(live, chain, req.at("slot").get<size_t>(), &removed, &why))
+                    return refuse(why);
+                removedPlugins.keep(token, std::move(removed));
+            } else if (cmd == "restore") {
+                if (!restorePlugin(live, *taken, &why))
+                    return refuse(why);
+                reply["slot"] = taken->slot;
+            } else if (cmd == "wire" || cmd == "unwire") {
+                WireSpec w;
+                if (!wireOf(req, config, *cs, w, &why))
+                    return refuse(why);
+                const bool had = std::any_of(cs->wires.begin(), cs->wires.end(), [&](const WireSpec& o) { return o.from == w.from && o.to == w.to; });
+                if (!(cmd == "wire" ? setWire(live, chain, w, &why) : removeWire(live, chain, w.from, w.to, &why)))
+                    return refuse(why);
+                if (cmd == "wire" && had) {
+                    // Only how it is drawn: the wire, not the whole performance.
+                    const Json wj = wireJson(req.at("from"), req.at("to"), w);
+                    reply["wire"] = wj;
+                    service.publish("wire", {{"chain", chain}, {"wire", wj}});
+                    return;
+                }
+            } else if (cmd == "wires") {
+                // The chain's wires all at once, as the performance lists
+                // them, and or its loose ones.
+                if (!req.contains("wires") && !req.contains("loose"))
+                    return refuse("wires needs wires or loose");
+                std::vector<WireSpec> wires;
+                std::vector<LooseSpec> loose;
+                if (req.contains("wires"))
+                    for (const Json& wj : req.at("wires")) {
+                        WireSpec w;
+                        if (!wireOf(wj, config, *cs, w, &why))
+                            return refuse(why);
+                        wires.push_back(w);
+                    }
+                if (req.contains("loose"))
+                    for (const Json& lj : req.at("loose")) {
+                        LooseSpec l;
+                        if (!looseOf(lj, config, *cs, l, &why))
+                            return refuse(why);
+                        loose.push_back(l);
+                    }
+                if (!setWires(live, chain, req.contains("wires") ? &wires : nullptr, req.contains("loose") ? &loose : nullptr, &why))
+                    return refuse(why);
+            } else {
+                // Only where it is drawn: the app that asked knows. A
+                // plug-in by slot, or the input ("in") or an output by name.
+                const double x = req.at("x").get<double>(), y = req.at("y").get<double>();
+                if (req.contains("port")) {
+                    const Json& pj = req.at("port");
+                    const std::string name = pj.is_string() ? lower(pj.get<std::string>()) : "";
+                    const bool in = name == "in" || name == lower(config.inputs.at(cs->inputIndex));
+                    Port port;
+                    if (!portOf(pj, in, false, config, *cs, port, &why))
+                        return refuse(why);
+                    if (!placePort(live, chain, port, x, y, &why))
+                        return refuse(why);
+                } else if (!placePlugin(live, chain, req.at("slot").get<size_t>(), x, y, &why)) {
+                    return refuse(why);
+                }
+                return;
+            }
+            // Everyone watching sees the chain as it is now.
+            Json now;
+            if (livePerformance(now, &why)) {
+                reply["performance"] = now;
+                service.publish("performance", now);
+            }
+        } else if (cmd == "add-chain" || cmd == "remove-chain" || cmd == "restore-chain" || cmd == "set-chain" || cmd == "move-chain" ||
+                   cmd == "add-scene" || cmd == "remove-scene" || cmd == "restore-scene" || cmd == "set-scene" || cmd == "move-scene") {
+            const std::string token = req.value("token", std::string());
+            auto text = [&](const char* key) { return std::optional<std::string>(req.at(key).get<std::string>()); };
+            // A number, or none (null).
+            auto number = [&](const char* key, int none) { return std::optional<int>(req.at(key).is_null() ? none : req.at(key).get<int>()); };
+            const auto warningsBefore = show.warnings();
+            std::string why;
+            bool ok = false;
+            if (cmd == "add-chain") {
+                NewChain what;
+                what.scene = req.at("scene").get<int>();
+                what.at = req.value("at", -1);
+                what.name = req.value("name", std::string());
+                what.copy = req.value("copy", -1);
+                what.input = req.value("input", std::string());
+                int id = -1;
+                if ((ok = addChain(live, what, &id, &why)))
+                    reply["chain"] = id;
+            } else if (cmd == "remove-chain") {
+                RemovedChain removed;
+                if ((ok = removeChain(live, req.at("chain").get<int>(), &removed, &why)))
+                    removedChains.keep(token, std::move(removed));
+            } else if (cmd == "restore-chain") {
+                const RemovedChain* removed = removedChains.find(token);
+                if (!removed)
+                    return refuse("nothing taken out is kept as '" + token + "'");
+                int id = -1;
+                if ((ok = restoreChain(live, *removed, &id, &why)))
+                    reply["chain"] = id;
+            } else if (cmd == "set-chain") {
+                ChainSettings set;
+                if (req.contains("name"))
+                    set.name = text("name");
+                if (req.contains("display"))
+                    set.display = text("display");
+                if (req.contains("warm"))
+                    set.warm = text("warm");
+                if (req.contains("pedal"))
+                    set.pedal = number("pedal", 0);
+                if (req.contains("program"))
+                    set.program = number("program", -1);
+                if (req.contains("on_select"))
+                    set.onSelect = req.at("on_select").get<std::vector<std::string>>();
+                ok = setChain(live, req.at("chain").get<int>(), set, &why);
+            } else if (cmd == "move-chain") {
+                ok = moveChain(live, req.at("chain").get<int>(), req.at("scene").get<int>(), req.value("at", -1), &why);
+            } else if (cmd == "add-scene") {
+                NewScene what;
+                what.at = req.value("at", -1);
+                what.name = req.value("name", std::string());
+                what.copy = req.value("copy", -1);
+                int index = -1;
+                std::vector<int> ids;
+                if ((ok = addScene(live, what, &index, &ids, &why))) {
+                    reply["scene"] = index;
+                    reply["chains"] = ids;
+                }
+            } else if (cmd == "remove-scene") {
+                RemovedScene removed;
+                if ((ok = removeScene(live, req.at("scene").get<int>(), &removed, &why)))
+                    removedScenes.keep(token, std::move(removed));
+            } else if (cmd == "restore-scene") {
+                const RemovedScene* removed = removedScenes.find(token);
+                if (!removed)
+                    return refuse("nothing taken out is kept as '" + token + "'");
+                if ((ok = restoreScene(live, *removed, &why)))
+                    reply["scene"] = std::min<size_t>(removed->at, config.scenes.size() - 1);
+            } else if (cmd == "set-scene") {
+                SceneSettings set;
+                if (req.contains("name"))
+                    set.name = text("name");
+                if (req.contains("display"))
+                    set.display = text("display");
+                if (req.contains("pedal"))
+                    set.pedal = number("pedal", 0);
+                if (req.contains("program"))
+                    set.program = number("program", -1);
+                ok = setScene(live, req.at("scene").get<int>(), set, &why);
+            } else {
+                ok = moveScene(live, req.at("scene").get<int>(), req.value("at", -1), &why);
+            }
+            if (!ok)
+                return refuse(tidy(why));
+            // What the show now thinks may be a mistake: a pedal two things use.
+            Json warnings = Json::array();
+            for (const auto& w : show.warnings())
+                if (std::find(warningsBefore.begin(), warningsBefore.end(), w) == warningsBefore.end())
+                    warnings.push_back(tidy(w));
+            reply["warnings"] = warnings;
+            Json now;
+            if (livePerformance(now, &why)) {
+                reply["performance"] = now;
+                service.publish("performance", now);
+            }
+        } else if (cmd == "rename") {
+            // One of the performance's inputs or outputs, by number.
+            const bool in = req.contains("input");
+            if (in == req.contains("output"))
+                return refuse("rename needs input or output (its number, from 0) and name");
+            const long index = req.at(in ? "input" : "output").get<long>();
+            std::string why;
+            if (index < 0 || !renamePort(live, in, static_cast<size_t>(index), req.at("name").get<std::string>(), &why))
+                return refuse(why.empty() ? std::string("there is no such ") + (in ? "input" : "output") : why);
+            Json now;
+            if (livePerformance(now, &why)) {
+                reply["performance"] = now;
+                service.publish("performance", now);
+            }
+        } else if (cmd == "plugins") {
+            // The user's folders first, then a scan if asked for.
+            std::string why;
+            if (req.contains("folders")) {
+                std::vector<std::string> folders;
+                for (const auto& d : req.at("folders"))
+                    folders.push_back(d.get<std::string>());
+                if (!scanner->setExtraFolders(folders, &why))
+                    return refuse(why);
+            }
+            const std::string scan = req.value("scan", std::string());
+            if (!scan.empty() && !scanner->start(scan, &why))
+                return refuse(why);
+            reply["plugins"] = pluginsJson(*scanner);
         } else if (cmd == "quit") {
             g_quit = true;
         } else {
-            refuse("unknown command '" + cmd + "' (hello, status, performance, select, do, save, quit, subscribe, unsubscribe)");
+            refuse("unknown command '" + cmd +
+                   "' (hello, status, performance, select, do, save, tuner, plugin, bypass, param, editor, shown, add, remove, restore, wire, unwire, wires, "
+                   "place, rename, level, auto, add-chain, remove-chain, restore-chain, set-chain, move-chain, add-scene, remove-scene, restore-scene, set-scene, move-scene, "
+                   "plugins, quit, subscribe, unsubscribe)");
         }
     };
     if (!opts.noSocket) {
@@ -470,14 +1456,151 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
     };
     Sampler sampler;
     Window window(engine.numChains());
-    auto nextSample = Clock::now(), nextStatus = Clock::now();
+    auto nextSample = Clock::now(), nextStatus = Clock::now(), nextAutoNote = Clock::now(), nextWireNote = Clock::now();
     const double periodUs = 1e6 * config.audio.period / config.audio.rate;
     bool reportedSched = false;
     uint64_t reportedXruns = 0, reportedStartup = 0;
 
+    std::vector<int> editorFds;
+    std::vector<ParamEdit> editorEdits;
     while (!g_quit) {
-        service.poll(10);
+        editorFds.clear();
+        editors.fds(editorFds);
+        // An editor redraws as soon as something happens on its screen,
+        // rather than at the next turn of the loop.
+        service.poll(10, editorFds);
         rig.pumpMainThread();
+        editors.pump();
+        // What a plug-in's own editor changed, for the app to undo.
+        for (const RigPlugin& rp : rig.plugins) {
+            editorEdits.clear();
+            rp.processor->takeEditorEdits(editorEdits);
+            if (editorEdits.empty() || !rp.processor->editorOpen())
+                continue;
+            const std::vector<ParamInfo> infos = rp.processor->params();
+            PluginSpec* ps = specAt(config, rp.chain, rp.slot);
+            for (const ParamEdit& e : editorEdits) {
+                std::string name;
+                for (const ParamInfo& info : infos)
+                    if (info.id == e.id)
+                        name = info.name;
+                if (ps)
+                    for (auto& [pid, v] : ps->params)
+                        if (pid == e.id)
+                            v = e.to;
+                if (service.subscribed("edited"))
+                    service.publish("edited", {{"chain", rp.chain}, {"slot", rp.slot}, {"param", e.id}, {"name", name}, {"from", e.from},
+                                               {"to", e.to}, {"text", rp.processor->paramText(e.id, e.to)}});
+            }
+        }
+        // What edits replaced, now that the audio thread is done with it.
+        engine.collect();
+        // Auto: what the engine measured, to each run; a run that has heard
+        // enough sets its gain or level.
+        if (!autoRuns.empty()) {
+            LevelBin bin;
+            while (engine.nextLevelBin(bin))
+                for (AutoRun& run : autoRuns)
+                    run.add(bin);
+            const bool note = Clock::now() >= nextAutoNote;
+            if (note)
+                nextAutoNote = Clock::now() + std::chrono::milliseconds(200);
+            bool changed = false;
+            for (size_t k = 0; k < autoRuns.size();) {
+                const AutoRun& run = autoRuns[k];
+                if (run.state() != AutoRun::State::Done) {
+                    if (note && service.subscribed("auto"))
+                        service.publish("auto", autoEvent(run, run.state() == AutoRun::State::Waiting ? "waiting" : "listening"));
+                    ++k;
+                    continue;
+                }
+                Json ev = autoEvent(run, "done");
+                const double heard = run.levelDb();
+                if (heard <= AutoRun::kNothingDb) {
+                    ev["state"] = "failed";
+                    ev["error"] = "it heard nothing louder than -70 dB";
+                } else {
+                    float& gain = run.input() ? config.inputLevels[run.index()].gainDb : config.outputLevels[run.index()].levelDb;
+                    ev["level_db"] = std::round(heard * 10) / 10;
+                    ev["from_db"] = gain;
+                    gain = static_cast<float>(std::round(run.gainDb() * 10) / 10);
+                    ev["to_db"] = gain;
+                    if (run.input())
+                        postInputLevel(engine, config, run.index());
+                    else
+                        postOutputLevel(engine, config, run.index());
+                    changed = true;
+                }
+                if (service.subscribed("auto"))
+                    service.publish("auto", ev);
+                autoRuns.erase(autoRuns.begin() + static_cast<long>(k));
+            }
+            if (changed)
+                service.publish("io", ioJson(config));
+            if (autoRuns.empty())
+                engine.measure(false);
+        }
+        // Auto on a block's outputs: what its chain measured; one that has
+        // heard enough sets the output's level.
+        for (size_t k = 0; k < wireRuns.size();) {
+            WireRun& wr = wireRuns[k];
+            if (static_cast<size_t>(wr.chain) >= engine.numChains()) {
+                wireRuns.erase(wireRuns.begin() + static_cast<long>(k));
+                continue;
+            }
+            Chain& chain = engine.chain(wr.chain);
+            Chain::ProbeBin bin;
+            while (chain.nextProbeBin(bin))
+                if (bin.slot == wr.probe)
+                    wr.run.add(bin.frames, bin.out, bin.fed);
+            const bool note = Clock::now() >= nextWireNote;
+            if (wr.run.state() != AutoRun::State::Done) {
+                if (note && service.subscribed("auto"))
+                    service.publish("auto", wireEvent(wr, wr.run.state() == AutoRun::State::Waiting ? "waiting" : "listening"));
+                ++k;
+                continue;
+            }
+            Json ev = wireEvent(wr, "done");
+            const double heard = wr.run.levelDb(), fed = wr.run.fedDb();
+            ChainSpec* cs = chainSpec(config, wr.chain);
+            const std::vector<WireGains>* outs = cs ? outsOf(*cs, wr.port) : nullptr;
+            std::string why;
+            if (heard <= AutoRun::kNothingDb || (wr.run.match() && fed <= AutoRun::kNothingDb)) {
+                ev["state"] = "failed";
+                ev["error"] = heard <= AutoRun::kNothingDb ? "it heard nothing louder than -70 dB" : "the block was fed nothing louder than -70 dB";
+            } else if (!outs || wr.port.out >= outs->size()) {
+                ev["state"] = "failed";
+                ev["error"] = "the output is gone";
+            } else {
+                WireGains g = (*outs)[wr.port.out];
+                ev["level_db"] = std::round(heard * 10) / 10;
+                if (wr.run.match())
+                    ev["fed_db"] = std::round(fed * 10) / 10;
+                ev["from_db"] = g.levelDb;
+                g.levelDb = static_cast<float>(std::round(wr.run.gainDb() * 10) / 10);
+                ev["to_db"] = g.levelDb;
+                if (setOutput(live, wr.chain, wr.port, g, &why)) {
+                    Json oj = gainsJson(g);
+                    oj["from"] = wr.from;
+                    oj["out"] = wr.port.out;
+                    service.publish("output", {{"chain", wr.chain}, {"output", oj}});
+                } else {
+                    ev["state"] = "failed";
+                    ev["error"] = why;
+                }
+            }
+            if (service.subscribed("auto"))
+                service.publish("auto", ev);
+            stopProbe(wr.chain);
+            wireRuns.erase(wireRuns.begin() + static_cast<long>(k));
+        }
+        if (Clock::now() >= nextWireNote)
+            nextWireNote = Clock::now() + std::chrono::milliseconds(200);
+        // A plug-in scan: how far it is, and what it found once it ends.
+        if (scanner->takeProgressed() && service.subscribed("scan"))
+            service.publish("scan", scanProgressJson(*scanner));
+        if (scanner->takeFinished() && service.subscribed("plugins"))
+            service.publish("plugins", pluginsJson(*scanner));
         EngineEvent ev;
         while (engine.nextEvent(ev)) {
         }
@@ -528,8 +1651,13 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
                 nextSample = now + std::chrono::milliseconds(33);
             lastSample = sampler.take(st, engine);
             window.add(lastSample);
+            levels = meters.take(config, engine);
             if (service.subscribed("status"))
                 service.publish("status", status());
+            // The tuner listens while someone looks at it.
+            tuner.setListening(service.subscribed("tuner"));
+            if (tuner.listening())
+                service.publish("tuner", tunerJson(tuner.reading(), tuner.settings(), config.inputs.at(tunerInput)));
         }
         if (now >= nextStatus) {
             nextStatus += std::chrono::milliseconds(500);
@@ -566,6 +1694,8 @@ int cmdRun(const std::string& path, const RunOptions& opts) {
         }
     }
     std::printf("\nstopping\n");
+    // The editors go before the plug-ins they belong to.
+    editors.closeAll();
     service.close();
     audio->stop();
     midiRun = false;
@@ -852,18 +1982,9 @@ int cmdCheck(const std::string& path, bool loadPlugins) {
     int presetNo = 0;
     for (const auto& scene : config.scenes) {
         std::printf("scene %s%s\n", scene.name.c_str(), scene.pedal ? (", pedal " + std::to_string(scene.pedal)).c_str() : "");
-        for (const auto& c : scene.chains) {
-            auto where = [&](const TapSpec& t) {
-                const LineSpec& l = c.lines[t.line];
-                const std::string line = t.line == 0 ? "main line" : "branch " + l.name;
-                return t.after >= l.plugins.size() ? "end of " + line : line + " after " + std::to_string(t.after) + " plug-in(s)";
-            };
-            std::string feeds;
-            for (const TapSpec& t : c.out)
-                feeds += "; " + t.output + " = " + where(t);
-            std::printf("  chain %s: %zu plug-in(s)%s%s\n", c.name.c_str(), chainPlugins(c).size(),
-                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", feeds.c_str());
-        }
+        for (const auto& c : scene.chains)
+            std::printf("  chain %s: %zu plug-in(s)%s; wires %s\n", c.name.c_str(), chainPlugins(c).size(),
+                        config.inputs.size() > 1 ? (", from " + config.inputs.at(c.inputIndex)).c_str() : "", wireList(c, config.outputs).c_str());
         for (const auto& p : scene.presets)
             std::printf("  preset %d %s: chain %s%s%s, %zu action(s)\n", ++presetNo, p.name.c_str(), p.chain.c_str(),
                         p.pedal ? (", pedal " + std::to_string(p.pedal)).c_str() : "", p.display.empty() ? "" : (", shows " + p.display).c_str(),
@@ -906,8 +2027,8 @@ int cmdParams(const std::string& spec) {
         return 1;
     }
     const auto params = p->params();
-    std::printf("%s: %zu parameter(s)%s\n", p->name().c_str(), params.size(),
-                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "");
+    std::printf("%s: %zu parameter(s)%s, latency %u samples at 48 kHz\n", p->name().c_str(), params.size(),
+                dynamic_cast<Vst3Processor*>(p.get()) ? " (VST3 values are 0 to 1)" : "", p->latencySamples());
     std::printf("%10s  %-32s %10s %10s %10s\n", "id", "name", "min", "max", "default");
     for (const auto& i : params)
         std::printf("%10u  %-32s %10g %10g %10g%s\n", i.id, i.name.c_str(), i.min, i.max, i.def,
@@ -967,6 +2088,21 @@ int cmdImportRpp(const std::string& rppPath, std::string outDir, const std::vect
         std::printf("  - %s\n", n.c_str());
     std::printf("\nnext: cue check \"%s\"\n", configPath.c_str());
     return result.missing ? 3 : 0;
+}
+
+int cmdExportRpp(const std::string& in, const std::string& out) {
+    ConvertOptions options;
+    options.rig = rigPath;
+    ConvertResult result;
+    std::string err;
+    if (!convertFile(in, out, options, result, &err)) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 1;
+    }
+    std::printf("wrote %s\n  %d chain(s), %d plug-in(s); %d left out\n", result.out.c_str(), result.chains, result.plugins, result.skipped);
+    for (const auto& n : result.notes)
+        std::printf("  - %s\n", n.c_str());
+    return 0;
 }
 
 int cmdConvert(const std::string& in, std::string out, std::string rigOut) {
@@ -1053,8 +2189,9 @@ int cmdCtl(int argc, char** argv) {
             args.push_back(argv[i]);
     }
     if (args.empty()) {
-        std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | select <chain|number|next|previous> | do \"<action>\" |\n"
-                             "        save [file.cue] | performance | quit\n");
+        std::fprintf(stderr, "cue ctl [--socket PATH] [--json] status | watch | tuner | select <chain|number|next|previous> |\n"
+                             "        do \"<action>\" | save [file.cue] | performance | plugin <chain> <n> | bypass <chain> <n> on|off |\n"
+                             "        param <chain> <n> <id> <value> | editor <chain> <n> [close] | quit\n");
         return 2;
     }
     ServiceClient client;
@@ -1111,6 +2248,38 @@ int cmdCtl(int argc, char** argv) {
         }
         return 0;
     }
+    if (what == "tuner") {
+        if (!ask({{"cmd", "subscribe"}, {"events", {"tuner"}}}, reply))
+            return 1;
+        std::signal(SIGINT, onSignal);
+        while (!g_quit) {
+            Json m;
+            if (!client.next(m, 500, &err)) {
+                if (err.find("in time") != std::string::npos)
+                    continue;
+                std::fprintf(stderr, "%s\n", err.c_str());
+                return 1;
+            }
+            if (m.value("event", "") != "tuner")
+                continue;
+            if (asJson) {
+                std::printf("%s\n", m.dump().c_str());
+            } else {
+                char line[160];
+                if (m.at("note").is_null())
+                    std::snprintf(line, sizeof line, "%s  level %.0f dB", m.value("signal", false) ? "listening" : "no signal",
+                                  m.value("level_db", -200.0));
+                else
+                    std::snprintf(line, sizeof line, "%-2s%d  %+6.1f cents  %8.2f Hz  %s", m.value("note", "").c_str(), m.value("octave", 0),
+                                  m.value("cents", 0.0), m.value("hz", 0.0),
+                                  m.value("held", true) ? "(held)" : m.value("in_tune", false) ? "IN TUNE" : "");
+                std::printf("\r%-60s", line);
+            }
+            std::fflush(stdout);
+        }
+        std::printf("\n");
+        return 0;
+    }
     Json request;
     if (what == "select" && args.size() >= 2) {
         const std::string a = args[1];
@@ -1133,8 +2302,22 @@ int cmdCtl(int argc, char** argv) {
             request["path"] = std::filesystem::absolute(args[1]).string();
     } else if (what == "performance" || what == "quit" || what == "hello") {
         request = {{"cmd", what}};
+    } else if ((what == "plugin" && args.size() >= 3) || (what == "bypass" && args.size() >= 4) || (what == "param" && args.size() >= 5) ||
+               (what == "editor" && args.size() >= 3)) {
+        // Chains and plug-ins by number from 1, as cue check lists them.
+        request = {{"cmd", what}, {"chain", std::atoi(args[1].c_str()) - 1}, {"slot", std::atoi(args[2].c_str()) - 1}};
+        if (what == "bypass")
+            request["bypassed"] = args[3] == "on" || args[3] == "yes";
+        if (what == "param") {
+            request["param"] = std::strtoul(args[3].c_str(), nullptr, 10);
+            request["value"] = std::atof(args[4].c_str());
+        }
+        if (what == "editor")
+            request["open"] = args.size() < 4 || !(args[3] == "close" || args[3] == "off" || args[3] == "no");
     } else {
-        std::fprintf(stderr, "unknown or incomplete: cue ctl %s (status, watch, select, do, save, performance, quit)\n", what.c_str());
+        std::fprintf(stderr,
+                     "unknown or incomplete: cue ctl %s (status, watch, tuner, select, do, save, performance, plugin, bypass, param, editor, quit)\n",
+                     what.c_str());
         return 2;
     }
     if (!ask(request, reply))
@@ -1145,11 +2328,102 @@ int cmdCtl(int argc, char** argv) {
         std::printf("%s\n", reply.at("performance").dump(2).c_str());
     else if (what == "select")
         std::printf("playing %s\n", reply.at("selected").value("name", "").c_str());
+    else if (what == "param")
+        std::printf("%s\n", reply.value("text", "").c_str());
+    else if (what == "editor") {
+        const Json& p = reply.at("plugin");
+        std::printf("%s: editor %s\n", p.value("label", "").c_str(), p.value("editor_open", false) ? "open" : "closed");
+    } else if (what == "plugin" || what == "bypass") {
+        const Json& p = reply.at("plugin");
+        std::printf("%s (%s, %s)%s\n", p.value("label", "").c_str(), p.value("name", "").c_str(), p.value("format", "").c_str(),
+                    p.value("bypassed", false) ? "  bypassed" : "");
+        for (const auto& q : p.at("params"))
+            std::printf("  %6u  %-28s %s\n", q.value("id", 0u), q.value("name", "").c_str(),
+                        q.value("text", "").empty() && q.at("value").is_number() ? std::to_string(q.at("value").get<double>()).c_str()
+                                                                                    : q.value("text", "").c_str());
+    }
     else if (what == "save") {
         std::printf("saved %s\n", reply.value("path", "").c_str());
         for (const auto& w : reply.value("warnings", Json::array()))
             std::printf("  - %s\n", w.get<std::string>().c_str());
     }
+    return 0;
+}
+
+// This program, to run its scan helper.
+std::string selfExe() {
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    return n > 0 ? std::string(buf, static_cast<size_t>(n)) : "cue";
+}
+
+std::unique_ptr<PluginScanner> makeScanner() {
+    return std::make_unique<PluginScanner>(std::vector<std::string>{selfExe(), "scan-file"}, PluginScanner::defaultCache(),
+                                           PluginScanner::defaultSettings());
+}
+
+// What the scan found, where it looked and how far it is, for the app.
+Json pluginsJson(const PluginScanner& scanner) {
+    const auto pr = scanner.progress();
+    const PluginFolders folders = scanner.folders();
+    Json j = {{"scanning", pr.scanning}, {"done", pr.done}, {"total", pr.total}, {"current", pr.current}, {"scanned_at", pr.scannedAt}};
+    j["folders"] = {{"clap", folders.clap}, {"vst3", folders.vst3}, {"extra", scanner.extraFolders()}};
+    Json files = Json::array();
+    for (const ScannedFile& f : scanner.files())
+        files.push_back(toJson(f));
+    j["files"] = files;
+    return j;
+}
+
+Json scanProgressJson(const PluginScanner& scanner) {
+    const auto pr = scanner.progress();
+    return {{"scanning", pr.scanning}, {"done", pr.done}, {"total", pr.total}, {"current", pr.current}, {"scanned_at", pr.scannedAt}};
+}
+
+// Every plug-in in the usual folders and the user's, each file in a helper.
+int cmdScanAll(bool all) {
+    auto scanner = makeScanner();
+    std::string err;
+    if (!scanner->start(all ? "all" : "changed", &err)) {
+        std::fprintf(stderr, "scan: %s\n", err.c_str());
+        return 1;
+    }
+    std::signal(SIGINT, onSignal);
+    std::string shown;
+    for (;;) {
+        const auto pr = scanner->progress();
+        if (!pr.scanning)
+            break;
+        if (g_quit) {
+            scanner->stop();
+            std::printf("\nstopped\n");
+            return 1;
+        }
+        if (pr.current != shown && !pr.current.empty()) {
+            shown = pr.current;
+            std::printf("[%zu/%zu] %s\n", pr.done + 1, pr.total, shown.c_str());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    size_t plugins = 0, skipped = 0;
+    for (const ScannedFile& f : scanner->files()) {
+        if (!f.error.empty()) {
+            ++skipped;
+            std::printf("skipped  %s: %s\n", f.path.c_str(), f.error.c_str());
+            continue;
+        }
+        for (const FoundPlugin& p : f.plugins) {
+            if (!p.error.empty()) {
+                ++skipped;
+                std::printf("skipped  %s (%s): %s\n", p.name.c_str(), f.path.c_str(), p.error.c_str());
+                continue;
+            }
+            ++plugins;
+            std::printf("%-5s %-32s %-20s %s%s\n", p.format == "clap" ? "CLAP" : "VST3", p.name.c_str(), p.vendor.c_str(),
+                        p.bridged ? "(yabridge) " : "", (p.path + (p.format == "clap" ? "#" + p.id : "")).c_str());
+        }
+    }
+    std::printf("%zu plug-in(s), %zu skipped; kept in %s\n", plugins, skipped, PluginScanner::defaultCache().c_str());
     return 0;
 }
 
@@ -1229,16 +2503,18 @@ int cmdFcbTest(const std::string& match, uint8_t channel) {
 int usage() {
     std::fprintf(stderr,
                  "usage:\n"
-                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none] [--socket PATH|none]\n"
-                 "  cue ctl [--socket PATH] [--json] status|watch|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
+                 "  cue run <config.ini|file.cue> [--rig rig.json] [--audio none [--tone DB]] [--socket PATH|none] [--leave-device]\n"
+                 "  cue ctl [--socket PATH] [--json] status|watch|tuner|select <chain>|do \"<action>\"|save [file.cue]|performance|quit\n"
                  "  cue convert <config.ini> [out.cue] [--rig rig.json]\n"
                  "  cue bench <config.ini|file.cue> [--switch-every S] [--seconds S] [--wav out.wav] [--warm none|next] [--workers N] [--fast yes]\n"
                  "  cue doctor [--device NAME] [--priority N]\n"
                  "  cue devices\n"
                  "  cue check <config.ini|file.cue> [--no-load] [--rig rig.json]\n"
+                 "  cue scan [--all]           (every plug-in in the usual folders; --all opens unchanged files again)\n"
                  "  cue scan <file.clap|bundle.vst3>\n"
                  "  cue params <file.clap|bundle.vst3>[#id]\n"
                  "  cue import-rpp <project.rpp> [--out DIR] [--mapping FILE] [--search DIR]... [--no-scan]\n"
+                 "  cue export-rpp <file.cue|config.ini> [out.rpp] [--rig rig.json]\n"
                  "  cue midi-monitor [port-match]\n"
                  "  cue fcb-test <port-match> [--channel N]\n");
     return 2;
@@ -1247,6 +2523,9 @@ int usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Line by line even into a file (the app's --start writes engine.log), so
+    // what it says is there when it is said.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     if (argc < 2)
         return usage();
     const std::string cmd = argv[1];
@@ -1262,8 +2541,12 @@ int main(int argc, char** argv) {
     if (cmd == "run" && argc >= 3) {
         RunOptions o;
         o.noAudio = opt("--audio", "") == "none";
+        o.toneDb = std::atof(opt("--tone", "-1000").c_str());
         o.socket = opt("--socket", "");
         o.noSocket = o.socket == "none";
+        for (int i = 3; i < argc; ++i)
+            if (std::strcmp(argv[i], "--leave-device") == 0)
+                o.takeDevice = false;
         return cmdRun(argv[2], o);
     }
     if (cmd == "ctl")
@@ -1290,6 +2573,8 @@ int main(int argc, char** argv) {
             scan = scan && std::strcmp(argv[i], "--no-scan") != 0;
         return cmdImportRpp(argv[2], opt("--out", ""), search, opt("--mapping", ""), scan);
     }
+    if (cmd == "export-rpp" && argc >= 3 && !isRppFile(argv[2]))
+        return cmdExportRpp(argv[2], argc >= 4 && argv[3][0] != '-' ? argv[3] : "");
     if (cmd == "check" && argc >= 3) {
         bool loadPlugins = true;
         for (int i = 3; i < argc; ++i)
@@ -1298,8 +2583,17 @@ int main(int argc, char** argv) {
     }
     if (cmd == "params" && argc >= 3)
         return cmdParams(argv[2]);
-    if (cmd == "scan" && argc >= 3)
+    if (cmd == "scan-file" && argc >= 5) {
+        // A scan started while playing (from a terminal too) stays off the
+        // audio core, as cue run keeps its own helpers and Wine hosts. Not a
+        // lower priority: a Wine server it starts would serve the show too.
+        keepOffAudioCore(pickAudioCpu());
+        return scanFileMain(argv[2], argv[3], std::atoi(argv[4]), argc >= 6 ? std::strtoul(argv[5], nullptr, 10) : 0);
+    }
+    if (cmd == "scan" && argc >= 3 && argv[2][0] != '-')
         return cmdScan(argv[2]);
+    if (cmd == "scan")
+        return cmdScanAll(argc >= 3 && std::strcmp(argv[2], "--all") == 0);
     if (cmd == "midi-monitor")
         return cmdMidiMonitor(argc >= 3 && argv[2][0] != '-' ? argv[2] : "any");
     if (cmd == "fcb-test" && argc >= 3)

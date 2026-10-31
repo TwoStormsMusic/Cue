@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -108,6 +109,47 @@ std::vector<ConfigText> texts(const json& j, const char* key, const std::string&
     return out;
 }
 
+// One output of a plug-in or of the chain input: what is not as it starts.
+json outputJson(const WireGains& g) {
+    json j = json::object();
+    if (g.levelDb != 0.0f)
+        j["level_db"] = std::max(kWireOffDb, std::round(g.levelDb * 100) / 100);
+    if (g.width != 1.0f)
+        j["width"] = std::round(g.width * 1000) / 10;
+    if (g.pan != 0.0f)
+        j["pan"] = std::round(g.pan * 1000) / 10;
+    if (g.muted)
+        j["muted"] = true;
+    return j;
+}
+
+json outputsJson(const std::vector<WireGains>& outs) {
+    json j = json::array();
+    for (const WireGains& g : outs)
+        j.push_back(outputJson(g));
+    return j;
+}
+
+// One output as it starts: nothing to write.
+bool plain(const std::vector<WireGains>& outs) { return outs.size() == 1 && outs[0].neutral(); }
+
+std::vector<WireGains> readOutputs(const json& j, const std::string& where) {
+    if (!j.is_array() || j.empty() || j.size() > static_cast<size_t>(kMaxOuts))
+        throw std::runtime_error(where + ": outputs is a list of 1 to " + std::to_string(kMaxOuts));
+    std::vector<WireGains> outs;
+    for (const json& oj : j) {
+        WireGains g;
+        g.levelDb = oj.value("level_db", 0.0f);
+        g.width = oj.value("width", 100.0f) / 100.0f;
+        g.pan = oj.value("pan", 0.0f) / 100.0f;
+        g.muted = oj.value("muted", false);
+        if (g.levelDb > 24 || g.width < 0 || g.width > 2 || g.pan < -1 || g.pan > 1)
+            throw std::runtime_error(where + ": an output's level is at most +24 dB, its width 0 to 200 and its pan -100 to 100");
+        outs.push_back(g);
+    }
+    return outs;
+}
+
 // ----------------------------------------------------------------- writing
 
 struct Writer {
@@ -161,6 +203,10 @@ struct Writer {
                 params[std::to_string(id)] = v;
             j["params"] = params;
         }
+        if (p.shownSet)
+            j["shown"] = p.shown;
+        if (!plain(p.outs))
+            j["outputs"] = outputsJson(p.outs);
         std::string name;
         if (!state(p, false, stateName, name))
             return false;
@@ -187,33 +233,73 @@ struct Writer {
         j["warm"] = p.warm.empty() ? config.warm : p.warm;
         if (config.inputs.size() > 1)
             j["input"] = config.inputs.at(c.inputIndex);
-        json lines = json::array();
-        size_t slot = 0;
-        for (const LineSpec& l : c.lines) {
-            json lj;
-            if (l.parent >= 0) {
-                lj["name"] = l.name;
-                lj["from"] = c.lines[l.parent].name;
-                lj["after"] = l.after;
+        json blocks = json::array();
+        for (size_t i = 0; i < c.blocks.size(); ++i) {
+            const PluginSpec& ps = c.blocks[i];
+            json pj;
+            if (!plugin(ps, stateDir + "/" + number(i + 1) + " " + fileName(pluginStem(ps)), pj))
+                return false;
+            if (ps.placed) {
+                pj["x"] = std::round(ps.x * 10) / 10;
+                pj["y"] = std::round(ps.y * 10) / 10;
             }
-            json plugins = json::array();
-            for (const PluginSpec& ps : l.plugins) {
-                json pj;
-                if (!plugin(ps, stateDir + "/" + number(++slot) + " " + fileName(pluginStem(ps)), pj))
-                    return false;
-                plugins.push_back(pj);
+            blocks.push_back(pj);
+        }
+        j["blocks"] = blocks;
+        if (!plain(c.inputOuts))
+            j["input_outputs"] = outputsJson(c.inputOuts);
+        json wires = json::array();
+        for (const WireSpec& w : c.wires) {
+            json wj;
+            wj["from"] = w.from.kind == Port::Kind::Input ? json(config.inputs.at(c.inputIndex)) : json(w.from.index);
+            wj["to"] = w.to.kind == Port::Kind::Output ? json(config.outputs.at(w.to.index)) : json(w.to.index);
+            if (w.to.key)
+                wj["key"] = true;
+            if (w.from.out > 0)
+                wj["out"] = w.from.out;
+            if (w.feedback)
+                wj["feedback"] = true;
+            if (w.jump)
+                wj["jump"] = true;
+            if (w.jump && w.jumpOut.size() == 2)
+                wj["jump_out"] = w.jumpOut;
+            if (w.jump && w.jumpIn.size() == 2)
+                wj["jump_in"] = w.jumpIn;
+            wires.push_back(wj);
+        }
+        j["wires"] = wires;
+        if (!c.loose.empty()) {
+            json loose = json::array();
+            for (const LooseSpec& l : c.loose) {
+                json lj;
+                if (l.from)
+                    lj["from"] = l.port.kind == Port::Kind::Input ? json(config.inputs.at(c.inputIndex)) : json(l.port.index);
+                else
+                    lj["to"] = l.port.kind == Port::Kind::Output ? json(config.outputs.at(l.port.index)) : json(l.port.index);
+                if (!l.from && l.port.key)
+                    lj["key"] = true;
+                lj["x"] = std::round(l.x * 10) / 10;
+                lj["y"] = std::round(l.y * 10) / 10;
+                if (l.from && l.port.out > 0)
+                    lj["out"] = l.port.out;
+                if (l.feedback)
+                    lj["feedback"] = true;
+                loose.push_back(lj);
             }
-            lj["plugins"] = plugins;
-            lines.push_back(lj);
+            j["loose"] = loose;
         }
-        j["lines"] = lines;
-        json taps = json::object();
-        for (size_t o = 0; o < config.outputs.size() && o < c.out.size(); ++o) {
-            const TapSpec& t = c.out[o];
-            const LineSpec& l = c.lines.at(t.line);
-            taps[config.outputs[o]] = {{"line", l.name}, {"after", std::min(t.after, l.plugins.size())}};
-        }
-        j["outputs"] = taps;
+        // Where the board draws its input and outputs, once they are put somewhere.
+        auto place = [](const BoardPlace& at) { return json{{"x", std::round(at.x * 10) / 10}, {"y", std::round(at.y * 10) / 10}}; };
+        json board = json::object(), outputs = json::object();
+        if (c.inputAt.placed)
+            board["input"] = place(c.inputAt);
+        for (size_t o = 0; o < c.outputsAt.size() && o < config.outputs.size(); ++o)
+            if (c.outputsAt[o].placed)
+                outputs[config.outputs[o]] = place(c.outputsAt[o]);
+        if (!outputs.empty())
+            board["outputs"] = outputs;
+        if (!board.empty())
+            j["board"] = board;
         return true;
     }
 
@@ -230,6 +316,56 @@ struct Writer {
                           {"tail_quiet_db", e.tailQuietDb},      {"bypass_fade_ms", e.bypassFadeMs},
                           {"mute_fade_ms", e.muteFadeMs},        {"reset_tails_on_warm", e.resetTailsOnWarmSwitch}};
         j["controller"] = {{"profile", c.midi.profile}, {"channel", c.midi.channel + 1}, {"forward", c.midi.forward}};
+        const TunerSettings& t = c.tuner.settings;
+        j["tuner"] = {{"input", c.inputs.at(c.tuner.inputIndex)},
+                      {"reference", t.reference},
+                      {"range", tunerRangeName(t.range)},
+                      {"tolerance", t.tolerance},
+                      {"names", t.flats ? "flats" : "sharps"}};
+        // The levels that are not as they start.
+        auto autoJson = [](const AutoSpec& a, json& j) {
+            if (a == AutoSpec{})
+                return;
+            j["auto"] = {{"measure", measureName(a.measure)}, {"target_db", a.targetDb}, {"seconds", a.seconds}};
+        };
+        json levels, ins = json::object(), outs = json::object();
+        for (size_t i = 0; i < c.inputs.size() && i < c.inputLevels.size(); ++i) {
+            const InputLevel& l = c.inputLevels[i];
+            json lj = json::object();
+            if (l.gainDb != 0.0f)
+                lj["gain_db"] = l.gainDb;
+            autoJson(l.autoSpec, lj);
+            if (!lj.empty())
+                ins[c.inputs[i]] = lj;
+        }
+        for (size_t o = 0; o < c.outputs.size() && o < c.outputLevels.size(); ++o) {
+            const OutputLevel& l = c.outputLevels[o];
+            json lj = json::object();
+            if (l.levelDb != 0.0f)
+                lj["level_db"] = l.levelDb;
+            if (l.muted)
+                lj["muted"] = true;
+            const OutputLevel plain;
+            if (l.limiter || l.ceilingDb != plain.ceilingDb || l.releaseMs != plain.releaseMs)
+                lj["limiter"] = {{"on", l.limiter}, {"ceiling_db", l.ceilingDb}, {"release_ms", l.releaseMs}};
+            autoJson(l.autoSpec, lj);
+            if (!lj.empty())
+                outs[c.outputs[o]] = lj;
+        }
+        if (!ins.empty())
+            levels["inputs"] = ins;
+        if (!outs.empty())
+            levels["outputs"] = outs;
+        if (!(c.wireAuto == WireAuto{})) {
+            json wj = json::object();
+            autoJson(c.wireAuto.spec, wj);
+            if (!wj.contains("auto"))
+                wj["auto"] = json::object();
+            wj["auto"]["match"] = c.wireAuto.match;
+            levels["wires"] = wj;
+        }
+        if (!levels.empty())
+            j["levels"] = levels;
 
         json scenes = json::array();
         for (size_t s = 0; s < c.scenes.size(); ++s) {
@@ -391,6 +527,12 @@ struct Reader {
                     throw std::runtime_error("parameter ids are whole numbers, like \"54\": 1");
                 p.params.push_back({static_cast<uint32_t>(n), v.get<double>()});
             }
+        if (j.contains("shown")) {
+            p.shown = j.at("shown").get<std::vector<uint32_t>>();
+            p.shownSet = true;
+        }
+        if (j.contains("outputs"))
+            p.outs = readOutputs(j.at("outputs"), where);
         for (const char* key : {"state", "controller_state"}) {
             if (!j.contains(key))
                 continue;
@@ -415,6 +557,127 @@ struct Reader {
         if (c.name.empty())
             throw std::runtime_error("a chain needs a name");
         c.where = where + " chain '" + c.name + "'";
+        c.input = j.value("input", "");
+        if (!j.contains("lines")) {
+            blocksAndWires(j, config, c);
+        } else {
+            linesAndOutputs(j, config, c);
+        }
+
+        p.name = c.name;
+        p.chain = c.name;
+        p.where = c.where;
+        p.display = j.value("display", "");
+        p.pedal = j.value("pedal", 0);
+        p.program = j.value("program", -1);
+        p.actions = texts(j, "on_select", c.where);
+        p.warm = j.value("warm", "next");
+    }
+
+    // Format 2: blocks, and the wires between them.
+    void blocksAndWires(const json& j, const Config& config, ChainSpec& c) {
+        if (j.contains("blocks"))
+            for (const json& pj : j.at("blocks")) {
+                PluginSpec ps;
+                plugin(pj, c.where + " plug-in " + std::to_string(c.blocks.size() + 1), ps);
+                if (pj.contains("x") || pj.contains("y")) {
+                    ps.placed = true;
+                    ps.x = pj.value("x", 0.0);
+                    ps.y = pj.value("y", 0.0);
+                }
+                c.blocks.push_back(std::move(ps));
+            }
+        if (j.contains("input_outputs"))
+            c.inputOuts = readOutputs(j.at("input_outputs"), c.where + " input");
+        const std::string input = c.input.empty() ? config.inputs.at(0) : c.input;
+        // Which of its source's outputs a wire leaves.
+        auto outOf = [&](const json& wj, const Port& from) -> uint8_t {
+            const int n = wj.value("out", 0);
+            const std::vector<WireGains>* outs = outsOf(static_cast<const ChainSpec&>(c), from);
+            const int have = outs ? static_cast<int>(outs->size()) : 1;
+            if (n < 0 || n >= have)
+                throw std::runtime_error("chain '" + c.name + "': a wire leaves output " + std::to_string(n) + " of " +
+                                         (from.kind == Port::Kind::Input ? std::string("the input") : "block " + std::to_string(from.index)) +
+                                         ", which has " + std::to_string(have) + " output(s), numbered from 0");
+            return static_cast<uint8_t>(n);
+        };
+        auto end = [&](const json& e, bool from) {
+            if (e.is_number_integer()) {
+                const long n = e.get<long>();
+                if (n < 0 || static_cast<size_t>(n) >= c.blocks.size())
+                    throw std::runtime_error("chain '" + c.name + "': a wire " + (from ? "comes from" : "goes to") + " block " +
+                                             std::to_string(n) + ", and it has " + std::to_string(c.blocks.size()) +
+                                             " block(s), numbered from 0");
+                return Port::block(static_cast<int>(n));
+            }
+            const std::string name = e.get<std::string>();
+            if (from) {
+                // Its own input, by name.
+                if (!same(name, input) && !same(name, "in"))
+                    throw std::runtime_error("chain '" + c.name + "' plays input " + input + "; a wire cannot come from '" + name + "'");
+                return Port::input();
+            }
+            for (size_t o = 0; o < config.outputs.size(); ++o)
+                if (same(config.outputs[o], name))
+                    return Port::output(static_cast<int>(o));
+            throw std::runtime_error("chain '" + c.name + "': a wire goes to output '" + name + "', which the performance does not have");
+        };
+        for (const json& wj : j.value("wires", json::array())) {
+            WireSpec w;
+            w.where = c.where;
+            w.from = end(wj.at("from"), true);
+            w.to = end(wj.at("to"), false);
+            if (wj.value("key", false)) {
+                if (w.to.kind != Port::Kind::Block)
+                    throw std::runtime_error("chain '" + c.name + "': only a plug-in has a key (a side-chain input)");
+                w.to.key = true;
+            }
+            w.from.out = outOf(wj, w.from);
+            w.feedback = wj.value("feedback", false);
+            w.jump = wj.value("jump", false);
+            w.jumpOut = wj.value("jump_out", std::vector<double>());
+            w.jumpIn = wj.value("jump_in", std::vector<double>());
+            c.wires.push_back(w);
+        }
+        // Wires attached at one end only, with where the other end lies.
+        if (j.contains("loose"))
+            for (const json& lj : j.at("loose")) {
+                LooseSpec l;
+                l.from = lj.contains("from");
+                if (l.from == lj.contains("to"))
+                    throw std::runtime_error("chain '" + c.name + "': a loose wire has one end, from or to");
+                const Port p = end(lj.at(l.from ? "from" : "to"), l.from);
+                l.port = p;
+                if (!l.from && lj.value("key", false)) {
+                    if (p.kind != Port::Kind::Block)
+                        throw std::runtime_error("chain '" + c.name + "': only a plug-in has a key (a side-chain input)");
+                    l.port.key = true;
+                }
+                l.x = lj.value("x", 0.0);
+                l.y = lj.value("y", 0.0);
+                if (l.from)
+                    l.port.out = outOf(lj, l.port);
+                l.feedback = lj.value("feedback", false);
+                c.loose.push_back(l);
+            }
+        if (j.contains("board")) {
+            const json& b = j.at("board");
+            auto place = [](const json& at) { return BoardPlace{true, at.value("x", 0.0), at.value("y", 0.0)}; };
+            if (b.contains("input"))
+                c.inputAt = place(b.at("input"));
+            // An output the performance does not have is only not drawn there.
+            if (b.contains("outputs"))
+                for (const auto& [name, at] : b.at("outputs").items())
+                    for (size_t o = 0; o < config.outputs.size(); ++o)
+                        if (same(config.outputs[o], name)) {
+                            c.outputsAt.resize(config.outputs.size());
+                            c.outputsAt[o] = place(at);
+                        }
+        }
+    }
+
+    // Format 1: lines, and where each output is taken.
+    void linesAndOutputs(const json& j, const Config& config, ChainSpec& c) {
         const auto& lines = j.at("lines");
         if (lines.empty())
             throw std::runtime_error("chain '" + c.name + "' has no lines");
@@ -441,7 +704,6 @@ struct Reader {
             }
             c.lines.push_back(std::move(l));
         }
-        c.input = j.value("input", "");
         if (j.contains("outputs"))
             for (const auto& [name, tj] : j.at("outputs").items()) {
                 bool known = false;
@@ -460,15 +722,6 @@ struct Reader {
                 t.set = true;
                 c.out.push_back(t);
             }
-
-        p.name = c.name;
-        p.chain = c.name;
-        p.where = c.where;
-        p.display = j.value("display", "");
-        p.pedal = j.value("pedal", 0);
-        p.program = j.value("program", -1);
-        p.actions = texts(j, "on_select", c.where);
-        p.warm = j.value("warm", "next");
     }
 
     void performance(const json& j, Config& c) {
@@ -505,6 +758,88 @@ struct Reader {
                 throw std::runtime_error("controller channel is 1 to 16");
             c.midi.channel = static_cast<uint8_t>(channel - 1);
             c.midi.forward = m.value("forward", c.midi.forward);
+        }
+        if (j.contains("tuner")) {
+            const json& t = j.at("tuner");
+            TunerSettings& s = c.tuner.settings;
+            c.tuner.input = t.value("input", "");
+            s.reference = t.value("reference", s.reference);
+            if (s.reference < 415 || s.reference > 466)
+                throw std::runtime_error("tuner reference is 415 to 466 Hz");
+            const int range = tunerRange(lower(t.value("range", std::string(tunerRangeName(s.range)))));
+            if (range < 0)
+                throw std::runtime_error("tuner range is guitar, bass, vocals or any");
+            s.range = range;
+            s.tolerance = t.value("tolerance", s.tolerance);
+            if (s.tolerance <= 0 || s.tolerance > 10)
+                throw std::runtime_error("tuner tolerance is above 0 and at most 10 cents");
+            const std::string names = lower(t.value("names", std::string("sharps")));
+            if (names != "sharps" && names != "flats")
+                throw std::runtime_error("tuner names are sharps or flats");
+            s.flats = names == "flats";
+        }
+        c.inputLevels.assign(c.inputs.size(), InputLevel{});
+        c.outputLevels.assign(c.outputs.size(), OutputLevel{});
+        c.wireAuto = WireAuto{};
+        if (j.contains("levels")) {
+            const json& l = j.at("levels");
+            auto db = [](const json& lj, const char* key, float now, float lowest, float highest) {
+                const float v = lj.value(key, now);
+                if (v < lowest || v > highest)
+                    throw std::runtime_error(std::string("levels: ") + key + " is " + std::to_string(static_cast<int>(lowest)) + " to " +
+                                             std::to_string(static_cast<int>(highest)));
+                return v;
+            };
+            auto readAuto = [&](const json& lj, AutoSpec& a) {
+                if (!lj.contains("auto"))
+                    return;
+                const json& aj = lj.at("auto");
+                const int m = measureOf(aj.value("measure", std::string(measureName(a.measure))));
+                if (m < 0)
+                    throw std::runtime_error("levels: auto measure is peak, rms or lufs");
+                a.measure = static_cast<AutoSpec::Measure>(m);
+                a.targetDb = db(aj, "target_db", a.targetDb, -60, 0);
+                a.seconds = db(aj, "seconds", a.seconds, 1, 60);
+            };
+            // By name; one the performance does not have is left out.
+            auto find = [&](const std::vector<std::string>& names, const std::string& name, const char* what) {
+                for (size_t k = 0; k < names.size(); ++k)
+                    if (lower(names[k]) == lower(name))
+                        return static_cast<int>(k);
+                c.warnings.push_back(path + ": levels for " + what + " '" + name + "', which this performance does not have, are left out");
+                return -1;
+            };
+            if (l.contains("inputs"))
+                for (const auto& [name, lj] : l.at("inputs").items()) {
+                    const int i = find(c.inputs, name, "input");
+                    if (i < 0)
+                        continue;
+                    InputLevel& in = c.inputLevels[i];
+                    in.gainDb = db(lj, "gain_db", in.gainDb, kLevelFloorDb, kLevelMaxDb);
+                    readAuto(lj, in.autoSpec);
+                }
+            if (l.contains("outputs"))
+                for (const auto& [name, lj] : l.at("outputs").items()) {
+                    const int o = find(c.outputs, name, "output");
+                    if (o < 0)
+                        continue;
+                    OutputLevel& out = c.outputLevels[o];
+                    out.levelDb = db(lj, "level_db", out.levelDb, kLevelFloorDb, kLevelMaxDb);
+                    out.muted = lj.value("muted", out.muted);
+                    if (lj.contains("limiter")) {
+                        const json& li = lj.at("limiter");
+                        out.limiter = li.value("on", true);
+                        out.ceilingDb = db(li, "ceiling_db", out.ceilingDb, -60, 0);
+                        out.releaseMs = db(li, "release_ms", out.releaseMs, 1, 5000);
+                    }
+                    readAuto(lj, out.autoSpec);
+                }
+            if (l.contains("wires")) {
+                const json& wj = l.at("wires");
+                readAuto(wj, c.wireAuto.spec);
+                if (wj.contains("auto"))
+                    c.wireAuto.match = wj.at("auto").value("match", c.wireAuto.match);
+            }
         }
 
         for (const json& sj : j.at("scenes")) {
@@ -798,26 +1133,35 @@ bool loadRig(const std::string& path, Config& c, std::string* error) {
                 }
             }
         }
-        // Each of the performance's inputs and outputs by name, else by position.
-        auto channel = [&](const char* key, const std::string& name, size_t position) {
-            if (j.contains(key))
-                for (const auto& [n, ch] : j.at(key).items())
-                    if (same(n, name)) {
-                        const int v = ch.get<int>();
-                        if (v < 1)
-                            throw std::runtime_error(std::string(key) + ": channels are numbered from 1");
-                        return static_cast<unsigned>(v - 1);
-                    }
-            c.warnings.push_back(path + ": no channel for " + (key[0] == 'i' ? "input" : "output") + " '" + name + "'; using channel " +
-                                 std::to_string(position + 1));
-            return static_cast<unsigned>(position);
+        // Each of the performance's inputs and outputs by name; one the rig
+        // does not know (renamed in this performance, say) takes the channel
+        // of its place, or the first that none of the others has.
+        auto channels = [&](const char* key, const std::vector<std::string>& names) {
+            std::vector<int> found(names.size(), -1);
+            for (size_t i = 0; i < names.size(); ++i)
+                if (j.contains(key))
+                    for (const auto& [n, ch] : j.at(key).items())
+                        if (same(n, names[i])) {
+                            const int v = ch.get<int>();
+                            if (v < 1)
+                                throw std::runtime_error(std::string(key) + ": channels are numbered from 1");
+                            found[i] = v - 1;
+                        }
+            auto taken = [&](int ch) { return std::find(found.begin(), found.end(), ch) != found.end(); };
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (found[i] >= 0)
+                    continue;
+                int ch = static_cast<int>(i);
+                for (int free = 0; taken(ch); ++free)
+                    ch = free;
+                found[i] = ch;
+                c.warnings.push_back(path + ": no channel for " + (key[0] == 'i' ? "input" : "output") + " '" + names[i] + "'; using channel " +
+                                     std::to_string(ch + 1));
+            }
+            return std::vector<unsigned>(found.begin(), found.end());
         };
-        c.audio.inputChannels.clear();
-        for (size_t i = 0; i < c.inputs.size(); ++i)
-            c.audio.inputChannels.push_back(channel("inputs", c.inputs[i], i));
-        c.audio.outputChannels.clear();
-        for (size_t o = 0; o < c.outputs.size(); ++o)
-            c.audio.outputChannels.push_back(channel("outputs", c.outputs[o], o));
+        c.audio.inputChannels = channels("inputs", c.inputs);
+        c.audio.outputChannels = channels("outputs", c.outputs);
         if (j.contains("midi")) {
             const json& m = j.at("midi");
             c.midi.enabled = m.value("enabled", c.midi.enabled);

@@ -96,8 +96,10 @@ std::vector<ClapPluginInfo> scanClapFile(const std::string& path, std::string* e
         const clap_plugin_descriptor_t* d = f->get_plugin_descriptor(f, i);
         if (!d)
             continue;
-        result.push_back({path, d->id ? d->id : "", d->name ? d->name : "", d->vendor ? d->vendor : "",
-                          d->version ? d->version : ""});
+        ClapPluginInfo info{path, d->id ? d->id : "", d->name ? d->name : "", d->vendor ? d->vendor : "", d->version ? d->version : "", {}};
+        for (const char* const* f = d->features; f && *f; ++f)
+            info.features.push_back(*f);
+        result.push_back(std::move(info));
     }
     return result;
 }
@@ -108,6 +110,9 @@ namespace {
 
 ClapProcessor* owner(const clap_host_t* host) { return static_cast<ClapProcessor*>(host->host_data); }
 
+// Editors are embedded in a window of Cue's own; on Linux that is X11.
+constexpr const char* kWindowApi = CLAP_WINDOW_API_X11;
+
 bool hostIsMainThread(const clap_host_t*) { return std::this_thread::get_id() == g_mainThread; }
 bool hostIsAudioThread(const clap_host_t*) { return isAudioThread(); }
 const clap_host_thread_check_t kThreadCheck = {hostIsMainThread, hostIsAudioThread};
@@ -117,9 +122,9 @@ const clap_host_log_t kLog = {hostLog};
 
 void hostParamsRescan(const clap_host_t* host, clap_param_rescan_flags) { owner(host)->onParamsRescan(); }
 void hostParamsClear(const clap_host_t*, clap_id, clap_param_clear_flags) {}
-// The engine flushes idle plug-ins regularly and processes active ones
-// every block, so an explicit flush request needs no action.
-void hostParamsRequestFlush(const clap_host_t*) {}
+// The engine processes active plug-ins every block, and flushes idle and
+// bypassed ones every few milliseconds when asked to: an editor moved.
+void hostParamsRequestFlush(const clap_host_t* host) { owner(host)->onRequestFlush(); }
 const clap_host_params_t kParamsHost = {hostParamsRescan, hostParamsClear, hostParamsRequestFlush};
 
 void hostLatencyChanged(const clap_host_t* host) { owner(host)->onLatencyChanged(); }
@@ -135,6 +140,26 @@ bool hostRegisterTimer(const clap_host_t* host, uint32_t periodMs, clap_id* id) 
 bool hostUnregisterTimer(const clap_host_t* host, clap_id id) { return owner(host)->onUnregisterTimer(id); }
 const clap_host_timer_support_t kTimerSupport = {hostRegisterTimer, hostUnregisterTimer};
 
+// An editor draws from its own connection to the screen: the main loop waits
+// on the file descriptors the plug-in registers here, so it redraws as soon
+// as something happens.
+bool hostRegisterFd(const clap_host_t* host, int fd, clap_posix_fd_flags_t) { return owner(host)->onRegisterFd(fd); }
+bool hostModifyFd(const clap_host_t* host, int fd, clap_posix_fd_flags_t) { return owner(host)->onRegisterFd(fd); }
+bool hostUnregisterFd(const clap_host_t* host, int fd) { return owner(host)->onUnregisterFd(fd); }
+const clap_host_posix_fd_support_t kFdSupport = {hostRegisterFd, hostModifyFd, hostUnregisterFd};
+
+// The editor's window belongs to the host, so what the plug-in can ask for
+// is a size (its own zoom) and to be closed.
+void hostResizeHintsChanged(const clap_host_t*) {}
+bool hostRequestResize(const clap_host_t* host, uint32_t width, uint32_t height) {
+    owner(host)->onGuiResize(width, height);
+    return true;
+}
+bool hostRequestShow(const clap_host_t*) { return false; }
+bool hostRequestHide(const clap_host_t*) { return false; }
+void hostGuiClosed(const clap_host_t* host, bool) { owner(host)->onGuiClosed(); }
+const clap_host_gui_t kGuiHost = {hostResizeHintsChanged, hostRequestResize, hostRequestShow, hostRequestHide, hostGuiClosed};
+
 const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &kThreadCheck;
     if (!std::strcmp(id, CLAP_EXT_LOG)) return &kLog;
@@ -143,13 +168,18 @@ const void* hostGetExtension(const clap_host_t*, const char* id) {
     if (!std::strcmp(id, CLAP_EXT_TAIL)) return &kTailHost;
     if (!std::strcmp(id, CLAP_EXT_STATE)) return &kStateHost;
     if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &kTimerSupport;
+    if (!std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT)) return &kFdSupport;
+    if (!std::strcmp(id, CLAP_EXT_GUI)) return &kGuiHost;
     return nullptr;
 }
 void hostRequestRestart(const clap_host_t* host) { owner(host)->onRequestRestart(); }
 void hostRequestProcess(const clap_host_t*) {}
 void hostRequestCallback(const clap_host_t* host) { owner(host)->onRequestCallback(); }
 
-bool outTryPush(const clap_output_events_t*, const clap_event_header_t*) { return true; }
+bool outTryPush(const clap_output_events_t* list, const clap_event_header_t* event) {
+    static_cast<ClapProcessor*>(list->ctx)->onOutputEvent(event);
+    return true;
+}
 
 } // namespace
 
@@ -242,6 +272,10 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->latency_ = static_cast<const clap_plugin_latency_t*>(ext(CLAP_EXT_LATENCY));
     p->tail_ = static_cast<const clap_plugin_tail_t*>(ext(CLAP_EXT_TAIL));
     p->timerExt_ = static_cast<const clap_plugin_timer_support_t*>(ext(CLAP_EXT_TIMER_SUPPORT));
+    p->fdExt_ = static_cast<const clap_plugin_posix_fd_support_t*>(ext(CLAP_EXT_POSIX_FD_SUPPORT));
+    if (const auto* gui = static_cast<const clap_plugin_gui_t*>(ext(CLAP_EXT_GUI)))
+        if (gui->is_api_supported && gui->is_api_supported(p->plugin_, kWindowApi, false))
+            p->gui_ = gui;
     if (const auto* notes = static_cast<const clap_plugin_note_ports_t*>(ext(CLAP_EXT_NOTE_PORTS))) {
         for (uint32_t i = 0, n = notes->count(p->plugin_, true); i < n; ++i) {
             clap_note_port_info_t info{};
@@ -255,7 +289,7 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
     p->inEvents_ = std::make_unique<InputEvents>();
     p->inEvents_->list = {p->inEvents_.get(), InputEvents::size, InputEvents::get};
     p->inEvents_->self = p.get();
-    p->outEvents_ = {nullptr, outTryPush};
+    p->outEvents_ = {p.get(), outTryPush};
     p->events_.resize(1024);
     return p;
 }
@@ -263,6 +297,9 @@ std::unique_ptr<ClapProcessor> ClapProcessor::load(const std::string& path, cons
 ClapProcessor::~ClapProcessor() {
     if (!plugin_)
         return;
+    // A plug-in never leaves its editor behind; the window it was in is the
+    // host's to tidy up.
+    closeEditor();
     deactivate();
     plugin_->destroy(plugin_);
 }
@@ -369,6 +406,109 @@ void ClapProcessor::pumpMainThread() {
     rescanRequested_ = false;
 }
 
+// ---------------------------------------------------------------- the editor
+
+bool ClapProcessor::openEditor(unsigned long window, EditorSize* size, std::string* error) {
+    if (!gui_) {
+        *error = name_ + " has no editor of its own";
+        return false;
+    }
+    if (editorOpen_)
+        return true;
+    // Where each parameter is, so what the editor changes can be undone.
+    if (paramsExt_)
+        for (uint32_t i = 0, n = paramsExt_->count(plugin_); i < n; ++i) {
+            clap_param_info_t info{};
+            double value = 0;
+            if (paramsExt_->get_info(plugin_, i, &info) && paramsExt_->get_value(plugin_, info.id, &value))
+                edits_.known(info.id, value);
+        }
+    if (!gui_->create(plugin_, kWindowApi, false)) {
+        *error = name_ + " would not make its editor";
+        return false;
+    }
+    uint32_t width = 0, height = 0;
+    if (gui_->get_size)
+        gui_->get_size(plugin_, &width, &height);
+    editorResizable_ = gui_->can_resize && gui_->can_resize(plugin_);
+    clap_window_t parent{};
+    parent.api = kWindowApi;
+    parent.x11 = static_cast<clap_xwnd>(window);
+    if (!gui_->set_parent || !gui_->set_parent(plugin_, &parent)) {
+        gui_->destroy(plugin_);
+        editorFds_.clear();
+        *error = name_ + " would not put its editor in Cue's window";
+        return false;
+    }
+    if (gui_->show)
+        gui_->show(plugin_);
+    editorOpen_ = true;
+    editorResizeAsked_ = false;
+    *size = {width, height, editorResizable_};
+    return true;
+}
+
+void ClapProcessor::closeEditor() {
+    if (!editorOpen_)
+        return;
+    editorOpen_ = false;
+    if (gui_->hide)
+        gui_->hide(plugin_);
+    gui_->destroy(plugin_);
+    // A plug-in that forgot to give its file descriptors back does not keep
+    // the main loop waiting on them.
+    editorFds_.clear();
+    editorResizeAsked_ = false;
+}
+
+bool ClapProcessor::editorResized(uint32_t width, uint32_t height) {
+    if (!editorOpen_ || !editorResizable_ || !gui_->set_size || !width || !height)
+        return false;
+    return gui_->set_size(plugin_, width, height);
+}
+
+bool ClapProcessor::takeEditorResize(EditorSize* size) {
+    if (!editorResizeAsked_)
+        return false;
+    editorResizeAsked_ = false;
+    *size = editorAskedSize_;
+    return true;
+}
+
+void ClapProcessor::editorFds(std::vector<int>& out) const { out.insert(out.end(), editorFds_.begin(), editorFds_.end()); }
+
+void ClapProcessor::onEditorFd(int fd) {
+    // Each plug-in is asked only about its own; its handler checks whether
+    // anything is actually waiting.
+    if (fdExt_ && editorOpen_ && std::find(editorFds_.begin(), editorFds_.end(), fd) != editorFds_.end())
+        fdExt_->on_fd(plugin_, fd, CLAP_POSIX_FD_READ);
+}
+
+bool ClapProcessor::onRegisterFd(int fd) {
+    if (std::this_thread::get_id() != g_mainThread || fd < 0)
+        return false;
+    if (std::find(editorFds_.begin(), editorFds_.end(), fd) == editorFds_.end())
+        editorFds_.push_back(fd);
+    return true;
+}
+
+bool ClapProcessor::onUnregisterFd(int fd) {
+    const auto it = std::find(editorFds_.begin(), editorFds_.end(), fd);
+    if (it == editorFds_.end())
+        return false;
+    editorFds_.erase(it);
+    return true;
+}
+
+void ClapProcessor::onGuiResize(uint32_t width, uint32_t height) {
+    editorAskedSize_ = {width, height, editorResizable_};
+    editorResizeAsked_ = true;
+}
+
+// The plug-in wants its editor gone (its own close button). The window goes
+// with it at the next pump.
+void ClapProcessor::onGuiClosed() { editorResizeAsked_ = false; }
+
 std::vector<ParamInfo> ClapProcessor::params() const {
     std::vector<ParamInfo> out;
     if (!paramsExt_)
@@ -382,6 +522,20 @@ std::vector<ParamInfo> ClapProcessor::params() const {
                        stepped ? static_cast<int>(info.max_value - info.min_value) : 0});
     }
     return out;
+}
+
+bool ClapProcessor::paramValue(uint32_t id, double& value) const { return paramsExt_ && paramsExt_->get_value(plugin_, id, &value); }
+
+std::string ClapProcessor::paramText(uint32_t id, double value) const {
+    char buf[256] = {};
+    if (!paramsExt_ || !paramsExt_->value_to_text(plugin_, id, value, buf, sizeof buf))
+        return {};
+    buf[sizeof buf - 1] = 0;
+    return buf;
+}
+
+bool ClapProcessor::paramFromText(uint32_t id, const std::string& text, double& value) const {
+    return paramsExt_ && paramsExt_->text_to_value && paramsExt_->text_to_value(plugin_, id, text.c_str(), &value);
 }
 
 bool ClapProcessor::saveState(std::vector<uint8_t>& out) const {
@@ -417,6 +571,7 @@ bool ClapProcessor::loadState(const std::vector<uint8_t>& data) {
 bool ClapProcessor::setParam(uint32_t id, double value) {
     if (!paramQueue_.push({id, value}))
         return false;
+    edits_.known(id, value);
     paramsPending_.store(true, std::memory_order_release);
     return true;
 }
@@ -467,11 +622,37 @@ void ClapProcessor::reset() {
         plugin_->reset(plugin_);
 }
 
+void ClapProcessor::onOutputEvent(const clap_event_header_t* event) {
+    if (event->space_id != CLAP_CORE_EVENT_SPACE_ID)
+        return;
+    if (event->type == CLAP_EVENT_PARAM_VALUE) {
+        const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(event);
+        outQueue_.push({event->type, ev->param_id, ev->value});
+    } else if (event->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || event->type == CLAP_EVENT_PARAM_GESTURE_END) {
+        const auto* ev = reinterpret_cast<const clap_event_param_gesture_t*>(event);
+        outQueue_.push({event->type, ev->param_id, 0.0});
+    }
+}
+
+void ClapProcessor::takeEditorEdits(std::vector<ParamEdit>& out) {
+    while (auto e = outQueue_.pop()) {
+        if (e->type == CLAP_EVENT_PARAM_VALUE)
+            edits_.change(e->id, e->value);
+        else if (e->type == CLAP_EVENT_PARAM_GESTURE_BEGIN)
+            edits_.begin(e->id);
+        else
+            edits_.end(e->id);
+    }
+    edits_.take(out);
+}
+
 void ClapProcessor::flushIdle() {
-    if (!paramsPending_.load(std::memory_order_acquire) || processing_ || !paramsExt_ || !activated_)
+    // Asked by the plug-in (its editor moved something), or changes to deliver.
+    const bool asked = flushRequested_.load(std::memory_order_acquire) && flushRequested_.exchange(false, std::memory_order_acq_rel);
+    if ((!asked && !paramsPending_.load(std::memory_order_acquire)) || !paramsExt_ || !activated_)
         return;
     drainParams(static_cast<uint32_t>(events_.size()));
-    if (inEvents_->count > 0)
+    if (inEvents_->count > 0 || asked)
         paramsExt_->flush(plugin_, &inEvents_->list, &outEvents_);
     inEvents_->count = 0;
 }

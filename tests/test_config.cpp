@@ -77,8 +77,9 @@ plugin = builtin:delay 300 0.4 0.3
     CHECK(plugins[0]->params.size() == 1 && plugins[0]->params[0].second == 0.5);
     CHECK(plugins[1]->kind == "vst3" && plugins[1]->path == "/x/Archetype Nolly X.vst3");
     const ChainSpec& ch = s.chains[0];
-    CHECK(ch.out[1].line == 0 && ch.out[1].after == 2); // out 2 before the delay
-    CHECK(ch.out[0].line == 0 && ch.out[0].after == 3); // out 1 at the end
+    // Out 1 at the end, out 2 before the delay.
+    CHECK_MSG(wireList(ch, c.outputs) == "in>0 0>1 1>2 2>Out 1 1>Out 2", "%s", wireList(ch, c.outputs).c_str());
+    CHECK(ch.lines.empty() && ch.out.empty());
 }
 
 TEST(config_reads_scenes_with_chains_branches_and_presets) {
@@ -128,16 +129,17 @@ pedal = 7
     const SceneSpec& s = c.scenes[0];
     CHECK(s.display == "CV" && s.chains.size() == 2 && s.presets.size() == 2);
     const ChainSpec& punk = s.chains[0];
-    CHECK(punk.lines.size() == 2);
-    CHECK(punk.lines[0].plugins.size() == 4 && punk.lines[1].plugins.size() == 1);
-    CHECK(punk.lines[1].name == "FOH" && punk.lines[1].parent == 0 && punk.lines[1].after == 3);
-    CHECK(punk.out[0].line == 1 && punk.out[0].after == 1); // out 1 at the end of FOH
-    CHECK(punk.out[1].line == 0 && punk.out[1].after == 3); // out 2 before the delay
-    const PluginSpec& gain = punk.lines[0].plugins[0];
+    // The main line's four, then the FOH branch's IR, which leaves after
+    // the third; out 1 at the end of FOH, out 2 before the delay.
+    CHECK(punk.blocks.size() == 5 && punk.blocks[4].path == "/cfg/ir.clap");
+    CHECK_MSG(wireList(punk, c.outputs) == "in>0 0>1 1>2 2>3 2>4 4>Out 1 2>Out 2", "%s", wireList(punk, c.outputs).c_str());
+    if (punk.blocks.size() != 5)
+        return;
+    const PluginSpec& gain = punk.blocks[0];
     CHECK(gain.label == "Gain Stage" && gain.path == "/cfg/gain.clap" && gain.params[0].first == 54);
-    const PluginSpec& wah = punk.lines[0].plugins[1];
+    const PluginSpec& wah = punk.blocks[1];
     CHECK(wah.label == "Auto Wah" && wah.bypassed && !wah.midi);
-    const PluginSpec& ultra = punk.lines[0].plugins[2];
+    const PluginSpec& ultra = punk.blocks[2];
     CHECK(ultra.id == "ABCDEF019182FAEB4E44535044524B55" && ultra.stateFile == "/cfg/states/punk-ultra.vststate");
     CHECK(ultra.controllerStateFile == "/cfg/states/punk-ultra.ctrl");
     CHECK(s.presets[0].chain == "Punk" && s.presets[0].display == "PU" && s.presets[0].pedal == 6);
@@ -145,7 +147,7 @@ pedal = 7
     CHECK(s.presets[0].actions[0].where == "/cfg/test.ini:32");
     CHECK(s.presets[1].chain == "Slap"); // the chain of the same name
     // Both outputs of Slap default to the end of its main line.
-    CHECK(s.chains[1].out[0].after == 1 && s.chains[1].out[1].after == 1);
+    CHECK(wireList(s.chains[1], c.outputs) == "in>0 0>Out 1 0>Out 2");
 }
 
 TEST(config_reads_controls_triggers_groups_and_fcb) {
@@ -227,7 +229,7 @@ TEST(config_includes_files_relative_to_the_including_file) {
     std::remove(main.c_str());
     CHECK(c.scenes.size() == 1 && c.scenes[0].chains.size() == 2);
     if (c.scenes.size() == 1 && c.scenes[0].chains.size() == 2) {
-        CHECK(c.scenes[0].chains[0].lines[0].plugins[0].path == "/tmp/a.clap");
+        CHECK(c.scenes[0].chains[0].blocks.at(0).path == "/tmp/a.clap");
         CHECK(c.scenes[0].presets.size() == 1 && c.scenes[0].presets[0].chain == "B");
     }
 }
@@ -268,11 +270,9 @@ plugin = builtin:gain 2
         return;
     CHECK(chains[0].inputIndex == 0 && chains[1].inputIndex == 1 && chains[2].inputIndex == 0);
     CHECK(chains[1].input == "Synth");
-    // One tap per output, in the performance's order; the ones no tap names at the end of the main line.
-    for (const auto& ch : chains)
-        CHECK(ch.out.size() == 3 && ch.out[0].output == "FOH" && ch.out[1].output == "Amp" && ch.out[2].output == "In-ear");
-    CHECK(chains[0].out[0].after == 2 && chains[0].out[1].after == 2 && chains[0].out[2].after == 1 && chains[0].out[2].set);
-    CHECK(chains[1].out[1].after == 1 && chains[1].out[1].set && !chains[1].out[0].set);
+    // A wire into each output, in the performance's order; the ones no tap names from the end of the main line.
+    CHECK_MSG(wireList(chains[0], c.outputs) == "in>0 0>1 1>FOH 1>Amp 0>In-ear", "%s", wireList(chains[0], c.outputs).c_str());
+    CHECK(wireList(chains[1], c.outputs) == "in>0 0>FOH 0>Amp 0>In-ear");
 
     // Mistakes, with where they are.
     Config d;
@@ -340,7 +340,7 @@ bypass_mode = Mute
     CHECK_MSG(ok, "%s", err.c_str());
     if (!ok)
         return;
-    const auto& p = c.scenes[0].chains[0].lines[0].plugins;
+    const auto& p = c.scenes[0].chains[0].blocks;
     CHECK(c.muteOnBypass);
     CHECK(p[0].muteOnBypass && !p[0].bypassModeSet); // the [switching] default
     CHECK(!p[1].muteOnBypass && p[1].bypassModeSet);
@@ -348,7 +348,7 @@ bypass_mode = Mute
 
     Config d;
     CHECK(parse("[chain A]\nplugin = builtin:gain 1\n", d, err));
-    CHECK(!d.muteOnBypass && !d.scenes[0].chains[0].lines[0].plugins[0].muteOnBypass); // thru unless told
+    CHECK(!d.muteOnBypass && !d.scenes[0].chains[0].blocks.at(0).muteOnBypass); // thru unless told
     Config e;
     CHECK(!parse("[chain A]\nplugin = builtin:gain 1\nbypass_mode = off\n", e, err));
     CHECK_MSG(err.find("thru or mute") != std::string::npos && err.find("test.ini:3") != std::string::npos, "%s", err.c_str());

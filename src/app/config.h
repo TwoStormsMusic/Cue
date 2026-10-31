@@ -2,6 +2,7 @@
 
 #include "audio/alsa_backend.h"
 #include "core/engine.h"
+#include "tuner/tuner.h"
 
 #include <cstdint>
 #include <string>
@@ -37,11 +38,53 @@ struct PluginSpec {
     bool bypassModeSet = false;      // false: [switching] bypass_mode decides
     std::string sidechain;           // `sidechain =`: the earlier plug-in whose output feeds its side-chain input
     bool midi = true;                // receives MIDI, if it has a MIDI input
+    // The parameters the app shows for it, by id in the app's order; unset
+    // until they are picked there.
+    std::vector<uint32_t> shown;
+    bool shownSet = false;
+    // Where the routing board draws it, once it has been put somewhere.
+    bool placed = false;
+    double x = 0, y = 0;
+    // Its outputs (channels 1-2, 3-4...): each carries what it plays, with
+    // its own level, width, pan and mute, which every wire leaving it has.
+    std::vector<WireGains> outs = {WireGains{}};
     std::string text, where;         // as written, for messages
 };
 
-// A line of plug-ins in series. The chain's first line is its main line;
-// the others are branches, each taking a copy of an earlier line's signal.
+// A wire of a chain: from one of the outputs of the chain's input or of a
+// block (from.out), to a block (its input or its key) or an output. It
+// carries what that output does to the signal; it has no gains of its own.
+// Blocks are numbered from 0 in the order of the chain's blocks; outputs
+// are the performance's, in its order.
+struct WireSpec {
+    Port from, to;
+    std::string where;
+    bool feedback = false; // heard a block late, so it may close a loop (see Wire)
+    bool jump = false;     // only how the board draws it: out at its source, in at its end, by a letter
+    // ...and where its two letters are, from the ports, in board units: the app's to say (empty: where it puts them).
+    std::vector<double> jumpOut, jumpIn;
+};
+
+// A wire left attached to nothing at one end, where a plug-in was pulled
+// out of it: the board draws it, ready to be plugged into something again,
+// and it carries nothing.
+struct LooseSpec {
+    Port port;        // the end still attached
+    bool from = true; // true: it leaves port, so its loose end wants an input; false: it arrives at port
+    double x = 0, y = 0; // the loose end, in board units
+    bool feedback = false;
+};
+
+// Where the routing board draws a chain's input or one of its outputs,
+// once it has been put somewhere.
+struct BoardPlace {
+    bool placed = false;
+    double x = 0, y = 0;
+};
+
+// A line of plug-ins in series, as an INI config and a version 1 .cue file
+// describe a chain. The chain's first line is its main line; the others are
+// branches, each taking a copy of an earlier line's signal.
 struct LineSpec {
     std::string name;  // empty for the main line
     int parent = -1;   // line it comes off
@@ -60,17 +103,41 @@ struct TapSpec {
 
 struct ChainSpec {
     std::string name;
+    // The engine's number for it while it plays, which stays the same when
+    // chains are added, moved or taken out: the rig numbers the chains it
+    // loads scene by scene, in order, and one added later takes a spare.
+    // -1 until then.
+    int id = -1;
     // The performance input that feeds it: its name, or in1, in2...; empty
     // = the first. finishConfig finds inputIndex.
     std::string input;
     size_t inputIndex = 0;
+    // Its plug-ins, in the order of the engine's slots, and the wires
+    // between them, its input and the performance's outputs.
+    std::vector<PluginSpec> blocks;
+    std::vector<WireSpec> wires;
+    std::vector<LooseSpec> loose; // wires attached at one end only
+    // The outputs of its input, as a block's (see PluginSpec::outs).
+    std::vector<WireGains> inputOuts = {WireGains{}};
+    // Where the board draws its input, and each output (by number).
+    BoardPlace inputAt;
+    std::vector<BoardPlace> outputsAt;
+    // As an INI config or a version 1 .cue file describes it: lines, and
+    // where each output is taken (an output no tap names takes the end of
+    // the main line). finishConfig makes blocks and wires of them, and
+    // leaves both empty.
     std::vector<LineSpec> lines;
-    // As written, the outputs a tap names. finishConfig makes it one per
-    // performance output, in their order; one no tap names is taken at the
-    // end of the main line.
     std::vector<TapSpec> out;
     std::string where;
 };
+
+// The outputs a wire can leave from: the chain input's or a block's;
+// nullptr for a port that has none.
+std::vector<WireGains>* outsOf(ChainSpec& c, const Port& from);
+const std::vector<WireGains>* outsOf(const ChainSpec& c, const Port& from);
+// What a wire leaving from does: its output's gains (as they start, if it
+// has no such output).
+WireGains gainsOf(const ChainSpec& c, const Port& from);
 
 // A preset: which chain plays, and what happens when it is selected.
 struct PresetSpec {
@@ -98,7 +165,7 @@ struct SceneSpec {
 };
 
 // A named value that pedals and MIDI move, and that switches plug-ins on and
-// off, moves their parameters, mutes the outputs and lights LEDs.
+// off, moves their parameters, mutes the inputs and lights LEDs.
 struct ControlSpec {
     enum class Type { Toggle, Discrete, Continuous };
     std::string name;
@@ -139,6 +206,51 @@ struct FcbSpec {
     std::vector<ConfigText> displays;             // text [when condition], first match wins
 };
 
+// The built-in tuner: the input it listens to, and its settings.
+struct TunerSpec {
+    std::string input;     // by name or as in1, in2...; empty = the first
+    size_t inputIndex = 0; // found by finishConfig
+    TunerSettings settings;
+    std::string where;
+};
+
+// Auto, as the Gain Stage does it: what it measures, the level it aims
+// for and how long it listens once it hears something.
+struct AutoSpec {
+    enum class Measure : uint8_t { Peak, Rms, Lufs } measure = Measure::Peak;
+    float targetDb = -12.0f;
+    float seconds = 5.0f;
+    bool operator==(const AutoSpec&) const = default;
+};
+const char* measureName(AutoSpec::Measure m);
+// -1 if it is none of peak, rms, lufs.
+int measureOf(const std::string& name);
+
+// The performance's levels, the same whichever scene plays: an input's
+// gain before every chain (its calibration) and an output's level, mute
+// and limiter after them all. In dB; -100 or less is silence.
+struct InputLevel {
+    float gainDb = 0.0f;
+    AutoSpec autoSpec;
+};
+struct OutputLevel {
+    float levelDb = 0.0f;
+    bool muted = false;
+    bool limiter = false;
+    float ceilingDb = -1.0f;
+    float releaseMs = 100.0f;
+    AutoSpec autoSpec;
+};
+constexpr float kLevelFloorDb = -100.0f, kLevelMaxDb = 60.0f;
+// Auto on a block's outputs (the wires leaving it), the same in every
+// chain: to the target, or matching what the block is fed, so it plays as
+// loud as it was given. From a chain's input it always goes to the target.
+struct WireAuto {
+    AutoSpec spec;
+    bool match = true;
+    bool operator==(const WireAuto&) const = default;
+};
+
 struct MidiSettings {
     bool enabled = true;
     std::string in = "any";    // sequencer port name match for input, or "any"
@@ -163,11 +275,16 @@ struct Config {
     // and outputChannels, in the same order).
     std::vector<std::string> inputs = {"In 1"};
     std::vector<std::string> outputs = {"Out 1", "Out 2"};
+    // One for each input and output, in their order (finishConfig sees to it).
+    std::vector<InputLevel> inputLevels;
+    std::vector<OutputLevel> outputLevels;
+    WireAuto wireAuto;
     std::vector<SceneSpec> scenes;
     std::vector<ControlSpec> controls;
     std::vector<TriggerSpec> triggers;
     std::vector<GroupSpec> groups;
     FcbSpec fcb;
+    TunerSpec tuner;
     std::string path;          // the file that was loaded
     std::vector<std::string> warnings; // things that load but are probably mistakes
 };
@@ -180,14 +297,23 @@ bool parseConfigText(const std::string& text, const std::string& path, Config& c
 // inputs found and outputs tapped, controls completed.
 bool finishConfig(Config& config, std::string* error);
 
-// Every plug-in of a chain, line by line: the order of the engine's slots.
+// A plug-in as a config's plugin line names it: "clap:/path/file.clap#id",
+// "vst3:/path/file.vst3#name" or "builtin:gain 0.5".
+bool pluginFromText(const std::string& text, PluginSpec& spec, std::string* error);
+
+// Every plug-in of a chain: the order of the engine's slots.
 std::vector<const PluginSpec*> chainPlugins(const ChainSpec& chain);
 
-// The side-chain feeds of a chain as (slot, source slot) pairs, given each
-// slot's label. `sidechain = Gate` is the nearest Gate before the plug-in;
-// `Gate:2` is the chain's second Gate, which must come before it.
+// The side-chain feeds a chain's plug-ins name with `sidechain =`, as
+// (slot, source slot) pairs, given each slot's label. `sidechain = Gate` is
+// the nearest Gate before the plug-in; `Gate:2` is the chain's second Gate,
+// which must come before it.
 bool chainSidechains(const ChainSpec& chain, const std::vector<std::string>& labels, std::vector<std::pair<size_t, size_t>>& feeds,
                      std::string* error);
+
+// A chain's wires in short, for messages and tests: "in>0 0>1 1>FOH 0>2:key",
+// blocks by number, outputs by name, then any gains as "(-6dB w50 p-20)".
+std::string wireList(const ChainSpec& chain, const std::vector<std::string>& outputs);
 
 std::string expandPath(std::string path);
 

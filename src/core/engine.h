@@ -1,5 +1,6 @@
 #pragma once
 
+#include "loudness.h"
 #include "ramp.h"
 #include "chain.h"
 #include "spsc_queue.h"
@@ -7,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -25,7 +27,9 @@ struct EngineSettings {
     float tailCapMs = 10000.0f;  // a releasing chain stops after this long whatever its level
     float stopFadeMs = 50.0f;    // fade applied when a releasing chain stops
     float bypassFadeMs = 10.0f;  // crossfade when a plug-in is bypassed or brought back
-    float muteFadeMs = 10.0f;    // fade of the outputs when they are muted (the tuner)
+    float muteFadeMs = 10.0f;    // fade of the inputs when they are muted (the tuner)
+    float editFadeMs = 10.0f;    // a playing chain's wiring changes between a fade out and a fade in
+    float levelFadeMs = 20.0f;   // an input's or output's level (or mute) moves over this long
     // A warm chain's delays and reverbs would hear the old chain's playing.
     // They are fed silence until the switch, so no echoes of notes played
     // before it are heard.
@@ -53,10 +57,22 @@ enum class ChainState : uint8_t {
 const char* toString(ChainState s);
 
 struct EngineCommand {
-    enum class Type : uint8_t { SwitchTo, SetWarm, SetBypass, SetMute } type;
-    int chain = -1;     // SwitchTo, SetWarm (-1 = no warm chain), SetBypass
-    uint32_t slot = 0;  // SetBypass
-    bool on = false;    // SetBypass: bypassed; SetMute: muted
+    enum class Type : uint8_t { SwitchTo, SetWarm, SetBypass, SetMute, Edit, SetWire, SetBypassMode, SetInputLevel, SetOutputLevel, SetLimiter, Measure } type;
+    int chain = -1;     // SwitchTo, SetWarm (-1 = no warm chain), SetBypass, SetBypassMode, Edit, SetWire
+    uint32_t slot = 0;  // SetBypass, SetBypassMode; SetWire: the wire's id; SetInputLevel, SetOutputLevel, SetLimiter: which
+    bool on = false;    // SetBypass: bypassed; SetMute, SetOutputLevel: muted; SetBypassMode: mutes when bypassed; SetLimiter, Measure: on
+    WireGains gains;    // SetWire
+    Chain::Plan* plan = nullptr; // Edit
+    float value = 0.0f, value2 = 0.0f; // SetInputLevel, SetOutputLevel: dB; SetLimiter: ceiling dB, release ms
+};
+
+// About 10 ms of every input as it arrives and every output before its
+// level, for Auto: sums, so a longer stretch is their sum.
+struct LevelBin {
+    static constexpr size_t kMax = 16; // inputs or outputs measured
+    using Channel = Measured;
+    uint32_t frames = 0;
+    Channel in[kMax], out[kMax];
 };
 
 struct EngineEvent {
@@ -97,7 +113,9 @@ public:
     ~Engine();
 
     // Main thread, before audio starts. Takes ownership; returns the index.
-    int addChain(std::unique_ptr<Chain> chain);
+    // A spare chain (empty) waits to be claimed by a chain added while the
+    // engine plays: chains are never added or taken away once it runs.
+    int addChain(std::unique_ptr<Chain> chain, bool spare = false);
     bool activate();
     void deactivate();
     // Main thread, after activate and before audio starts: runs every chain
@@ -106,8 +124,20 @@ public:
     // when the chain is first switched to.
     void prime(float milliseconds);
 
-    size_t numChains() const { return chains_.size(); }
+    // The chains up to the last one in use (spares after it are not counted).
+    size_t numChains() const { return used_; }
+    // Every chain, spares too.
+    size_t capacity() const { return chains_.size(); }
     Chain& chain(size_t i) { return *chains_[i].chain; }
+    // Main thread, once active: a spare chain for a new one, now in use and
+    // fed by input: preferred if it is spare and idle, else the first one
+    // never used, else any idle one. -1 if none is left. It plays silence
+    // until an edit gives it blocks and wires.
+    int claimChain(size_t input, int preferred = -1);
+    // Main thread: a chain an edit has emptied, no longer played or warm,
+    // spare again.
+    void releaseChain(int chain);
+    bool inUse(size_t i) const { return i < spare_.size() && !spare_[i]; }
     const EngineSettings& settings() const { return settings_; }
 
     // Any non-real-time thread.
@@ -119,8 +149,62 @@ public:
     bool setBypass(int chain, size_t slot, bool bypassed) {
         return post({EngineCommand::Type::SetBypass, chain, static_cast<uint32_t>(slot), bypassed});
     }
-    // Silences every output, with a short fade. Chains keep playing.
+    // What a slot passes on while bypassed: its input (thru) or silence
+    // (mute). Heard, the change fades as a bypass does.
+    bool setMuteOnBypass(int chain, size_t slot, bool mute) {
+        return post({EngineCommand::Type::SetBypassMode, chain, static_cast<uint32_t>(slot), mute});
+    }
+    // Silences every input, with a short fade, so delays and reverbs ring
+    // out. A chain that has gone quiet (tailQuietDb for tailHoldMs) then
+    // rests: it is not processed until the inputs come back.
     bool setMute(bool muted) { return post({EngineCommand::Type::SetMute, -1, 0, muted}); }
+    // The performance's levels, the same whichever chain plays. An input's
+    // gain, before every chain (the Gain Stage's calibration), and an
+    // output's level and mute, after every chain is mixed, then its
+    // limiter. -100 dB or less is silence. They move over levelFadeMs;
+    // before the first block, at once.
+    bool setInputLevel(size_t input, float db) {
+        EngineCommand c{EngineCommand::Type::SetInputLevel, -1, static_cast<uint32_t>(input)};
+        c.value = db;
+        return post(c);
+    }
+    bool setOutputLevel(size_t output, float db, bool muted) {
+        EngineCommand c{EngineCommand::Type::SetOutputLevel, -1, static_cast<uint32_t>(output), muted};
+        c.value = db;
+        return post(c);
+    }
+    // No added latency: a peak over the ceiling is turned down at once, and
+    // the gain comes back over about releaseMs.
+    bool setLimiter(size_t output, bool on, float ceilingDb, float releaseMs) {
+        EngineCommand c{EngineCommand::Type::SetLimiter, -1, static_cast<uint32_t>(output), on};
+        c.value = ceilingDb;
+        c.value2 = releaseMs;
+        return post(c);
+    }
+    // Any thread: how far an output's limiter turned it down since last
+    // asked, in dB (0 = not at all). One reader.
+    float takeLimiterDb(size_t output);
+    // While on, the audio thread hands over a LevelBin every 10 ms or so;
+    // one reader takes them, often enough (the queue holds about 10 s).
+    bool measure(bool on) { return post({EngineCommand::Type::Measure, -1, 0, on}); }
+    bool nextLevelBin(LevelBin& bin);
+    // Main thread, once active: changes a chain's blocks and wires while it
+    // plays (see ChainEdit). Added processors are primed here, as prime()
+    // does; the audio thread swaps the change in with a short fade. False,
+    // with why, if it cannot be done (a loop, say), and then nothing changes.
+    bool edit(int chain, ChainEdit edit, std::string* error);
+    // The same in two steps, so the slow part can be done first.
+    struct PreparedEdit {
+        int chain = -1;
+        Chain::PlanPtr plan;
+    };
+    bool prepareEdit(int chain, ChainEdit& edit, PreparedEdit& out, std::string* error);
+    bool applyEdit(PreparedEdit& edit, std::string* error);
+    // Main thread: a wire's gains, moved to over bypassFadeMs. False if no
+    // wire joins the two ports.
+    bool setWire(int chain, Port from, Port to, WireGains gains);
+    // Main thread, often: frees what edits replaced.
+    void collect();
     // One reader thread drains events.
     bool nextEvent(EngineEvent& ev);
     ChainStats& stats(size_t i) { return *chains_[i].stats; }
@@ -144,6 +228,7 @@ public:
     int warmChain() const { return warm_; }
     bool muted() const { return muted_; }
     ChainState state(size_t i) const { return chains_[i].state; }
+    bool resting(size_t i) const { return chains_[i].resting; }
 
 private:
     // An idle chain's plug-ins: rung out to silence or reset (clean), or
@@ -161,10 +246,17 @@ private:
         uint64_t releaseFrames = 0;
         uint64_t quietFrames = 0;
         bool quietEnd = false; // its tail died away rather than being capped
+        // While the inputs are muted: quiet for this long, and so not processed.
+        uint64_t mutedQuietFrames = 0;
+        bool resting = false;
+        // A change to its wiring waits for its output to fade out.
+        bool editing = false;
+        Ramp editGain{1.0f};
         // Its own buffers, so chains can be processed on several threads at once.
         std::vector<float> buffers;
         float* in = nullptr;
         float* gain = nullptr;
+        float* editScratch = nullptr;
         std::vector<float*> outs;
         bool ran = false;        // processed in this block
         bool background = false; // ...without being heard, so the block does not wait for it
@@ -175,6 +267,9 @@ private:
 
     uint32_t ms(float milliseconds) const;
     void handle(const EngineCommand& cmd);
+    void applyPlans();
+    void retire(Chain::Plan* plan);
+    void primeProcessors(const std::vector<Processor*>& processors, float milliseconds);
     void requestSwitch(int target);
     void commit(int target);
     void setWarmTarget(int target);
@@ -190,12 +285,19 @@ private:
     void takeJobs(uint32_t generation, uint32_t limit);
     void runChain(int index, bool helper);
     void recordStats(Slot& s);
+    void restWhenQuiet(Slot& s, uint32_t frames, float peak);
     void workerLoop();
     void stopWorkers();
+    void applyOutputLevels(float* const* outs, uint32_t frames);
+    void measureBin(const float* const* ins, const float* const* outs, uint32_t frames);
 
     EngineSettings settings_;
     std::vector<Slot> chains_;
     bool activated_ = false;
+    // Main thread: which chains are spare, which of them were never used,
+    // and how many there are up to the last one in use.
+    std::vector<bool> spare_, fresh_;
+    size_t used_ = 0;
 
     int active_ = -1;
     int pending_ = -1;
@@ -231,13 +333,36 @@ private:
     CommandQueue<BlockReport, 8> reports_;
 
     CommandQueue<EngineCommand, 256> commands_;
+    // Plans the audio thread is done with, for the main thread to free.
+    CommandQueue<Chain::Plan*, 256> retired_;
     CommandQueue<EngineEvent, 1024> events_;
 
-    // Scratch buffer, sized in activate().
-    std::vector<float> gainScratch_;
+    // Scratch buffers, sized in activate().
+    std::vector<float> gainScratch_, levelScratch_;
     uint32_t idleFlushCounter_ = 0;
     bool muted_ = false;
-    Ramp outputGain_{1.0f};
+    Ramp inputGain_{1.0f};
+    bool started_ = false; // the first block has been processed
+
+    // The performance's levels: linear, an output's 0 while muted.
+    std::vector<Ramp> inLevel_, outLevel_;
+    struct Limiter {
+        bool on = false;
+        float ceiling = 1.0f;
+        float release = 0.0f; // the gain's coefficient back towards 1, per sample
+        float gain = 1.0f;
+        float releaseMs = 100.0f;
+    };
+    std::vector<Limiter> limiters_;
+    std::unique_ptr<std::atomic<float>[]> limiterLow_; // the lowest gain since last taken
+
+    // Auto's measuring.
+    bool measuring_ = false;
+    LevelBin bin_;
+    uint32_t binLength_ = 480;
+    KWeighting kWeighting_;
+    std::vector<double> kState_; // per input then output: 2 states for each of the 2 filters
+    RingQueue<LevelBin, 1024> bins_;
 };
 
 } // namespace cue

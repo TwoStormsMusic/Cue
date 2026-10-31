@@ -356,6 +356,33 @@ do = Mix = down 0.5
     CHECK(!out.params.empty() && std::get<2>(out.params.back()) == 2 && std::fabs(std::get<3>(out.params.back()) - 100.0) < 1e-9);
 }
 
+TEST(show_says_what_moves_a_plugins_parameters) {
+    Recorder out;
+    Show show(out);
+    Config c;
+    std::string err;
+    const std::string text = R"(
+[chain A]
+plugin = builtin:gain 1
+name = Delay
+plugin = builtin:gain 1
+name = Other
+[control Mix]
+type = continuous
+follows = expression 1
+drive = Delay param 2 from 0 to 100
+[trigger Kill]
+on = pedal 3
+do = param Delay 5 = 0
+)";
+    CHECK_MSG(loadShow(show, text, c, err), "%s", err.c_str());
+    const auto ties = show.ties(0, 0);
+    CHECK(ties.size() == 2);
+    CHECK(ties[0].param == 2 && ties[0].control == "Mix" && ties[0].follows == "expression 1");
+    CHECK(ties[1].param == 5 && ties[1].trigger == "Kill" && ties[1].control.empty());
+    CHECK(show.ties(0, 1).empty());
+}
+
 TEST(show_expression_pedal_follows_and_reaches_midi_plugins) {
     Recorder out;
     Show show(out);

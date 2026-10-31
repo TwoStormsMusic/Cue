@@ -48,17 +48,69 @@ const char* toString(ChainState s) {
     return "?";
 }
 
-Engine::Engine(EngineSettings settings) : settings_(settings) {}
+namespace {
+
+float dbToGain(float db) { return db <= -100.0f ? 0.0f : std::pow(10.0f, db / 20.0f); }
+
+} // namespace
+
+Engine::Engine(EngineSettings settings)
+    : settings_(settings), inLevel_(std::max<size_t>(settings.numInputs, 1), Ramp(1.0f)), outLevel_(settings.numOutputs, Ramp(1.0f)),
+      limiters_(settings.numOutputs), limiterLow_(new std::atomic<float>[std::max<size_t>(settings.numOutputs, 1)]),
+      kWeighting_(settings.sampleRate), kState_(4 * (std::max<size_t>(settings.numInputs, 1) + settings.numOutputs), 0.0) {
+    for (size_t o = 0; o < settings_.numOutputs; ++o)
+        limiterLow_[o].store(1.0f, std::memory_order_relaxed);
+    binLength_ = std::max<uint32_t>(1, static_cast<uint32_t>(settings_.sampleRate * 0.01 + 0.5));
+}
 
 Engine::~Engine() { deactivate(); }
 
-int Engine::addChain(std::unique_ptr<Chain> chain) {
+int Engine::addChain(std::unique_ptr<Chain> chain, bool spare) {
     Slot slot;
     slot.chain = std::move(chain);
     slot.stats = std::make_unique<ChainStats>();
     slot.clean = std::make_unique<std::atomic<uint8_t>>(kClean);
     chains_.push_back(std::move(slot));
+    spare_.push_back(spare);
+    fresh_.push_back(spare);
+    if (!spare)
+        used_ = chains_.size();
     return static_cast<int>(chains_.size()) - 1;
+}
+
+int Engine::claimChain(size_t input, int preferred) {
+    if (!activated_ || input >= std::max<size_t>(settings_.numInputs, 1))
+        return -1;
+    // A chain whose tail is still ringing out is processed, input and all:
+    // not yet, unless it keeps its input.
+    auto idle = [&](size_t i) { return spare_[i] && static_cast<ChainState>(chains_[i].stats->state.load()) == ChainState::Idle; };
+    int chosen = -1;
+    if (preferred >= 0 && static_cast<size_t>(preferred) < chains_.size() && spare_[preferred] &&
+        (idle(preferred) || chains_[preferred].chain->input() == input))
+        chosen = preferred;
+    for (size_t i = 0; i < chains_.size() && chosen < 0; ++i)
+        if (fresh_[i])
+            chosen = static_cast<int>(i);
+    for (size_t i = 0; i < chains_.size() && chosen < 0; ++i)
+        if (idle(i))
+            chosen = static_cast<int>(i);
+    if (chosen < 0)
+        return -1;
+    // Idle, so the audio thread does not read its input until a switch,
+    // which comes through the command queue after this.
+    if (chains_[chosen].chain->input() != input)
+        chains_[chosen].chain->setInput(input);
+    spare_[chosen] = fresh_[chosen] = false;
+    used_ = std::max(used_, static_cast<size_t>(chosen) + 1);
+    return chosen;
+}
+
+void Engine::releaseChain(int chain) {
+    if (chain < 0 || static_cast<size_t>(chain) >= chains_.size())
+        return;
+    spare_[chain] = true;
+    while (used_ > 0 && spare_[used_ - 1])
+        --used_;
 }
 
 bool Engine::activate() {
@@ -73,13 +125,15 @@ bool Engine::activate() {
         }
     }
     gainScratch_.assign(maxFrames, 0.0f);
+    levelScratch_.assign(maxFrames, 0.0f);
     for (auto& s : chains_) {
-        s.buffers.assign((2 + settings_.numOutputs) * static_cast<size_t>(maxFrames), 0.0f);
+        s.buffers.assign((3 + settings_.numOutputs) * static_cast<size_t>(maxFrames), 0.0f);
         s.in = s.buffers.data();
         s.gain = s.in + maxFrames;
+        s.editScratch = s.gain + maxFrames;
         s.outs.resize(settings_.numOutputs);
         for (size_t o = 0; o < settings_.numOutputs; ++o)
-            s.outs[o] = s.gain + (1 + o) * static_cast<size_t>(maxFrames);
+            s.outs[o] = s.editScratch + (1 + o) * static_cast<size_t>(maxFrames);
     }
     jobs_.assign(chains_.size(), -1);
     const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
@@ -179,6 +233,20 @@ void Engine::resetLoop() {
 }
 
 void Engine::prime(float milliseconds) {
+    // Every plug-in, bypassed ones too: they may be switched on mid-song.
+    std::vector<Processor*> all;
+    for (auto& s : chains_) {
+        if (s.state != ChainState::Idle)
+            continue;
+        for (size_t i = 0; i < s.chain->numSlots(); ++i)
+            all.push_back(&s.chain->slot(i));
+    }
+    primeProcessors(all, milliseconds);
+}
+
+void Engine::primeProcessors(const std::vector<Processor*>& processors, float milliseconds) {
+    if (processors.empty())
+        return;
     std::thread([&] {
         markAudioThread();
         const uint32_t frames = settings_.maxFrames;
@@ -196,26 +264,88 @@ void Engine::prime(float milliseconds) {
         }
         const float* noise[kChainChannels] = {noiseStore, noiseStore + frames};
         const size_t blocks = std::max<uint32_t>(1, ms(milliseconds) / frames);
-        // Every plug-in, bypassed ones too: they may be switched on mid-song.
-        for (auto& s : chains_) {
-            if (s.state != ChainState::Idle)
-                continue;
-            for (size_t i = 0; i < s.chain->numSlots(); ++i) {
-                Processor& p = s.chain->slot(i);
-                p.startProcessing();
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(silence, scratch, frames);
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(noise, scratch, frames);
-                // Clear what the noise left, then let anything a reset
-                // misses die away on silence.
-                p.reset();
-                for (size_t b = 0; b < blocks; ++b)
-                    p.process(silence, scratch, frames);
-                p.stopProcessing();
-            }
+        for (Processor* p : processors) {
+            p->startProcessing();
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(silence, scratch, frames);
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(noise, scratch, frames);
+            // Clear what the noise left, then let anything a reset
+            // misses die away on silence.
+            p->reset();
+            for (size_t b = 0; b < blocks; ++b)
+                p->process(silence, scratch, frames);
+            p->stopProcessing();
         }
     }).join();
+}
+
+bool Engine::prepareEdit(int chain, ChainEdit& edit, PreparedEdit& out, std::string* error) {
+    if (chain < 0 || chain >= static_cast<int>(chains_.size())) {
+        *error = "there is no chain number " + std::to_string(chain + 1);
+        return false;
+    }
+    if (!activated_) {
+        *error = "the engine is not running";
+        return false;
+    }
+    Chain::PlanPtr plan = chains_[chain].chain->prepare(edit, error);
+    if (!plan)
+        return false;
+    primeProcessors(Chain::added(*plan), 100.0f);
+    out.chain = chain;
+    out.plan = std::move(plan);
+    return true;
+}
+
+bool Engine::applyEdit(PreparedEdit& edit, std::string* error) {
+    if (!edit.plan || edit.chain < 0 || edit.chain >= static_cast<int>(chains_.size())) {
+        *error = "nothing to change";
+        return false;
+    }
+    Chain::Plan* plan = edit.plan.get();
+    EngineCommand cmd{EngineCommand::Type::Edit, edit.chain};
+    cmd.plan = plan;
+    bool posted = post(cmd);
+    for (int tries = 0; !posted && tries < 500; ++tries) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        posted = post(cmd);
+    }
+    if (!posted) {
+        *error = "the engine is not taking changes";
+        return false;
+    }
+    // The audio thread has it now; it only reads what commit copies.
+    edit.plan.release();
+    chains_[edit.chain].chain->commit(*plan);
+    return true;
+}
+
+bool Engine::edit(int chain, ChainEdit edit, std::string* error) {
+    PreparedEdit prepared;
+    return prepareEdit(chain, edit, prepared, error) && applyEdit(prepared, error);
+}
+
+bool Engine::setWire(int chain, Port from, Port to, WireGains gains) {
+    if (chain < 0 || chain >= static_cast<int>(chains_.size()))
+        return false;
+    const uint32_t id = chains_[chain].chain->setGains(from, to, gains);
+    if (id == 0)
+        return false;
+    if (activated_)
+        post({EngineCommand::Type::SetWire, chain, id, false, gains});
+    return true;
+}
+
+void Engine::collect() {
+    while (auto plan = retired_.pop())
+        Chain::PlanDeleter()(*plan);
+}
+
+// The audio thread never frees: what it is done with goes to the main thread.
+void Engine::retire(Chain::Plan* plan) {
+    if (plan)
+        retired_.push(plan); // with 256 waiting the main thread has stopped collecting, and this one is never freed
 }
 
 void Engine::deactivate() {
@@ -225,6 +355,7 @@ void Engine::deactivate() {
     stopResetter_ = true;
     if (resetter_.joinable())
         resetter_.join();
+    collect();
     for (size_t i = 0; i < chains_.size(); ++i) {
         if (chains_[i].state != ChainState::Idle)
             chains_[i].chain->stopProcessing();
@@ -261,6 +392,9 @@ void Engine::emit(EngineEvent::Type type, int chain) {
 
 void Engine::setState(int index, ChainState state) {
     chains_[index].state = state;
+    // A chain that changes state is processed again, until it goes quiet anew.
+    chains_[index].resting = false;
+    chains_[index].mutedQuietFrames = 0;
     chains_[index].stats->state.store(static_cast<uint8_t>(state), std::memory_order_relaxed);
 }
 
@@ -287,6 +421,9 @@ void Engine::stopChain(int index, bool rangOut) {
     s.chain->stopProcessing();
     s.inGain.set(0.0f);
     s.outGain.set(0.0f);
+    // A change waiting on its fade is swapped in at once, now that it is idle.
+    s.editing = false;
+    s.editGain.set(1.0f);
     setState(index, ChainState::Idle);
     s.clean->store(rangOut && s.chain->settled() ? kClean : kDirty);
     emit(EngineEvent::Type::ChainIdle, index);
@@ -303,10 +440,73 @@ void Engine::handle(const EngineCommand& cmd) {
             s.chain->setBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
         }
         break;
+    case EngineCommand::Type::SetBypassMode:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
+            Slot& s = chains_[cmd.chain];
+            const bool idle = s.state == ChainState::Idle;
+            s.chain->changeMuteOnBypass(cmd.slot, cmd.on, idle ? 0 : ms(settings_.bypassFadeMs), idle);
+        }
+        break;
+    case EngineCommand::Type::Edit:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size())) {
+            Slot& s = chains_[cmd.chain];
+            retire(s.chain->receive(cmd.plan));
+            if (s.editing)
+                s.chain->prepareSwap(ms(settings_.editFadeMs));
+        } else {
+            retire(cmd.plan);
+        }
+        break;
+    case EngineCommand::Type::SetWire:
+        if (cmd.chain >= 0 && cmd.chain < static_cast<int>(chains_.size()))
+            chains_[cmd.chain].chain->setWireGains(cmd.slot, cmd.gains, ms(settings_.bypassFadeMs));
+        break;
+    case EngineCommand::Type::SetInputLevel:
+        if (cmd.slot < inLevel_.size()) {
+            Ramp& r = inLevel_[cmd.slot];
+            const float to = dbToGain(cmd.value);
+            if (started_)
+                r.dbTo(to, ms(settings_.levelFadeMs));
+            else
+                r.set(to);
+        }
+        break;
+    case EngineCommand::Type::SetOutputLevel:
+        if (cmd.slot < outLevel_.size()) {
+            Ramp& r = outLevel_[cmd.slot];
+            const float to = cmd.on ? 0.0f : dbToGain(cmd.value);
+            if (started_)
+                r.dbTo(to, ms(settings_.levelFadeMs));
+            else
+                r.set(to);
+        }
+        break;
+    case EngineCommand::Type::SetLimiter:
+        if (cmd.slot < limiters_.size()) {
+            Limiter& l = limiters_[cmd.slot];
+            l.on = cmd.on;
+            l.ceiling = std::min(1.0f, dbToGain(std::max(cmd.value, -60.0f)));
+            l.releaseMs = std::clamp(cmd.value2, 1.0f, 5000.0f);
+            // About -60 dB of the way back in releaseMs.
+            l.release = std::exp(-6.9f / std::max(1.0f, l.releaseMs * 0.001f * static_cast<float>(settings_.sampleRate)));
+        }
+        break;
+    case EngineCommand::Type::Measure:
+        if (cmd.on != measuring_) {
+            measuring_ = cmd.on;
+            bin_ = LevelBin{};
+            std::fill(kState_.begin(), kState_.end(), 0.0);
+        }
+        break;
     case EngineCommand::Type::SetMute:
         if (cmd.on != muted_) {
             muted_ = cmd.on;
-            outputGain_.linearTo(muted_ ? 0.0f : 1.0f, ms(settings_.muteFadeMs));
+            inputGain_.linearTo(muted_ ? 0.0f : 1.0f, ms(settings_.muteFadeMs));
+            if (!muted_)
+                for (auto& s : chains_) {
+                    s.resting = false;
+                    s.mutedQuietFrames = 0;
+                }
         }
         break;
     }
@@ -460,6 +660,42 @@ void Engine::advance(int index, uint32_t frames, float peak) {
     }
 }
 
+// Changes to chains' wiring. An idle chain takes one at once (unless the
+// reset helper has it); a playing one fades its output out, swaps and fades
+// back in.
+void Engine::applyPlans() {
+    const uint32_t fade = ms(settings_.editFadeMs);
+    for (auto& s : chains_) {
+        if (!s.chain->hasPending())
+            continue;
+        if (s.state == ChainState::Idle) {
+            uint8_t c = s.clean->load();
+            if ((c != kClean && c != kDirty) || !s.clean->compare_exchange_strong(c, kInUse))
+                continue;
+            bool stale = c == kDirty;
+            retire(s.chain->swap(false, 0, &stale));
+            s.clean->store(stale ? kDirty : kClean);
+            continue;
+        }
+        if (s.resting) {
+            retire(s.chain->swap(true, fade));
+            s.editing = false;
+            s.editGain.set(1.0f);
+            continue;
+        }
+        if (!s.editing) {
+            s.editing = true;
+            s.editGain.linearTo(0.0f, fade);
+            s.chain->prepareSwap(fade);
+        }
+        if (s.editGain.done() && s.editGain.value() == 0.0f) {
+            retire(s.chain->swap(true, fade));
+            s.editing = false;
+            s.editGain.linearTo(1.0f, fade);
+        }
+    }
+}
+
 void Engine::process(const float* in, float* const* outs, uint32_t frames) {
     oneInput_[0] = in;
     process(oneInput_.data(), outs, frames);
@@ -480,6 +716,7 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
         warm_ = -1;
         setWarmTarget(target);
     }
+    applyPlans();
 
     for (size_t o = 0; o < settings_.numOutputs; ++o)
         std::memset(outs[o], 0, frames * sizeof(float));
@@ -499,20 +736,20 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
     for (auto& s : chains_)
         s.ran = s.background = false;
     size_t heard = 0, unheard = 0;
-    if (active_ >= 0) {
+    if (active_ >= 0 && !chains_[active_].resting) {
         jobs_[heard++] = active_;
         chains_[active_].ran = true;
     }
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
-        if (s.state != ChainState::Idle && static_cast<int>(i) != active_ && !background(s)) {
+        if (s.state != ChainState::Idle && !s.resting && static_cast<int>(i) != active_ && !background(s)) {
             jobs_[heard++] = static_cast<int>(i);
             s.ran = true;
         }
     }
     for (size_t i = 0; i < chains_.size(); ++i) {
         Slot& s = chains_[i];
-        if (s.state != ChainState::Idle && !s.ran) {
+        if (s.state != ChainState::Idle && !s.resting && !s.ran) {
             jobs_[heard + unheard++] = static_cast<int>(i);
             s.ran = s.background = true;
         }
@@ -556,14 +793,12 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
 
         recordStats(s);
         advance(static_cast<int>(i), frames, peak);
+        restWhenQuiet(s, frames, peak);
     }
-
-    if (!outputGain_.done() || outputGain_.value() != 1.0f) {
-        outputGain_.render(gainScratch_.data(), frames);
-        for (size_t o = 0; o < settings_.numOutputs; ++o)
-            for (uint32_t n = 0; n < frames; ++n)
-                outs[o][n] *= gainScratch_[n];
-    }
+    if (measuring_)
+        measureBin(ins, outs, frames);
+    applyOutputLevels(outs, frames);
+    started_ = true;
 
     block.ns = nsSince(blockStart);
     if (block.ns > slowest_.ns) {
@@ -585,8 +820,35 @@ void Engine::process(const float* const* ins, float* const* outs, uint32_t frame
 void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, size_t background, bool flushIdle) {
     // A copy of the inputs: background chains may read them after process()
     // has returned and the caller has reused its buffers.
-    for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i)
-        std::memcpy(jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames), ins[i], frames * sizeof(float));
+    // Muted, they hear silence (with a fade), so tails ring out.
+    // Each with its level (its calibration) too.
+    const bool inputsLive = inputGain_.done() && inputGain_.value() == 1.0f;
+    if (!inputsLive)
+        inputGain_.render(gainScratch_.data(), frames);
+    for (size_t i = 0; i < std::max<size_t>(settings_.numInputs, 1); ++i) {
+        float* dst = jobIn_.data() + i * static_cast<size_t>(settings_.maxFrames);
+        Ramp& level = inLevel_[i];
+        const bool steady = level.done();
+        const float g = level.value();
+        if (inputsLive && steady && g == 1.0f) {
+            std::memcpy(dst, ins[i], frames * sizeof(float));
+        } else if (inputsLive && steady) {
+            for (uint32_t n = 0; n < frames; ++n)
+                dst[n] = ins[i][n] * g;
+        } else if (steady) {
+            for (uint32_t n = 0; n < frames; ++n)
+                dst[n] = ins[i][n] * gainScratch_[n] * g;
+        } else {
+            level.render(levelScratch_.data(), frames);
+            if (inputsLive) {
+                for (uint32_t n = 0; n < frames; ++n)
+                    dst[n] = ins[i][n] * levelScratch_[n];
+            } else {
+                for (uint32_t n = 0; n < frames; ++n)
+                    dst[n] = ins[i][n] * gainScratch_[n] * levelScratch_[n];
+            }
+        }
+    }
     jobFrames_ = frames;
     heardJobs_ = heard;
     backgroundJobs_ = background;
@@ -608,13 +870,17 @@ void Engine::runChains(const float* const* ins, uint32_t frames, size_t heard, s
             runChain(jobs_[k], false);
     }
 
-    // Idle chains are nobody's job: the audio thread sees to them while
-    // the helpers finish.
+    // Idle and resting chains are nobody's job: the audio thread sees to
+    // them while the helpers finish.
     if (flushIdle) {
         for (auto& s : chains_) {
             // Not while the reset helper has it.
-            if (s.state == ChainState::Idle && s.clean->load() == kClean)
+            if ((s.state == ChainState::Idle && s.clean->load() == kClean) || s.resting)
                 s.chain->flushIdle();
+            // A playing chain's blocks that nothing reaches: a helper may be
+            // processing the chain, but never these.
+            else if (s.state != ChainState::Idle)
+                s.chain->flushUnplayed();
         }
     }
 
@@ -639,8 +905,22 @@ void Engine::finishBackground() {
         s.backgroundNs = s.blockNs;
         recordStats(s);
         advance(jobs_[k], jobFrames_, 0.0f); // pre-roll and warm need no peak
+        restWhenQuiet(s, jobFrames_, 0.0f); // nobody hears a warm chain's tail
     }
     backgroundJobs_ = 0;
+}
+
+// While the inputs are muted, the chain played and the warm one stop being
+// processed once they have been quiet for a while. A chain on its way in or
+// out (pre-roll, releasing) goes on: it has somewhere to get to.
+void Engine::restWhenQuiet(Slot& s, uint32_t frames, float peak) {
+    const bool inputsSilent = muted_ && inputGain_.done() && inputGain_.value() == 0.0f;
+    if (!inputsSilent || (s.state != ChainState::Active && s.state != ChainState::Warm))
+        return;
+    const float threshold = std::pow(10.0f, settings_.tailQuietDb / 20.0f);
+    s.mutedQuietFrames = peak < threshold ? s.mutedQuietFrames + frames : 0;
+    if (s.mutedQuietFrames >= ms(settings_.tailHoldMs))
+        s.resting = true;
 }
 
 void Engine::recordStats(Slot& s) {
@@ -665,8 +945,87 @@ void Engine::runChain(int index, bool helper) {
             s.in[n] = in[n] * s.gain[n];
     }
     s.chain->process(s.in, s.outs.data(), frames);
+    if (!s.editGain.done() || s.editGain.value() != 1.0f) {
+        s.editGain.render(s.editScratch, frames);
+        for (float* out : s.outs)
+            for (uint32_t n = 0; n < frames; ++n)
+                out[n] *= s.editScratch[n];
+    }
     s.helper = helper;
     s.blockNs = nsSince(t0);
+}
+
+// Each output's level, then its limiter.
+void Engine::applyOutputLevels(float* const* outs, uint32_t frames) {
+    for (size_t o = 0; o < settings_.numOutputs; ++o) {
+        float* x = outs[o];
+        Ramp& level = outLevel_[o];
+        if (!level.done()) {
+            level.render(levelScratch_.data(), frames);
+            for (uint32_t n = 0; n < frames; ++n)
+                x[n] *= levelScratch_[n];
+        } else if (level.value() != 1.0f) {
+            const float g = level.value();
+            for (uint32_t n = 0; n < frames; ++n)
+                x[n] *= g;
+        }
+        Limiter& l = limiters_[o];
+        if (!l.on && l.gain == 1.0f)
+            continue;
+        float g = l.gain, low = 1.0f;
+        if (l.on) {
+            for (uint32_t n = 0; n < frames; ++n) {
+                const float a = std::fabs(x[n]);
+                const float want = a > l.ceiling ? l.ceiling / a : 1.0f;
+                g = want < g ? want : want + (g - want) * l.release;
+                x[n] *= g;
+                low = std::min(low, g);
+            }
+        } else {
+            // Turned off while it was turning down: back to 1 as it would release.
+            for (uint32_t n = 0; n < frames; ++n) {
+                g = 1.0f + (g - 1.0f) * l.release;
+                x[n] *= g;
+            }
+            if (g > 0.9999f)
+                g = 1.0f;
+        }
+        l.gain = g;
+        if (low < limiterLow_[o].load(std::memory_order_relaxed))
+            limiterLow_[o].store(low, std::memory_order_relaxed);
+    }
+}
+
+float Engine::takeLimiterDb(size_t output) {
+    if (output >= settings_.numOutputs)
+        return 0.0f;
+    const float low = limiterLow_[output].exchange(1.0f, std::memory_order_relaxed);
+    return low >= 1.0f ? 0.0f : 20.0f * std::log10(std::max(low, 1e-6f));
+}
+
+// Adds this block to the bin: the inputs as they arrive, the outputs before
+// their levels. A full bin goes to the reader.
+void Engine::measureBin(const float* const* ins, const float* const* outs, uint32_t frames) {
+    const size_t numIn = std::min(settings_.numInputs, LevelBin::kMax);
+    const size_t numOut = std::min(settings_.numOutputs, LevelBin::kMax);
+    const size_t inputs = std::max<size_t>(settings_.numInputs, 1);
+    for (size_t i = 0; i < numIn; ++i)
+        bin_.in[i].add(kWeighting_, ins[i], frames, &kState_[4 * i]);
+    for (size_t o = 0; o < numOut; ++o)
+        bin_.out[o].add(kWeighting_, outs[o], frames, &kState_[4 * (inputs + o)]);
+    bin_.frames += frames;
+    if (bin_.frames >= binLength_) {
+        bins_.push(bin_); // dropped if nobody reads
+        bin_ = LevelBin{};
+    }
+}
+
+bool Engine::nextLevelBin(LevelBin& bin) {
+    auto b = bins_.pop();
+    if (!b)
+        return false;
+    bin = *b;
+    return true;
 }
 
 } // namespace cue

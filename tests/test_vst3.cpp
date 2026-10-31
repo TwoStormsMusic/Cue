@@ -124,6 +124,11 @@ TEST(vst3_param_change_reaches_the_processor) {
     run(e, 0.25f, 10, &out);
     CHECK_MSG(std::fabs(out.back() - 0.25f) < 1e-5f, "output %.5f", out.back());
     v->pumpMainThread(); // controller follows
+    double value = 1;
+    CHECK(v->paramValue(0, value));
+    CHECK(value == 0.0);
+    CHECK(v->paramText(0, 0.25) == "25 %");
+    CHECK(!v->paramFromText(0, "25 %", value)); // this one cannot read text: the app's number is used
 }
 
 TEST(vst3_state_round_trips) {

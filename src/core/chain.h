@@ -1,7 +1,9 @@
 #pragma once
 
+#include "loudness.h"
 #include "processor.h"
 #include "ramp.h"
+#include "spsc_queue.h"
 
 #include <atomic>
 #include <cstdint>
@@ -14,9 +16,62 @@ namespace cue {
 // How a stereo chain signal becomes one mono output channel.
 enum class OutputMix { Left, Right, Sum };
 
-// Processors in series. Line 0 is fed by the chain's input. Any other line is
-// a branch: it takes a copy of an earlier line's signal at one point, so
-// "the IR loader only on the FOH output" is a branch holding the IR loader.
+// One end of a wire: the chain's input, a block, or one of the chain's
+// outputs. A wire leaves a block from one of its outputs and arrives at its
+// input, or at its side-chain input (its key). A block's outputs (and the
+// chain input's) all carry what it plays; each has its own gains, which
+// every wire leaving it has.
+struct Port {
+    enum class Kind : uint8_t { Input, Block, Output };
+    Kind kind = Kind::Input;
+    int index = 0;    // the block's slot, or the output's number
+    bool key = false; // a block's side-chain input
+    uint8_t out = 0;  // where a wire leaves: which of the block's (or the input's) outputs
+
+    static Port input(int out = 0) { return {Kind::Input, 0, false, static_cast<uint8_t>(out)}; }
+    static Port block(int slot, bool key = false) { return {Kind::Block, slot, key}; }
+    static Port blockOut(int slot, int out) { return {Kind::Block, slot, false, static_cast<uint8_t>(out)}; }
+    static Port output(int o) { return {Kind::Output, o, false}; }
+    bool operator==(const Port& o) const { return kind == o.kind && index == o.index && key == o.key && out == o.out; }
+    bool operator!=(const Port& o) const { return !(*this == o); }
+    // The same block (or input, or output), whichever of its ends.
+    bool same(const Port& o) const { return kind == o.kind && (kind == Kind::Input || index == o.index); }
+};
+
+// The most outputs a block (or a chain's input) has: channels 1-2 to 15-16.
+constexpr int kMaxOuts = 8;
+
+// At this level or below a wire passes nothing.
+constexpr float kWireOffDb = -96.0f;
+
+// What a wire does to the stereo signal it carries, in signal order: its
+// level, its width (0 = mono, 1 = as it is, 2 = twice as wide), then a
+// balance that turns one side down (-1 = the left only, 1 = the right only).
+// A muted wire passes nothing and keeps its level for when it is not.
+struct WireGains {
+    float levelDb = 0.0f;
+    float width = 1.0f;
+    float pan = 0.0f;
+    bool muted = false;
+    bool neutral() const { return levelDb == 0.0f && width == 1.0f && pan == 0.0f && !muted; }
+};
+
+// A feedback wire is heard one block late: what its plug-in played in the
+// last block (1.3 ms at 64 frames, 48 kHz), so it may bring a plug-in's
+// signal back to it. It is held to kFeedbackLimit, so it cannot run away.
+constexpr float kFeedbackLimit = 2.0f; // +6 dBFS
+
+struct Wire {
+    Port from, to;
+    WireGains gains;
+    uint32_t id = 0; // given by the chain: the same wire keeps it through edits
+    bool feedback = false;
+};
+
+// Processors in series, the way chains were first described. Line 0 is fed
+// by the chain's input; any other line is a branch, taking a copy of an
+// earlier line's signal at one point. A chain made of lines becomes blocks
+// (line 0's first, then each branch's) and the wires between them.
 struct Line {
     int parent = -1;       // the line this branch comes off; -1 for line 0
     size_t afterSlots = 0; // the branch starts after this many of the parent's slots
@@ -31,55 +86,109 @@ struct OutputTap {
     OutputMix mix = OutputMix::Sum;
 };
 
-// One chain: lines of processors fed by one mono input, with one tap per
-// engine output. The engine switches between chains; only one is heard at a
-// time, and idle chains are not processed.
+// A change to a running chain's blocks and wires (see Engine::edit).
+struct ChainEdit {
+    struct Added {
+        std::unique_ptr<Processor> processor; // activated, its state loaded
+        bool bypassed = false;
+        bool muteOnBypass = false;
+    };
+    // The chain's slots after the edit, in order: for each, the slot it is
+    // now, or -1 for the next of added.
+    std::vector<int> slots;
+    std::vector<Added> added;
+    std::vector<Wire> wires; // numbered as the slots are after the edit
+};
+
+// One chain: blocks (processors) joined by wires, fed by one mono input,
+// feeding one mono signal to each engine output. Wires split and merge: a
+// block's output feeds any number of wires, and the wires arriving at one
+// input are summed. Blocks that no signal reaches, or whose signal reaches
+// no output, are not processed. The engine switches between chains; only
+// one is heard at a time, and idle chains are not processed.
+//
+// The chain can change while it plays. The main thread prepares a plan (the
+// blocks in processing order and the wires between them) and the engine
+// hands it to the audio thread, which swaps it in with a short fade.
 class Chain {
 public:
+    struct Plan;
+    struct PlanDeleter {
+        void operator()(Plan* plan) const;
+    };
+    using PlanPtr = std::unique_ptr<Plan, PlanDeleter>;
+
+    // An empty chain: no blocks and no wires, so it plays silence.
+    Chain(std::string name, size_t numOutputs, OutputMix mix = OutputMix::Sum);
     Chain(std::string name, std::vector<Line> lines, std::vector<OutputTap> taps);
     // A chain that is a single line.
     Chain(std::string name, std::vector<std::unique_ptr<Processor>> slots, std::vector<OutputTap> taps);
+    ~Chain();
 
     const std::string& name() const { return name_; }
-    size_t numOutputs() const { return taps_.size(); }
+    size_t numOutputs() const { return mix_.size(); }
     // Before activation: which of the engine's inputs feeds the chain.
     void setInput(size_t input) { input_ = input; }
     size_t input() const { return input_; }
-    size_t numLines() const { return lines_.size(); }
-    size_t lineSize(size_t line) const { return lines_[line].count; }
-    // Slots are numbered across all lines, line 0 first.
-    size_t numSlots() const { return slots_.size(); }
-    size_t slotIndex(size_t line, size_t index) const { return lines_[line].first + index; }
-    Processor& slot(size_t i) { return *slots_[i].processor; }
+    void setOutputMix(size_t output, OutputMix mix) { mix_.at(output) = mix; }
+
+    // ---- Main thread: the chain as last built or edited ----
+    size_t numSlots() const { return blocks_.size(); }
+    Processor& slot(size_t i) { return *blocks_[i]->processor; }
+    const std::vector<Wire>& wires() const { return wires_; }
+    // Before activation. Returns the block's slot.
+    size_t addBlock(std::unique_ptr<Processor> processor);
+    // Before activation: adds a wire. False (with why) if an end does not
+    // exist, the two ports are already wired, or it would make a loop (but
+    // for a feedback wire, which is heard a block late).
+    bool connect(Port from, Port to, WireGains gains = {}, std::string* error = nullptr, bool feedback = false);
+    // Before activation: feeds slot's side-chain input with what source
+    // passes on. False if that would make a loop.
+    bool setSidechain(size_t slot, size_t source);
+    // Whether wires fit blocks, of which those with keys[i] take a key:
+    // every end exists, no two wires join the same ports, no loop other than
+    // through a feedback wire.
+    bool checkWires(const std::vector<Wire>& wires, const std::vector<bool>& keys, std::string* error) const;
 
     // Before activation: whether a slot starts bypassed.
     void setInitialBypass(size_t slot, bool bypassed);
-    bool bypassed(size_t slot) const { return slots_[slot].bypassed; }
+    bool bypassed(size_t slot) const { return blocks_[slot]->bypassed; }
     // Before activation: what a bypassed slot passes on. Thru (the default)
     // passes its input on untouched; mute passes silence.
-    void setMuteOnBypass(size_t slot, bool mute) { slots_[slot].muteOnBypass = mute; }
-    bool muteOnBypass(size_t slot) const { return slots_[slot].muteOnBypass; }
-    // Before activation: feeds slot's side-chain input with the signal
-    // after source, an earlier slot (in processing order: line 0 first,
-    // then each branch). False if source does not come first.
-    bool setSidechain(size_t slot, size_t source);
+    void setMuteOnBypass(size_t slot, bool mute) {
+        blocks_[slot]->muteOnBypass = mute;
+        blocks_[slot]->thru.set(mute ? 0.0f : 1.0f);
+    }
+    bool muteOnBypass(size_t slot) const { return blocks_[slot]->muteOnBypass; }
 
     // Main thread. Allocates every buffer the audio thread will need.
     bool activate(double sampleRate, uint32_t maxFrames);
     void deactivate();
+    bool active() const { return active_; }
 
-    // Longest tail of any slot that is not bypassed, kInfiniteTail if one reports it.
-    uint32_t tailSamples() const;
-    uint32_t latencySamples() const;
+    // Main thread, while active: the plan for an edit, or nullptr (with
+    // why). Nothing changes until the plan is committed; added processors
+    // belong to the plan from here on, and go with it if it is dropped.
+    PlanPtr prepare(ChainEdit& edit, std::string* error);
+    // Main thread: the blocks and wires above become the plan's, once the
+    // audio thread has been given it.
+    void commit(const Plan& plan);
+    // Main thread: the processors a plan adds, to prime them.
+    static std::vector<Processor*> added(const Plan& plan);
+    // Main thread: a wire's gains, as the next plan will start them. Returns
+    // the wire's id, or 0 if no wire joins the two ports.
+    uint32_t setGains(Port from, Port to, WireGains gains);
 
     // Before activation: when a bypassed slot counts as rung out. After it
     // is bypassed it is fed silence until its output stays below quietLevel
     // for holdFrames, or for capFrames at most, and then no longer processed.
     void setDrain(float quietLevel, uint32_t holdFrames, uint32_t capFrames);
 
-    // Audio thread.
+    // ---- Audio thread ----
     void startProcessing();
     void stopProcessing();
+    // Longest tail of any block played and not bypassed, kInfiniteTail if one reports it.
+    uint32_t tailSamples() const;
     // Clears every plug-in and the chain's own fades.
     void reset();
     // The two halves of reset(). Plug-in resets can be slow (a delay clears
@@ -102,58 +211,139 @@ public:
     // longer processed; one coming back fades its input in, so a delay
     // starts without a click and with no stale echoes. A slot set to mute on
     // bypass fades to and from silence instead of its input. idle: the chain
-    // is not being processed; only the slot's flags change.
+    // is not being processed; only the slot's flags change. Slots are
+    // numbered as in the last plan the chain was given.
     void setBypass(size_t slot, bool bypassed, uint32_t fadeFrames, bool idle = false);
-    // For idle chains: delivers queued parameter changes without processing.
+    // Audio thread: changes what a slot passes on while bypassed, fading
+    // between its input and silence when it is heard.
+    void changeMuteOnBypass(size_t slot, bool mute, uint32_t fadeFrames, bool idle = false);
+    // Moves a wire's gains to new ones over fadeFrames.
+    void setWireGains(uint32_t wire, WireGains gains, uint32_t fadeFrames);
+    // For idle and resting chains: delivers queued parameter changes without processing.
     void flushIdle();
+    // For chains being processed: the same, for the blocks they do not play.
+    void flushUnplayed();
     // in: frames mono samples. outs: numOutputs() buffers, each overwritten.
     void process(const float* in, float* const* outs, uint32_t frames);
     // Any thread: the slot that took longest in one block since the last
     // call, and how long. False if nothing was processed.
     bool takeSlowest(size_t& slot, uint32_t& ns);
+    // Any thread, once active: the highest peak a wire carried, after its
+    // gains, since last asked (0 if it was not played). One reader.
+    float takeWirePeak(uint32_t wire);
+
+    // What Auto measures in one block: what it was fed and what it passed
+    // on, about every 10 ms while it plays. A signal's two channels count
+    // half each, so a mono signal on both measures as it is.
+    static constexpr int kProbeInput = -1, kProbeNone = -2;
+    struct ProbeBin {
+        int slot = kProbeNone; // what was measured
+        uint32_t frames = 0;
+        Measured fed, out;
+    };
+    // Main thread: measures a slot from now on (as the plan numbers it),
+    // the chain's input (kProbeInput, fed and out the same) or nothing.
+    void probe(int slot);
+    // Main thread: the next bin measured, false if there is none yet.
+    bool nextProbeBin(ProbeBin& bin);
+
+    // Edits. receive() takes a plan the engine was given; it is played once
+    // swapped in. It returns a plan it replaces that was never played, to
+    // be freed, or nullptr.
+    Plan* receive(Plan* plan);
+    bool hasPending() const { return pending_ != nullptr; }
+    // While the chain plays: fades out the inputs of the blocks whose inputs
+    // the pending plan changes, ahead of the swap.
+    void prepareSwap(uint32_t fadeFrames);
+    // Plays the pending plan from now on and returns the one it replaces,
+    // to be freed. processing: the chain is being processed, so blocks it
+    // starts playing start processing and those it stops playing stop.
+    // Blocks that start or change inputs fade their input in. stale, for a
+    // chain that is not processing: set if a block held sound and so needs
+    // a reset.
+    Plan* swap(bool processing, uint32_t fadeFrames, bool* stale = nullptr);
 
 private:
-    struct LineState {
-        int parent = -1;
-        size_t afterSlots = 0;
-        size_t first = 0, count = 0; // its slots in slots_
-        float* a[kChainChannels] = {};
-        float* b[kChainChannels] = {};
-    };
-    struct SlotState {
+    struct Block {
         std::unique_ptr<Processor> processor;
-        Ramp inGain{1.0f}; // input fade after a reset
+        Ramp inGain{1.0f}; // input fade after a reset, or around an edit
         Ramp wet{1.0f};    // 1 = processed, 0 = bypassed
         bool bypassed = false;
         bool muteOnBypass = false;
-        int sidechainFrom = -1;                  // slot whose output keys this one
-        float* keyOut[kChainChannels] = {};      // this slot's output, kept for a slot it keys
-        bool draining = false;                   // bypassed, still ringing out on silence
-        bool needsReset = false;                 // bypassed without ringing out
+        Ramp thru{1.0f};         // how much of its input it passes while bypassed: 1 thru, 0 mute
+        bool hasKey = false;     // takes a side-chain input
+        bool activated = false;  // by the chain
+        bool draining = false;   // bypassed, still ringing out on silence
+        bool needsReset = false; // bypassed without ringing out
+        bool processing = false; // between startProcessing and stopProcessing
+        bool stale = false;      // stopped playing while it may have held sound
         uint32_t quietFrames = 0, drainFrames = 0;
+        uint32_t mark = 0;   // in the plan being swapped in
+        uint64_t inputs = 0; // the wires it played from
+        std::vector<float> storage;
+        float* in[kChainChannels] = {};  // its inputs summed, when they need summing
+        float* out[kChainChannels] = {};
+        float* key[kChainChannels] = {}; // its side-chain input, when it has one
+        const float* res[kChainChannels] = {}; // what it passes on in this block
+        ~Block();
     };
 
-    void processSlot(SlotState& s, float**& cur, float**& next, uint32_t frames);
-    void drain(SlotState& s, float** scratch, uint32_t frames);
-    void writeTap(size_t tap, const float* const* signal, float* out, uint32_t frames) const;
+    void allocate(Block& b);
+    PlanPtr makePlan(std::vector<std::shared_ptr<Block>> blocks, std::vector<Wire> wires);
+    const float* const* gather(Plan& plan, uint32_t first, uint32_t count, float* const* dst, uint32_t frames, bool into = false);
+    void processBlock(Block& b, const float* const* input, uint32_t frames);
+    void drain(Block& b, uint32_t frames);
+    void fadeIn(Block& b, uint32_t fadeFrames);
+    void writeTap(OutputMix mix, const float* const* signal, float* out, uint32_t frames) const;
+    void measureProbe(const float* const* fed, const float* const* out, uint32_t frames);
+    Plan* latest() const { return pending_ ? pending_ : plan_; }
 
     std::string name_;
-    std::vector<LineState> lines_;
-    std::vector<SlotState> slots_;
-    std::vector<OutputTap> taps_;
+    std::vector<OutputMix> mix_; // one per output
+    size_t input_ = 0;
+
+    // Main thread.
+    std::vector<std::shared_ptr<Block>> blocks_;
+    std::vector<Wire> wires_;
+    uint32_t nextWire_ = 1;
+
+    // Audio thread, once active.
+    Plan* plan_ = nullptr;
+    Plan* pending_ = nullptr;
+    uint32_t mark_ = 0;
+    double sampleRate_ = 0;
     uint32_t maxFrames_ = 0;
     bool active_ = false;
     std::vector<float> storage_;
-    std::vector<float> gainScratch_, wetScratch_;
+    std::vector<float> gainScratch_, wetScratch_, rampScratch_;
+    float* inBuf_[kChainChannels] = {};
     float* tmp_[kChainChannels] = {};
+    float* mixBuf_[kChainChannels] = {};
     float* silence_[kChainChannels] = {};
     float quietLevel_ = 3.2e-5f; // -90 dB
     uint32_t drainHold_ = 14400, drainCap_ = 480000;
     bool holdTails_ = false;
     std::atomic<int> slowSlot_{-1};
     std::atomic<uint32_t> slowNs_{0};
+    // Each wire's peak, by its id (wrapping: a chain's live wires are never
+    // that many ids apart).
+    static constexpr uint32_t kWireMeters = 1024;
+    std::unique_ptr<std::atomic<float>[]> wirePeaks_;
+    void meter(uint32_t wire, float peak) {
+        std::atomic<float>& m = wirePeaks_[wire & (kWireMeters - 1)];
+        if (peak > m.load(std::memory_order_relaxed))
+            m.store(peak, std::memory_order_relaxed);
+    }
     uint32_t tailMin_ = 0;
-    size_t input_ = 0;
+    // Auto's probe: made when first asked for, before the audio thread
+    // can see a slot to measure.
+    std::atomic<int> probeSlot_{kProbeNone};
+    std::unique_ptr<RingQueue<ProbeBin, 1024>> probeBins_;
+    int probing_ = kProbeNone; // audio thread: what it measures
+    ProbeBin probeBin_;
+    KWeighting kWeighting_;
+    double probeK_[2 * kChainChannels][4] = {}; // K-weighting states: fed, then out
+    uint32_t probeLength_ = 480;
 };
 
 } // namespace cue

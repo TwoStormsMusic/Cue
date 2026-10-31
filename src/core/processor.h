@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/editor_edits.h"
+
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -17,6 +19,12 @@ constexpr uint32_t kInfiniteTail = std::numeric_limits<uint32_t>::max();
 // thread), for plug-ins that check which thread calls them.
 void markAudioThread();
 bool isAudioThread();
+
+// How big a plug-in's editor wants to be, and whether it takes any size.
+struct EditorSize {
+    uint32_t width = 0, height = 0;
+    bool resizable = false;
+};
 
 struct ParamInfo {
     uint32_t id;
@@ -50,8 +58,8 @@ public:
     virtual void process(const float* const* in, float* const* out, uint32_t frames) = 0;
 
     // Called on the audio thread, between processing, for processors in idle
-    // scenes, so queued parameter changes still reach a plug-in that is not
-    // being processed. Must be cheap when there is nothing to do.
+    // or resting chains and for bypassed blocks, so queued parameter changes
+    // still reach a plug-in that is not being processed. Must be cheap when there is nothing to do.
     virtual void flushIdle() {}
 
     // MIDI for plug-ins that take it (a wah moved by an expression pedal).
@@ -75,10 +83,51 @@ public:
     virtual bool setParam(uint32_t /*id*/, double /*value*/) { return false; }
     // Main thread.
     virtual std::vector<ParamInfo> params() const { return {}; }
+    // Main thread: a parameter's value now, as setParam takes it, and how the
+    // plug-in writes a value ("-3.0 dB"). False or empty when it cannot say.
+    virtual bool paramValue(uint32_t /*id*/, double& /*value*/) const { return false; }
+    virtual std::string paramText(uint32_t /*id*/, double /*value*/) const { return {}; }
+    // Main thread: what a typed value ("-3 dB", "250 ms") is, as setParam
+    // takes it. False when the plug-in cannot read it.
+    virtual bool paramFromText(uint32_t /*id*/, const std::string& /*text*/, double& /*value*/) const { return false; }
 
     virtual uint32_t latencySamples() const { return 0; }
     // Length of the output tail after input stops; kInfiniteTail if unknown.
     virtual uint32_t tailSamples() const { return 0; }
+
+    // ---- the plug-in's own editor window ----
+    //
+    // The host makes the window and the plug-in draws inside it, so Cue
+    // decides where editors go. Every call here is on the main thread; none
+    // of it touches the audio thread, so an editor cannot cause a dropout
+    // (what the editor draws can still cost CPU, which is why they are
+    // opened by hand).
+    virtual bool hasEditor() const { return false; }
+    // Puts the editor inside window (an X11 window id), which the host sizes
+    // to what comes back, and shows it.
+    virtual bool openEditor(unsigned long /*window*/, EditorSize* /*size*/, std::string* error) {
+        *error = "this plug-in has no editor";
+        return false;
+    }
+    virtual void closeEditor() {}
+    virtual bool editorOpen() const { return false; }
+    // Whether its window needs the window manager to give it the keys. A
+    // plug-in under Wine (yabridge) types only into a window that is active;
+    // others take the keys themselves when a box is tapped.
+    virtual bool editorNeedsFocus() const { return false; }
+    // Main thread: what its own editor changed since the last call, each
+    // knob from where it was grabbed to where it was let go.
+    virtual void takeEditorEdits(std::vector<ParamEdit>& /*out*/) {}
+    // The window was resized by hand: the editor lays out again (false if it
+    // would rather keep the size it has).
+    virtual bool editorResized(uint32_t /*width*/, uint32_t /*height*/) { return false; }
+    // The size the plug-in has asked for since the last call, if any: its
+    // own zoom setting, say.
+    virtual bool takeEditorResize(EditorSize* /*size*/) { return false; }
+    // The plug-in asked the host to watch these file descriptors (its own
+    // connection to the display, usually); onEditorFd says one is ready.
+    virtual void editorFds(std::vector<int>& /*out*/) const {}
+    virtual void onEditorFd(int /*fd*/) {}
 };
 
 } // namespace cue
